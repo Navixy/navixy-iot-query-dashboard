@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { Panel } from '@/types/dashboard-types';
 import { toSafePanelHtml } from './panelHtml';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface TextPanelProps {
   panel: Panel;
@@ -15,6 +16,7 @@ interface TextPanelProps {
  * - options.content: The content string
  */
 export function TextPanel({ panel }: TextPanelProps) {
+  const { t } = useLocale();
   // Support both formats:
   // 1. Standard format: options.mode and options.content
   // 2. x-navixy format: x-navixy.text.format and x-navixy.text.content
@@ -59,7 +61,7 @@ export function TextPanel({ panel }: TextPanelProps) {
     if (!content) {
       return (
         <div className="text-muted-foreground text-sm italic">
-          No content provided
+          {t('report_view.text_panel.paragraph.empty')}
         </div>
       );
     }
@@ -67,7 +69,7 @@ export function TextPanel({ panel }: TextPanelProps) {
     if (rendered && 'error' in rendered) {
       return (
         <div className="text-destructive text-sm">
-          Error rendering {htmlMode}: {rendered.error}
+          {t('report_view.text_panel.error', { mode: htmlMode ?? '', detail: rendered.error })}
         </div>
       );
     }

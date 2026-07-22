@@ -3,6 +3,7 @@ import { Check, ChevronsUpDown } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { boundPickerRows, toggleGroup } from '@/lib/chartGroups';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { Button } from '@/components/ui/button';
 import {
   Command,
@@ -42,6 +43,7 @@ export function ChartSeriesPicker({
   isDefaultSelection,
   onChange,
 }: ChartSeriesPickerProps) {
+  const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
 
@@ -72,15 +74,22 @@ export function ChartSeriesPicker({
           aria-expanded={open}
           className="h-7 px-2 text-xs font-normal text-muted-foreground print:hidden"
         >
-          Series: {plottedGroups.length} of {allGroups.length}
+          {t('composite_report.series_selector.trigger.label', {
+            count: plottedGroups.length,
+            total: allGroups.length,
+          })}
           <ChevronsUpDown className="ml-1.5 h-3.5 w-3.5 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-[260px] p-0" align="center">
         <Command shouldFilter={false}>
-          <CommandInput placeholder="Search groups..." value={search} onValueChange={setSearch} />
+          <CommandInput
+            placeholder={t('composite_report.series_selector.search_input.placeholder.instruction')}
+            value={search}
+            onValueChange={setSearch}
+          />
           <CommandList className="max-h-[280px]">
-            <CommandEmpty>No groups found.</CommandEmpty>
+            <CommandEmpty>{t('composite_report.series_selector.paragraph.empty')}</CommandEmpty>
             <CommandGroup>
               {rows.map(group => {
                 const colorIdx = plottedGroups.indexOf(group);
@@ -93,7 +102,9 @@ export function ChartSeriesPicker({
                     onSelect={() => onChange(toggleGroup(allGroups, plottedGroups, group))}
                     // cmdk's aria-selected tracks the keyboard highlight, not
                     // the checkmark, so plotted-ness needs saying out loud.
-                    aria-label={`${group}, ${isPlotted ? 'plotted' : 'not plotted'}`}
+                    aria-label={isPlotted
+                      ? t('composite_report.series_selector.plotted_option.label', { group })
+                      : t('composite_report.series_selector.unplotted_option.label', { group })}
                   >
                     <Check className={cn('mr-2 h-4 w-4 shrink-0', isPlotted ? 'opacity-100' : 'opacity-0')} />
                     <span
@@ -114,7 +125,9 @@ export function ChartSeriesPicker({
         </Command>
         {hiddenCount > 0 && (
           <div className="border-t px-2 py-1.5 text-center text-xs text-muted-foreground">
-            {hiddenCount.toLocaleString()} more match. Search to narrow them down.
+            {t('composite_report.series_selector.overflow_notice.paragraph', {
+              count: hiddenCount.toLocaleString(),
+            })}
           </div>
         )}
         {!isDefaultSelection && (
@@ -125,7 +138,7 @@ export function ChartSeriesPicker({
               className="h-7 w-full justify-center text-xs font-normal text-muted-foreground"
               onClick={() => onChange([])}
             >
-              Reset to default
+              {t('composite_report.series_selector.reset_button.cta')}
             </Button>
           </div>
         )}

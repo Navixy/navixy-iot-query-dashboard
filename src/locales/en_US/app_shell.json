@@ -1,0 +1,60 @@
+{
+  "header": {
+    "settings_option": {
+      "menu_item": "Settings"
+    },
+    "sign_out_option": {
+      "menu_item": "Sign out"
+    }
+  },
+  "navigation": {
+    "toggle_button": {
+      "label": "Toggle sidebar"
+    }
+  },
+  "search_form": {
+    "query_input": {
+      "placeholder": {
+        "instruction": "Search data, dashboards, reports, SQL…"
+      }
+    },
+    "results_list": {
+      "paragraph": {
+        "loading": "Loading items…",
+        "empty": "No items match your keywords"
+      },
+      "error": "Failed to load items"
+    },
+    "result_item": {
+      "matched_panels": {
+        "label": "Panels: {titles}"
+      },
+      "panels_overflow": {
+        "label": "+{count}"
+      },
+      "matched_sql": {
+        "label": "SQL: {snippets}"
+      }
+    }
+  },
+  "demo_banner": {
+    "paragraph": "Changes are stored locally in your browser. No modifications will be saved to the database.",
+    "clear_button": {
+      "cta": "Clear and exit"
+    }
+  },
+  "exit_demo_dialog": {
+    "title": {
+      "question": "Exit demo mode?"
+    },
+    "paragraph": {
+      "warning": "This will clear all demo data stored in your browser and sign you out. Any changes you made in demo mode will be permanently deleted."
+    },
+    "confirm_button": {
+      "cta": {
+        "default": "Clear data and exit",
+        "loading": "Clearing…"
+      }
+    }
+  }
+}

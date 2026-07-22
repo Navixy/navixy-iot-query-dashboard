@@ -10,6 +10,7 @@ import type { ResizeHandle } from '../geometry/resize';
 import { pixelsToGrid, gridToPixels, GRID_UNIT_HEIGHT } from '../../layout/geometry/grid';
 import { Copy, Pencil, Trash2 } from 'lucide-react';
 import { cmdDuplicatePanel, cmdDeletePanel } from '../state/commands';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface PanelCardProps {
   panel: Panel;
@@ -37,6 +38,7 @@ export const PanelCard: React.FC<PanelCardProps> = ({
   customTop,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
+  const { t } = useLocale();
   if (!panel.id) {
     return null;
   }
@@ -118,7 +120,7 @@ export const PanelCard: React.FC<PanelCardProps> = ({
                   e.stopPropagation();
                   onEditPanel(panel);
                 }}
-                title="Edit panel"
+                title={t('report_view.panel_toolbar.edit_button.tooltip')}
               >
                 <Pencil className="h-4 w-4 text-primary-foreground" strokeWidth={2.5} />
               </button>
@@ -137,7 +139,7 @@ export const PanelCard: React.FC<PanelCardProps> = ({
                       cmdDuplicatePanel(panel.id);
                     }
                   }}
-                  title="Duplicate panel"
+                  title={t('report_view.panel_toolbar.duplicate_button.tooltip')}
                 >
                   <Copy className="h-4 w-4" />
                 </button>
@@ -149,7 +151,7 @@ export const PanelCard: React.FC<PanelCardProps> = ({
                       cmdDeletePanel(panel.id);
                     }
                   }}
-                  title="Delete panel"
+                  title={t('report_view.panel_toolbar.delete_button.tooltip')}
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>

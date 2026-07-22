@@ -9,6 +9,7 @@ import { useMemo } from 'react';
 import { X } from 'lucide-react';
 import { useChartPresetCatalog } from '@/hooks/use-chart-preset-catalog';
 import { PresetCard } from './PresetCard';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 const byOrder = <T extends { order?: number }>(a: T, b: T) => (a.order ?? 0) - (b.order ?? 0);
 
@@ -23,6 +24,7 @@ interface ChartLibraryPanelProps {
 }
 
 export function ChartLibraryPanel({ onClose }: ChartLibraryPanelProps) {
+  const { t } = useLocale();
   const { data, isLoading, isError } = useChartPresetCatalog();
 
   const groups = useMemo(() => [...(data?.groups ?? [])].sort(byOrder), [data]);
@@ -34,13 +36,13 @@ export function ChartLibraryPanel({ onClose }: ChartLibraryPanelProps) {
       style={{ width: `${CHART_DOCK_WIDTH_REM}rem` }}
     >
       <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-700">
-        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Chart Library</h3>
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('report_view.chart_library.header.title')}</h3>
         {onClose && (
           <button
             type="button"
             onClick={onClose}
             className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-300"
-            aria-label="Close chart library"
+            aria-label={t('report_view.chart_library.close_button.label')}
           >
             <X className="h-4 w-4" />
           </button>
@@ -48,10 +50,10 @@ export function ChartLibraryPanel({ onClose }: ChartLibraryPanelProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3">
-        {isLoading && <p className="text-sm text-gray-500">Loading…</p>}
-        {isError && <p className="text-sm text-red-500">Failed to load chart library</p>}
+        {isLoading && <p className="text-sm text-gray-500">{t('common.states.loading')}</p>}
+        {isError && <p className="text-sm text-red-500">{t('report_view.chart_library.error')}</p>}
         {!isLoading && !isError && groups.length === 0 && (
-          <p className="text-sm text-gray-500">No charts available</p>
+          <p className="text-sm text-gray-500">{t('report_view.chart_library.paragraph.empty')}</p>
         )}
 
         {groups.map((group) => (

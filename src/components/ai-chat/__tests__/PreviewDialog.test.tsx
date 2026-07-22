@@ -141,7 +141,7 @@ describe('PreviewDialog', () => {
     mount({ result: { title: 'Broken', report_schema: { nope: true } } });
 
     await waitFor(() => {
-      expect(screen.getByText(/could not be read as a dashboard/i)).toBeTruthy();
+      expect(screen.getByText(/failed to read this result as a dashboard/i)).toBeTruthy();
     });
     expect(rendererProps.calls).toHaveLength(0);
     // ...and no panel banner beside it to contradict the message.
@@ -174,7 +174,7 @@ describe('PreviewDialog — when the globals cannot be read', () => {
       mount();
 
       await waitFor(() => {
-        expect(screen.getByText(/global variables could not be read/i)).toBeTruthy();
+        expect(screen.getByText(/failed to read your global variables/i)).toBeTruthy();
       });
       // The important half: no renderer, so not one statement ran.
       expect(screen.queryByTestId('renderer')).toBeNull();
@@ -190,7 +190,7 @@ describe('PreviewDialog — when the globals cannot be read', () => {
     mount({ onPreviewComplete });
 
     await waitFor(() => {
-      expect(screen.getByText(/global variables could not be read/i)).toBeTruthy();
+      expect(screen.getByText(/failed to read your global variables/i)).toBeTruthy();
     });
     expect(onPreviewComplete).not.toHaveBeenCalled();
   });
@@ -199,7 +199,7 @@ describe('PreviewDialog — when the globals cannot be read', () => {
     getGlobalVariables.mockRejectedValueOnce(new Error('offline'));
     mount();
     await waitFor(() => {
-      expect(screen.getByText(/global variables could not be read/i)).toBeTruthy();
+      expect(screen.getByText(/failed to read your global variables/i)).toBeTruthy();
     });
 
     getGlobalVariables.mockResolvedValue({ data: globals });
@@ -207,7 +207,7 @@ describe('PreviewDialog — when the globals cannot be read', () => {
 
     await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
     expect(rendererProps.calls.at(-1)?.globalVariables).toEqual(globals);
-    expect(screen.queryByText(/global variables could not be read/i)).toBeNull();
+    expect(screen.queryByText(/failed to read your global variables/i)).toBeNull();
   });
 });
 
@@ -236,7 +236,7 @@ describe('PreviewDialog — reporting a finished preview', () => {
     rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3, unverifiable: 0 };
     mount({ onPreviewComplete });
 
-    await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
+    await waitFor(() => expect(banner().textContent).toBe('Loading panels: 3…'));
     expect(onPreviewComplete).not.toHaveBeenCalled();
   });
 
@@ -250,12 +250,12 @@ describe('PreviewDialog — reporting a finished preview', () => {
     await waitFor(() => expect(onPreviewComplete).toHaveBeenCalledTimes(1));
   });
 
-  it('never reports when the schema could not be read as a dashboard', async () => {
+  it('never reports when the schema cannot be read as a dashboard', async () => {
     const onPreviewComplete = vi.fn();
     mount({ result: { title: 'Broken', report_schema: { nope: true } }, onPreviewComplete });
 
     await waitFor(() => {
-      expect(screen.getByText(/could not be read as a dashboard/i)).toBeTruthy();
+      expect(screen.getByText(/failed to read this result as a dashboard/i)).toBeTruthy();
     });
     expect(onPreviewComplete).not.toHaveBeenCalled();
   });
@@ -287,21 +287,21 @@ describe('PreviewDialog — the panel banner', () => {
     await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
 
     expect(banner().textContent)
-      .toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
+      .toBe('Panels loaded: 1 of 2. Failed panels: 1. Check them before applying.');
     expect(bannerRow().className).toContain('text-destructive');
   });
 
-  it('pluralises the failures, since "1 panel failed" about three is a lie', async () => {
+  it('names a larger failure count just as plainly', async () => {
     await withStatus({ total: 5, loaded: 2, failed: 3, pending: 0, unverifiable: 0 });
 
     expect(banner().textContent)
-      .toBe('2 of 5 panels loaded. 3 panels failed — check them before applying.');
+      .toBe('Panels loaded: 2 of 5. Failed panels: 3. Check them before applying.');
   });
 
   it('says everything loaded, without the destructive treatment', async () => {
     await withStatus({ total: 11, loaded: 11, failed: 0, pending: 0, unverifiable: 0 });
 
-    expect(banner().textContent).toBe('All 11 panels loaded.');
+    expect(banner().textContent).toBe('All panels loaded: 11.');
     expect(bannerRow().className).not.toContain('text-destructive');
   });
 
@@ -318,7 +318,7 @@ describe('PreviewDialog — the panel banner', () => {
         },
       },
     });
-    await waitFor(() => expect(banner().textContent).toBe('All 2 panels loaded.'));
+    await waitFor(() => expect(banner().textContent).toBe('All panels loaded: 2.'));
 
     const subtitle = screen.getByText(/previewed against your data/i);
     expect(subtitle.textContent).not.toMatch(/\d/);
@@ -328,17 +328,17 @@ describe('PreviewDialog — the panel banner', () => {
     rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3, unverifiable: 0 };
     mount();
 
-    await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
+    await waitFor(() => expect(banner().textContent).toBe('Loading panels: 3…'));
   });
 
   it('announces the outcome, not one line per panel', async () => {
     // Panels execute sequentially, so the visible sentence changes once per panel.
-    // A live region carrying it reads "Loading 11 panels…", "Loading 10 panels…",
+    // A live region carrying it reads "Loading panels: 11…", "Loading panels: 10…",
     // eleven times over. (!64 review round 4, finding 9)
     rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3, unverifiable: 0 };
     mount();
 
-    await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
+    await waitFor(() => expect(banner().textContent).toBe('Loading panels: 3…'));
     expect(announced()).toBe('Loading panels…');
   });
 
@@ -347,6 +347,6 @@ describe('PreviewDialog — the panel banner', () => {
     // not reliably read out.
     await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
 
-    expect(announced()).toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
+    expect(announced()).toBe('Panels loaded: 1 of 2. Failed panels: 1. Check them before applying.');
   });
 });

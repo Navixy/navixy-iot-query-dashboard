@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { ChatBubble } from '@/types/agent';
 import { MarkdownMessage } from './MarkdownMessage';
 import { ResultCard } from './ResultCard';
@@ -16,6 +17,7 @@ interface ChatTranscriptProps {
 }
 
 export function ChatTranscript({ bubbles, isPending, canApply }: ChatTranscriptProps) {
+  const { t } = useLocale();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // aria-live is flipped on AFTER the first commit — the "seed history in a
@@ -43,7 +45,7 @@ export function ChatTranscript({ bubbles, isPending, canApply }: ChatTranscriptP
     <div
       ref={scrollRef}
       role="log"
-      aria-label="Conversation with the AI assistant"
+      aria-label={t('ai_chat.transcript.label')}
       aria-live={announceLive ? 'polite' : 'off'}
       className="h-full overflow-y-auto py-6"
     >

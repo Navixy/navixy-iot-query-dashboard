@@ -14,6 +14,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ChevronsUpDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface MultiSelectFilterControlProps {
   label: string;
@@ -36,6 +37,7 @@ export const MultiSelectFilterControl: React.FC<MultiSelectFilterControlProps> =
   error,
   onRetry,
 }) => {
+  const { t } = useLocale();
   const [search, setSearch] = useState('');
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
@@ -45,14 +47,14 @@ export const MultiSelectFilterControl: React.FC<MultiSelectFilterControlProps> =
   }, [options, search]);
 
   const triggerText = loading
-    ? 'Loading…'
+    ? t('common.states.loading')
     : error && options.length === 0
-    ? 'Failed to load'
+    ? t('report_view.filter_control.trigger_button.label.failure')
     : selected.length === 0
-    ? 'All'
+    ? t('report_view.filter_control.trigger_button.label.empty')
     : selected.length <= 2
     ? selected.join(', ')
-    : `${selected.length} selected`;
+    : t('report_view.filter_control.trigger_button.summary.label', { count: selected.length });
 
   const toggle = (val: string) => {
     if (selectedSet.has(val)) onChange(selected.filter((v) => v !== val));
@@ -80,7 +82,7 @@ export const MultiSelectFilterControl: React.FC<MultiSelectFilterControlProps> =
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search…"
+              placeholder={t('report_view.filter_control.search_input.placeholder.instruction')}
               className="h-8 text-xs"
             />
           </div>
@@ -91,7 +93,7 @@ export const MultiSelectFilterControl: React.FC<MultiSelectFilterControlProps> =
               onClick={() => onChange(options)}
               disabled={loading || options.length === 0}
             >
-              Select all
+              {t('report_view.filter_control.select_all_button.cta')}
             </button>
             <button
               type="button"
@@ -99,24 +101,24 @@ export const MultiSelectFilterControl: React.FC<MultiSelectFilterControlProps> =
               onClick={() => onChange([])}
               disabled={selected.length === 0}
             >
-              Clear
+              {t('report_view.filter_control.clear_button.cta')}
             </button>
           </div>
           <div className="max-h-[240px] overflow-y-auto p-1">
             {loading ? (
-              <div className="p-3 text-xs text-muted-foreground text-center">Loading values…</div>
+              <div className="p-3 text-xs text-muted-foreground text-center">{t('report_view.filter_control.values_list.paragraph.loading')}</div>
             ) : error && options.length === 0 ? (
               <div className="p-3 text-xs text-center space-y-2">
-                <p className="text-amber-600">Couldn't load values.</p>
+                <p className="text-amber-600">{t('report_view.filter_control.values_list.load_error.paragraph.failure')}</p>
                 {onRetry && (
                   <button type="button" className="text-[#379EF9] hover:underline" onClick={onRetry}>
-                    Retry
+                    {t('common.actions.retry.cta')}
                   </button>
                 )}
               </div>
             ) : filtered.length === 0 ? (
               <div className="p-3 text-xs text-muted-foreground text-center">
-                {options.length === 0 ? 'No values' : 'No match'}
+                {options.length === 0 ? t('report_view.filter_control.values_list.paragraph.empty') : t('report_view.filter_control.values_list.search_empty.paragraph.empty')}
               </div>
             ) : (
               filtered.map((opt) => (

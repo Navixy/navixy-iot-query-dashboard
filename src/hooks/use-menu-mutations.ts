@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { apiService } from '@/services/api';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { 
   MenuTree, 
   ReorderPayload, 
@@ -35,6 +36,7 @@ export function useMenuTree(includeDeleted: boolean = false) {
 // Reorder menu mutation
 export function useReorderMenuMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async (payload: ReorderPayload): Promise<ReorderResponse> => {
@@ -47,15 +49,15 @@ export function useReorderMenuMutation() {
     onSuccess: (data) => {
       // Invalidate and refetch to get the latest data with correct versions
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-      toast.success('Menu reordered successfully');
+      toast.success(t('menu_editor.reorder_toast.paragraph.success'));
     },
     onError: (error: Error) => {
       // If it's a version conflict, refresh the data to get latest versions
       if (error.message.includes('Version conflict') || error.message.includes('409')) {
         queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-        toast.error('Menu was updated elsewhere. Please try again.');
+        toast.error(t('menu_editor.reorder_toast.conflict.paragraph.failure'));
       } else {
-        toast.error(`Failed to reorder menu: ${error.message}`);
+        toast.error(t('menu_editor.reorder_toast.paragraph.failure'), { description: error.message });
       }
     },
   });
@@ -64,6 +66,7 @@ export function useReorderMenuMutation() {
 // Rename section mutation
 export function useRenameSectionMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async ({ id, name, version }: { id: string; name: string; version: number }): Promise<RenameResponse> => {
@@ -88,10 +91,10 @@ export function useRenameSectionMutation() {
         return updatedData;
       });
 
-      toast.success('Section renamed successfully');
+      toast.success(t('menu_editor.rename_section_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to rename section: ${error.message}`);
+      toast.error(t('menu_editor.rename_section_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -99,6 +102,7 @@ export function useRenameSectionMutation() {
 // Rename report mutation
 export function useRenameReportMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async ({ id, name, version }: { id: string; name: string; version: number }): Promise<RenameResponse> => {
@@ -135,10 +139,10 @@ export function useRenameReportMutation() {
         return updatedData;
       });
 
-      toast.success('Dashboard renamed successfully');
+      toast.success(t('menu_editor.rename_report_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to rename dashboard: ${error.message}`);
+      toast.error(t('menu_editor.rename_report_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -146,6 +150,7 @@ export function useRenameReportMutation() {
 // Delete section mutation
 export function useDeleteSectionMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async ({ id, strategy }: { id: string; strategy: 'move_children_to_root' | 'delete_children' }): Promise<DeleteSectionResponse> => {
@@ -159,14 +164,14 @@ export function useDeleteSectionMutation() {
       // Invalidate and refetch the menu tree
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
 
-      const message = variables.strategy === 'move_children_to_root' 
-        ? `Section deleted. ${data.affectedReports} reports moved to root.`
-        : `Section deleted. ${data.affectedReports} reports also deleted.`;
-      
+      const message = variables.strategy === 'move_children_to_root'
+        ? t('menu_editor.delete_section_toast.moved.paragraph.success', { count: data.affectedReports })
+        : t('menu_editor.delete_section_toast.deleted.paragraph.success', { count: data.affectedReports });
+
       toast.success(message);
     },
     onError: (error: Error) => {
-      toast.error(`Failed to delete section: ${error.message}`);
+      toast.error(t('menu_editor.delete_section_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -174,6 +179,7 @@ export function useDeleteSectionMutation() {
 // Delete report mutation
 export function useDeleteReportMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async (id: string): Promise<DeleteReportResponse> => {
@@ -186,10 +192,10 @@ export function useDeleteReportMutation() {
     onSuccess: () => {
       // Invalidate and refetch the menu tree
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-      toast.success('Dashboard deleted successfully');
+      toast.success(t('menu_editor.delete_report_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to delete dashboard: ${error.message}`);
+      toast.error(t('menu_editor.delete_report_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -197,6 +203,7 @@ export function useDeleteReportMutation() {
 // Restore section mutation (for future admin functionality)
 export function useRestoreSectionMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async (id: string): Promise<{ ok: boolean }> => {
@@ -208,10 +215,10 @@ export function useRestoreSectionMutation() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-      toast.success('Section restored successfully');
+      toast.success(t('menu_editor.restore_section_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to restore section: ${error.message}`);
+      toast.error(t('menu_editor.restore_section_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -219,6 +226,7 @@ export function useRestoreSectionMutation() {
 // Restore report mutation (for future admin functionality)
 export function useRestoreReportMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async (id: string): Promise<{ ok: boolean }> => {
@@ -230,10 +238,10 @@ export function useRestoreReportMutation() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-      toast.success('Dashboard restored successfully');
+      toast.success(t('menu_editor.restore_report_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to restore dashboard: ${error.message}`);
+      toast.error(t('menu_editor.restore_report_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -241,6 +249,7 @@ export function useRestoreReportMutation() {
 // Create section mutation
 export function useCreateSectionMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async ({ name, sortOrder }: { name: string; sortOrder?: number }) => {
@@ -252,10 +261,10 @@ export function useCreateSectionMutation() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-      toast.success('Section created successfully');
+      toast.success(t('menu_editor.create_section_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to create section: ${error.message}`);
+      toast.error(t('menu_editor.create_section_toast.paragraph.failure'), { description: error.message });
     },
   });
 }
@@ -263,6 +272,7 @@ export function useCreateSectionMutation() {
 // Create report mutation
 export function useCreateReportMutation() {
   const queryClient = useQueryClient();
+  const { t } = useLocale();
 
   return useMutation({
     mutationFn: async (reportData: {
@@ -280,10 +290,10 @@ export function useCreateReportMutation() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: menuQueryKeys.all });
-      toast.success('Dashboard created successfully');
+      toast.success(t('menu_editor.create_dashboard_toast.paragraph.success'));
     },
     onError: (error: Error) => {
-      toast.error(`Failed to create dashboard: ${error.message}`);
+      toast.error(t('menu_editor.create_dashboard_toast.paragraph.failure'), { description: error.message });
     },
   });
 }

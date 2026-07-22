@@ -61,6 +61,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useMenuTree, useReorderMenuMutation } from '@/hooks/use-menu-mutations';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { RenameModal, DeleteModal, CreateSectionModal, CreateReportModal, CreateCompositeReportModal } from './MenuModals';
 import type { MenuTree, DragItem, DropResult } from '@/types/menu-editor';
 
@@ -73,6 +74,7 @@ interface SortableSectionItemProps {
 }
 
 function SortableSectionItem({ section, isEditMode, onRename, onDelete }: SortableSectionItemProps) {
+  const { t } = useLocale();
   const {
     attributes,
     listeners,
@@ -132,15 +134,15 @@ function SortableSectionItem({ section, isEditMode, onRename, onDelete }: Sortab
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={() => onRename(section.id, section.name)}>
               <Edit2 className="h-4 w-4 mr-2" />
-              Rename
+              {t('common.actions.rename.cta')}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem 
+            <DropdownMenuItem
               onClick={() => onDelete(section.id, section.name)}
               className="text-destructive"
             >
               <Trash2 className="h-4 w-4 mr-2" />
-              Delete
+              {t('common.actions.delete.cta.default')}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -159,6 +161,7 @@ interface SortableReportItemProps {
 }
 
 function SortableReportItem({ report, parentSectionId, isEditMode, onRename, onDelete }: SortableReportItemProps) {
+  const { t } = useLocale();
   const navigate = useNavigate();
   const location = useLocation();
   
@@ -259,15 +262,15 @@ function SortableReportItem({ report, parentSectionId, isEditMode, onRename, onD
           <DropdownMenuContent align="end">
             <DropdownMenuItem onClick={() => onRename(report.id, report.name)}>
               <Edit2 className="h-4 w-4 mr-2" />
-              Rename
+              {t('common.actions.rename.cta')}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem 
+            <DropdownMenuItem
               onClick={() => onDelete(report.id, report.name)}
               className="text-destructive"
             >
               <Trash2 className="h-4 w-4 mr-2" />
-              Delete
+              {t('common.actions.delete.cta.default')}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -313,6 +316,7 @@ function DroppableDropZone({ id, type, sectionId, isEditMode, children }: Droppa
 
 // Main MenuEditor Component
 export function MenuEditor() {
+  const { t } = useLocale();
   const { state } = useSidebar();
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -589,7 +593,7 @@ export function MenuEditor() {
       <SidebarGroup>
         <SidebarGroupContent>
           <div className="p-4 text-center text-muted-foreground">
-            Loading menu...
+            {t('menu_editor.tree.loading.paragraph.loading')}
           </div>
         </SidebarGroupContent>
       </SidebarGroup>
@@ -601,7 +605,7 @@ export function MenuEditor() {
       <SidebarGroup>
         <SidebarGroupContent>
           <div className="p-4 text-center text-destructive">
-            Failed to load menu
+            {t('menu_editor.tree.load_error.paragraph.failure')}
           </div>
         </SidebarGroupContent>
       </SidebarGroup>
@@ -613,13 +617,13 @@ export function MenuEditor() {
       <SidebarContent>
           {/* Header */}
           <SidebarGroup className="pb-1 pt-6">
-            <SidebarGroupLabel>Dashboards</SidebarGroupLabel>
+            <SidebarGroupLabel>{t('menu_editor.header.title')}</SidebarGroupLabel>
             <SidebarGroupContent>
               <div className="flex items-center gap-2 px-2 py-1">
                 <div className="relative flex-1">
                   <Search className="absolute left-2 top-2 h-4 w-4 text-muted-foreground" />
                   <Input
-                    placeholder="Search reports..."
+                    placeholder={t('menu_editor.header.search_input.placeholder.instruction')}
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     className="pl-8 h-8"
@@ -676,7 +680,7 @@ export function MenuEditor() {
                               ))}
                               {(!filteredSectionReports[section.id] || filteredSectionReports[section.id].length === 0) && (
                                 <div className="text-xs text-muted-foreground p-2 text-center">
-                                  Drop reports here
+                                  {t('menu_editor.tree.drop_zone.paragraph.instruction')}
                                 </div>
                               )}
                             </DroppableDropZone>
@@ -702,7 +706,7 @@ export function MenuEditor() {
                     {isEditMode && (
                       <div className="px-2 py-1 mt-2">
                         <div className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
-                          NO SECTION
+                          {t('common.no_section.label')}
                         </div>
                       </div>
                     )}
@@ -721,7 +725,7 @@ export function MenuEditor() {
                         ))}
                         {filteredRootReports.length === 0 && (
                           <div className="text-xs text-muted-foreground p-2 text-center">
-                            Drop reports here
+                            {t('menu_editor.tree.drop_zone.paragraph.instruction')}
                           </div>
                         )}
                       </DroppableDropZone>
@@ -755,7 +759,7 @@ export function MenuEditor() {
                     className="w-full justify-center bg-[var(--accent)] dark:bg-gray-800 hover:bg-[var(--accent-hover)] dark:hover:bg-gray-700 border border-[var(--accent)] dark:border-gray-600 text-white dark:text-gray-100 font-medium shadow-sm"
                   >
                     <Edit2 className="h-4 w-4 mr-2" />
-                    Done editing
+                    {t('menu_editor.done_editing_button.cta')}
                   </Button>
                 </div>
               </SidebarGroupContent>
@@ -772,34 +776,34 @@ export function MenuEditor() {
                       <DropdownMenuTrigger asChild>
                         <SidebarMenuButton className="w-full justify-start">
                           <Wrench className="h-4 w-4" />
-                          <span>Tools</span>
+                          <span>{t('menu_editor.tools_menu.trigger.label')}</span>
                           <ChevronDown className="h-4 w-4 ml-auto" />
                         </SidebarMenuButton>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-48 bg-surface-1 border border-border shadow-lg p-1">
                         <DropdownMenuItem onClick={() => setIsCreateSectionModalOpen(true)} className="py-1.5">
                           <FolderOpen className="h-4 w-4 mr-2" />
-                          New section
+                          {t('menu_editor.tools_menu.new_section_option.menu_item')}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => setIsCreateReportModalOpen(true)} className="py-1.5">
                           <FileText className="h-4 w-4 mr-2" />
-                          New dashboard
+                          {t('menu_editor.tools_menu.new_dashboard_option.menu_item')}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => setIsCreateCompositeReportModalOpen(true)} className="py-1.5">
                           <Layers className="h-4 w-4 mr-2" />
-                          New report
+                          {t('menu_editor.tools_menu.new_report_option.menu_item')}
                         </DropdownMenuItem>
-                        <DropdownMenuItem 
-                          onClick={() => setIsEditMode(true)} 
+                        <DropdownMenuItem
+                          onClick={() => setIsEditMode(true)}
                           className="py-1.5"
                           disabled={isEditMode}
                         >
                           <Edit2 className="h-4 w-4 mr-2" />
-                          Edit menu
+                          {t('menu_editor.tools_menu.edit_menu_option.menu_item')}
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => navigate('/app/sql-editor')} className="py-1.5">
                           <Code className="h-4 w-4 mr-2" />
-                          SQL Editor
+                          {t('menu_editor.tools_menu.sql_editor_option.menu_item')}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>

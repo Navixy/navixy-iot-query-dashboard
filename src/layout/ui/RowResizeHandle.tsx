@@ -4,6 +4,7 @@
 
 import React from 'react';
 import { GRID_UNIT_HEIGHT } from '../geometry/grid';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RowResizeHandleProps {
   rowId: string | number;
@@ -23,6 +24,7 @@ export const RowResizeHandle: React.FC<RowResizeHandleProps> = ({
   visible,
   onResizeStart,
 }) => {
+  const { t } = useLocale();
   if (!visible) {
     return null;
   }
@@ -45,7 +47,7 @@ export const RowResizeHandle: React.FC<RowResizeHandleProps> = ({
         pointerEvents: 'auto',
       }}
       onPointerDown={handlePointerDown}
-      title="Drag to resize row height"
+      title={t('report_view.canvas.resize_handle.tooltip')}
     >
       <div
         className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-blue-500 border-2 border-white rounded-full hover:bg-blue-600 transition-colors"

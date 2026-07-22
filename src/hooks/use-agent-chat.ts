@@ -5,6 +5,10 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
+// These messages are thrown, and AiChat renders the thrown message verbatim as a chat
+// bubble (`failed.errorMessage`), so they are user-facing. Resolved through the service
+// translator because three of the four throw from module-level functions, not the hook.
+import { getServiceTranslator } from '@/i18n/serviceTranslator';
 import { getAuthSessionId, getAuthToken, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { countMatchingUserTurns, sessionIsAwaitingReply } from '@/components/ai-chat/turnDelivery';
@@ -192,7 +196,7 @@ export async function createAgentChatContext(
       // empty-cache branch below, and still sends. Only a tab that once had a
       // transcript and cannot currently confirm it is asked to wait.
       throw new Error(
-        'Could not confirm the state of this chat. Check your connection and try again.',
+        getServiceTranslator()('ai_chat.send_error.unconfirmed_state.paragraph.failure'),
       );
     }
     // With an EMPTY cache a failed read leaves snapshotAtSend null and the send
@@ -216,7 +220,7 @@ export async function createAgentChatContext(
     sessionIsAwaitingReply(snapshotAtSend)
   ) {
     throw new Error(
-      'A previous message is still awaiting a reply. Reload the page before sending again.',
+      getServiceTranslator()('ai_chat.send_error.awaiting_reply.paragraph.failure'),
     );
   }
   // The identity that will authorize the POST must still be the one that composed
@@ -230,7 +234,7 @@ export async function createAgentChatContext(
     (tabTokenAtSend !== null && getAuthToken() !== tabTokenAtSend)
   ) {
     throw new Error(
-      'Auth session changed before the message was sent; the turn was not delivered under a different identity.',
+      getServiceTranslator()('ai_chat.send_error.session_changed.paragraph.failure'),
     );
   }
   return {
@@ -368,7 +372,7 @@ export function useAgentChatMutation() {
       // getAuthHeaders' localStorage read is exactly the leak — it would POST
       // under whatever origin-wide token a successor left there. Fail instead.
       if (authToken === null) {
-        throw new Error('Not signed in; the message was not sent.');
+        throw new Error(getServiceTranslator()('ai_chat.send_error.signed_out.paragraph.failure'));
       }
       // authToken is split off here so it is bound to the Authorization header and
       // never serialized into the body (finding 2).

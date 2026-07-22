@@ -23,6 +23,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { AlertCircle, Save, X, Download, Upload, ChevronDown, ChevronRight, FileDown, Loader2 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { toast } from 'sonner';
 import { useDeleteReportMutation } from '@/hooks/use-menu-mutations';
 import { exportDashboardToPdf } from '@/utils/exportDashboardPdf';
@@ -57,6 +58,7 @@ function withSkippedAutoSave<T>(fn: () => T): T {
 }
 
 const ReportView = () => {
+  const { t } = useLocale();
   const { reportId } = useParams<{ reportId: string }>();
   const navigate = useNavigate();
   const deleteReportMutation = useDeleteReportMutation();
@@ -366,7 +368,7 @@ const ReportView = () => {
       });
 
       setIsEditing(false);
-      toast.success('Dashboard schema updated successfully');
+      toast.success(t('report_view.full_schema_dialog.save_button.paragraph.success'));
       
       // Reload report data to reflect schema changes
       const fetchReport = async () => {
@@ -411,7 +413,9 @@ const ReportView = () => {
     } catch (rawErr: unknown) {
       const err = toErrorMeta(rawErr);
       console.error('Error saving schema:', err);
-      toast.error(err.message || 'Failed to save schema');
+      toast.error(t('report_view.full_schema_dialog.save_button.paragraph.failure'), {
+        description: err.message,
+      });
     } finally {
       setSaving(false);
     }
@@ -470,10 +474,12 @@ const ReportView = () => {
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error saving dashboard changes:', error);
-      toast.error(error.message || 'Failed to save panel layout');
+      toast.error(t('report_view.canvas.save_toast.paragraph.failure'), {
+        description: error.message,
+      });
       throw error; // Re-throw so caller can handle it
     }
-  }, [reportId, schema, report, dashboardConfig]);
+  }, [reportId, schema, report, dashboardConfig, t]);
 
   // Persist the dashboard's local filter variables (templating.list[]).
   // Unlike handleSaveDashboard, this always syncs local state AND the editor
@@ -575,10 +581,10 @@ const ReportView = () => {
       // Update local state with the new schema
       setSchema(updatedSchema);
       setEditingTitle(false);
-      toast.success("Dashboard page header updated successfully");
+      toast.success(t('report_view.header.save_button.paragraph.success'));
     } catch (error) {
       console.error('Error saving title:', error);
-      toast.error("Failed to update report page header");
+      toast.error(t('report_view.header.save_button.paragraph.failure'));
     } finally {
       setSaving(false);
     }
@@ -636,11 +642,13 @@ const ReportView = () => {
       setEditorValue(JSON.stringify(updatedSchema, null, 2));
       setEditingElement(null);
       
-      toast.success('Element updated successfully');
+      toast.success(t('report_view.element_editor.save_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const err = toErrorMeta(rawErr);
       console.error('Error saving element:', err);
-      toast.error(err.message || 'Failed to save element');
+      toast.error(t('report_view.element_editor.save_toast.paragraph.failure'), {
+        description: err.message,
+      });
     }
   };
 
@@ -711,13 +719,15 @@ const ReportView = () => {
       setEditorValue(JSON.stringify(updatedSchema, null, 2));
       setEditingAnnotation(null);
       
-      toast.success('Annotation updated successfully');
-      
+      toast.success(t('report_view.annotation_editor.save_toast.paragraph.success'));
+
       console.log('=== handleSaveAnnotation completed successfully ===');
     } catch (rawErr: unknown) {
       const err = toErrorMeta(rawErr);
       console.error('=== Error saving annotation ===', err);
-      toast.error(err.message || 'Failed to save annotation');
+      toast.error(t('report_view.annotation_editor.save_toast.paragraph.failure'), {
+        description: err.message,
+      });
     }
   };
 
@@ -754,11 +764,13 @@ const ReportView = () => {
       setSchema(updatedSchema);
       setEditingElement(null);
       
-      toast.success('Element deleted successfully');
+      toast.success(t('report_view.element_editor.delete_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error deleting element:', error);
-      toast.error(error.message || 'Failed to delete element');
+      toast.error(t('report_view.element_editor.delete_toast.paragraph.failure'), {
+        description: error.message,
+      });
       throw error; // Re-throw to let the editor handle the error
     }
   };
@@ -784,11 +796,13 @@ const ReportView = () => {
       setSchema(updatedSchema);
       setEditingAnnotation(null);
       
-      toast.success('Annotation deleted successfully');
+      toast.success(t('report_view.annotation_editor.delete_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error deleting annotation:', error);
-      toast.error(error.message || 'Failed to delete annotation');
+      toast.error(t('report_view.annotation_editor.delete_toast.paragraph.failure'), {
+        description: error.message,
+      });
       throw error; // Re-throw to let the editor handle the error
     }
   };
@@ -866,14 +880,14 @@ const ReportView = () => {
       setSchema(updatedSchema);
       setEditingRowTitle(null);
       setTempRowTitle('');
-      toast.success('Row title updated successfully');
+      toast.success(t('report_view.row_title.save_toast.paragraph.success'));
     } catch (error) {
       console.error('Error updating row title:', error);
-      toast.error('Failed to update row title');
+      toast.error(t('report_view.row_title.save_toast.paragraph.failure'));
     } finally {
       setSaving(false);
     }
-  }, [schema, editingRowTitle, tempRowTitle, reportId, report?.title]);
+  }, [schema, editingRowTitle, tempRowTitle, reportId, report?.title, t]);
 
   const handleCancelEditRowTitle = useCallback(() => {
     setEditingRowTitle(null);
@@ -921,11 +935,17 @@ const ReportView = () => {
       // Dispatch event to refresh sidebar data
       window.dispatchEvent(new CustomEvent('refreshSidebar'));
       
-      toast.success(`${editingBreadcrumb === 'section' ? 'Section' : 'Dashboard'} updated successfully`);
+      toast.success(editingBreadcrumb === 'section'
+        ? t('report_view.breadcrumb.section_toast.paragraph.success')
+        : t('report_view.breadcrumb.report_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error(`Error updating ${editingBreadcrumb}:`, error);
-      toast.error(error.message || `Failed to update ${editingBreadcrumb}`);
+      toast.error(editingBreadcrumb === 'section'
+        ? t('report_view.breadcrumb.section_toast.paragraph.failure')
+        : t('report_view.breadcrumb.report_toast.paragraph.failure'), {
+        description: error.message,
+      });
     }
   };
 
@@ -993,8 +1013,8 @@ const ReportView = () => {
 
   const handleTidyUp = () => {
     cmdTidyUp();
-    toast.success('Layout tidied up', {
-      description: 'Empty spaces removed and panels repositioned.',
+    toast.success(t('report_view.edit_toolbar.tidy_up_button.paragraph.success'), {
+      description: t('report_view.edit_toolbar.tidy_up_button.subtitle.success'),
     });
   };
 
@@ -1040,11 +1060,13 @@ const ReportView = () => {
       setNewRowType(null);
       setInsertAfterIndex(undefined);
 
-      toast.success('Row added successfully');
+      toast.success(t('report_view.new_row_editor.save_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error adding row:', error);
-      toast.error(error.message || 'Failed to add row');
+      toast.error(t('report_view.new_row_editor.save_toast.paragraph.failure'), {
+        description: error.message,
+      });
     }
   };
 
@@ -1240,11 +1262,13 @@ const ReportView = () => {
         }
       }
       
-      toast.success('Panel updated successfully');
+      toast.success(t('report_view.panel_editor.save_button.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('❌ Error saving panel:', error);
-      toast.error(error.message || 'Failed to save panel');
+      toast.error(t('report_view.panel_editor.save_button.paragraph.failure'), {
+        description: error.message,
+      });
     }
   };
 
@@ -1258,7 +1282,7 @@ const ReportView = () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success('Schema exported successfully');
+    toast.success(t('report_view.full_schema_dialog.export_button.paragraph.success'));
   };
 
   const handleExportPdf = async () => {
@@ -1266,8 +1290,8 @@ const ReportView = () => {
     if (!root) {
       // The button is normally disabled until the grid mounts (see dashboardLoading),
       // so this is a rare fallback — keep the message honest about the real cause.
-      toast.error('Export unavailable', {
-        description: 'The dashboard is still loading — please try again in a moment.',
+      toast.error(t('report_view.pdf_export.unavailable_toast.title'), {
+        description: t('report_view.pdf_export.unavailable_toast.paragraph.instruction'),
       });
       return;
     }
@@ -1280,14 +1304,15 @@ const ReportView = () => {
         // Prefer the server slug (matches the composite-report export's file naming);
         // the util slugifies whatever it gets, so title is a safe fallback.
         fileName: report?.slug || report?.title || title,
+        partialDataNote: t('report_view.pdf_export.partial_data_note.paragraph'),
       });
-      toast.success('PDF exported', {
-        description: 'Your dashboard was downloaded as a PDF.',
+      toast.success(t('report_view.pdf_export.success_toast.title'), {
+        description: t('report_view.pdf_export.success_toast.paragraph.success'),
       });
     } catch (err) {
       console.error('Dashboard PDF export failed:', err);
-      toast.error('Export failed', {
-        description: err instanceof Error ? err.message : 'Could not generate the PDF.',
+      toast.error(t('report_view.pdf_export.failure_toast.title'), {
+        description: err instanceof Error ? err.message : t('report_view.pdf_export.failure_toast.paragraph.failure'),
       });
     } finally {
       setExportingPdf(false);
@@ -1307,9 +1332,9 @@ const ReportView = () => {
             const content = event.target?.result as string;
             JSON.parse(content); // Validate JSON
             setEditorValue(content);
-            toast.success('Schema imported successfully');
+            toast.success(t('report_view.full_schema_dialog.import_button.paragraph.success'));
           } catch (err) {
-            toast.error('Invalid JSON file');
+            toast.error(t('report_view.full_schema_dialog.import_button.paragraph.failure'));
           }
         };
         reader.readAsText(file);
@@ -1438,11 +1463,13 @@ const ReportView = () => {
         await new Promise(resolve => setTimeout(resolve, 500));
         await fetchReport();
         
-        toast.success('Schema uploaded and saved successfully');
+        toast.success(t('report_view.empty_state.upload_button.paragraph.success'));
       } catch (rawErr: unknown) {
         const err = toErrorMeta(rawErr);
         console.error('Error uploading schema:', err);
-        toast.error(err.message || 'Failed to upload schema');
+        toast.error(t('report_view.empty_state.upload_button.paragraph.failure'), {
+          description: err.message,
+        });
       } finally {
         setDownloadingSchema(false);
       }
@@ -1588,7 +1615,7 @@ const ReportView = () => {
         
         console.log('🎉 Schema download completed successfully');
         setError(null);
-        toast.success('Example schema downloaded and saved successfully');
+        toast.success(t('report_view.schema_download.example_toast.paragraph.success'));
         return;
       }
 
@@ -1683,11 +1710,13 @@ const ReportView = () => {
       await new Promise(resolve => setTimeout(resolve, 500));
       await fetchReport();
       
-      toast.success('Dashboard downloaded and saved successfully');
+      toast.success(t('report_view.schema_download.custom_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const err = toErrorMeta(rawErr);
       console.error('Error downloading schema:', err);
-      toast.error(err.message || 'Failed to download schema');
+      toast.error(t('report_view.schema_download.custom_toast.paragraph.failure'), {
+        description: err.message,
+      });
     } finally {
       setDownloadingSchema(false);
     }
@@ -1774,11 +1803,13 @@ const ReportView = () => {
       // Enter edit mode automatically
       setIsEditing(true);
       
-      toast.success('Blank dashboard created. You can now add panels.');
+      toast.success(t('report_view.empty_state.blank_button.paragraph.success'));
     } catch (rawErr: unknown) {
       const err = toErrorMeta(rawErr);
       console.error('Error creating blank dashboard:', err);
-      toast.error(err.message || 'Failed to create blank dashboard');
+      toast.error(t('report_view.empty_state.blank_button.paragraph.failure'), {
+        description: err.message,
+      });
     } finally {
       setDownloadingSchema(false);
     }
@@ -1802,10 +1833,10 @@ const ReportView = () => {
                 </div>
                 <div className="flex-1 min-w-0">
                   <h3 className="text-lg font-semibold text-red-900 dark:text-red-100 mb-2">
-                    Report Error
+                    {t('report_view.error_state.header.title')}
                   </h3>
                   <p className="text-red-700 dark:text-red-300 mb-4">
-                    {error || 'Report not found'}
+                    {error || t('common.errors.report_not_found')}
                   </p>
                 </div>
               </div>
@@ -1831,10 +1862,10 @@ const ReportView = () => {
               </div>
               <div className="flex-1 min-w-0">
                 <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-2">
-                  Get Started
+                  {t('report_view.empty_state.header.title.instruction')}
                 </h3>
                 <p className="text-blue-700 dark:text-blue-300 mb-4">
-                  This dashboard is empty. Start by creating a blank dashboard or upload an existing schema file.
+                  {t('report_view.empty_state.paragraph.instruction')}
                 </p>
                 {canEdit && (
                   <div className="flex flex-col sm:flex-row gap-3">
@@ -1846,7 +1877,9 @@ const ReportView = () => {
                       <svg className="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                       </svg>
-                      {downloadingSchema ? 'Creating...' : 'Start with Blank Dashboard'}
+                      {downloadingSchema
+                        ? t('common.states.creating')
+                        : t('report_view.empty_state.blank_button.cta.default')}
                     </Button>
                     <Button
                       onClick={() => handleUploadLocalSchema()}
@@ -1855,7 +1888,9 @@ const ReportView = () => {
                       className="border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950/20"
                     >
                       <Upload className="h-4 w-4 mr-2" />
-                      {downloadingSchema ? 'Processing...' : 'Upload Schema File'}
+                      {downloadingSchema
+                        ? t('report_view.empty_state.upload_button.cta.loading')
+                        : t('report_view.empty_state.upload_button.cta.default')}
                     </Button>
                   </div>
                 )}
@@ -1887,7 +1922,7 @@ const ReportView = () => {
                       if (e.key === 'Escape') handleCancelEditBreadcrumb();
                     }}
                     className="h-6 px-2 text-sm"
-                    placeholder="Section name"
+                    placeholder={t('report_view.breadcrumb.section_input.placeholder')}
                     autoFocus
                   />
                   <Button onClick={handleSaveBreadcrumb} size="sm" variant="default" className="h-6 px-2">
@@ -1902,7 +1937,7 @@ const ReportView = () => {
                   className={`${isEditing ? 'cursor-pointer hover:text-[var(--text-primary)] transition-all' : ''}`}
                   onClick={() => isEditing && handleStartEditBreadcrumb('section')}
                 >
-                  {report.section_name || 'No Section'}
+                  {report.section_name || t('common.no_section.label')}
                 </span>
               )}
               
@@ -1918,7 +1953,7 @@ const ReportView = () => {
                       if (e.key === 'Escape') handleCancelEditBreadcrumb();
                     }}
                     className="h-6 px-2 text-sm"
-                    placeholder="Report name"
+                    placeholder={t('report_view.breadcrumb.report_input.placeholder')}
                     autoFocus
                   />
                   <Button onClick={handleSaveBreadcrumb} size="sm" variant="default" className="h-6 px-2">
@@ -1950,8 +1985,8 @@ const ReportView = () => {
                 size="sm"
                 title={
                   dashboardLoading
-                    ? 'Waiting for the dashboard to finish loading'
-                    : 'Export the dashboard as a PDF'
+                    ? t('report_view.pdf_export.export_button.tooltip.loading')
+                    : t('report_view.pdf_export.export_button.tooltip.default')
                 }
               >
                 {exportingPdf ? (
@@ -1959,12 +1994,14 @@ const ReportView = () => {
                 ) : (
                   <FileDown className="h-4 w-4 mr-2" />
                 )}
-                {exportingPdf ? 'Exporting...' : 'Export PDF'}
+                {exportingPdf
+                  ? t('common.states.exporting')
+                  : t('report_view.pdf_export.export_button.cta.default')}
               </Button>
             )}
             {!canEdit && (
               <div className="flex items-center">
-                <span className="text-sm text-[var(--text-muted)]">View Mode</span>
+                <span className="text-sm text-[var(--text-muted)]">{t('report_view.header.view_mode.label')}</span>
               </div>
             )}
           </div>
@@ -1985,17 +2022,17 @@ const ReportView = () => {
                   if (e.key === 'Escape') handleCancelEditTitle();
                 }}
                 className="text-[24px] font-bold h-10 px-3"
-                placeholder="Report title"
+                placeholder={t('report_view.header.title_input.placeholder')}
                 autoFocus
               />
               <div className="flex gap-2 mt-2">
                 <Button onClick={handleSaveTitle} size="sm" variant="default">
                   <Save className="h-4 w-4 mr-1" />
-                  Save
+                  {t('common.actions.save.cta.default')}
                 </Button>
                 <Button onClick={handleCancelEditTitle} size="sm" variant="outline">
                   <X className="h-4 w-4 mr-1" />
-                  Cancel
+                  {t('common.actions.cancel.cta')}
                 </Button>
               </div>
             </div>
@@ -2010,7 +2047,7 @@ const ReportView = () => {
               onMouseLeave={() => setIsTitleHovered(false)}
               onClick={() => isEditing && handleStartEditTitle()}
             >
-              <h1 className="text-[24px] font-bold text-[var(--text-primary)]">{schema?.dashboard?.title || schema?.title || 'Untitled Report'}</h1>
+              <h1 className="text-[24px] font-bold text-[var(--text-primary)]">{schema?.dashboard?.title || schema?.title || t('report_view.header.title.empty')}</h1>
             </div>
           )}
           
@@ -2052,10 +2089,10 @@ const ReportView = () => {
               </div>
               <div>
                 <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-2">
-                  Get Started
+                  {t('report_view.empty_state.header.title.instruction')}
                 </h3>
                 <p className="text-[var(--text-muted)] mb-6">
-                  This dashboard is empty. Start by creating a blank dashboard or upload an existing schema file.
+                  {t('report_view.empty_state.paragraph.instruction')}
                 </p>
               </div>
               <div className="flex flex-col sm:flex-row gap-3 justify-center">
@@ -2067,16 +2104,20 @@ const ReportView = () => {
                   <svg className="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                   </svg>
-                  {downloadingSchema ? 'Creating...' : 'Start with Blank Dashboard'}
+                  {downloadingSchema
+                    ? t('common.states.creating')
+                    : t('report_view.empty_state.blank_button.cta.default')}
                 </Button>
-                <Button 
+                <Button
                   onClick={() => handleUploadLocalSchema()}
                   disabled={downloadingSchema}
                   variant="outline"
                   className="border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-950/20"
                 >
                   <Upload className="h-4 w-4 mr-2" />
-                  {downloadingSchema ? 'Processing...' : 'Upload Schema File'}
+                  {downloadingSchema
+                    ? t('report_view.empty_state.upload_button.cta.loading')
+                    : t('report_view.empty_state.upload_button.cta.default')}
                 </Button>
               </div>
             </div>
@@ -2088,9 +2129,9 @@ const ReportView = () => {
       <Dialog open={isEditing && editMode === 'full'} onOpenChange={(open) => !open && setIsEditing(false)}>
         <DialogContent className="max-w-6xl h-[85vh] flex flex-col p-0 bg-[var(--surface-1)] border-[var(--border)] overflow-hidden">
           <DialogHeader className="px-6 pt-6 pb-4 border-b border-[var(--border)] bg-[var(--surface-1)] rounded-t-lg">
-            <DialogTitle className="text-[var(--text-primary)]">Edit Report Schema</DialogTitle>
+            <DialogTitle className="text-[var(--text-primary)]">{t('report_view.full_schema_dialog.title')}</DialogTitle>
             <DialogDescription className="text-[var(--text-secondary)]">
-              Modify the complete JSON schema for this report
+              {t('report_view.full_schema_dialog.subtitle')}
             </DialogDescription>
           </DialogHeader>
 
@@ -2107,21 +2148,23 @@ const ReportView = () => {
             <div className="flex gap-2">
               <Button onClick={handleImportSchema} variant="outline" size="sm">
                 <Upload className="h-4 w-4 mr-2" />
-                Import
+                {t('report_view.full_schema_dialog.import_button.cta')}
               </Button>
               <Button onClick={handleExportSchema} variant="outline" size="sm">
                 <Download className="h-4 w-4 mr-2" />
-                Export
+                {t('report_view.full_schema_dialog.export_button.cta')}
               </Button>
             </div>
             <div className="flex gap-2">
               <Button onClick={() => setIsEditing(false)} variant="ghost" size="sm">
                 <X className="h-4 w-4 mr-2" />
-                Cancel
+                {t('common.actions.cancel.cta')}
               </Button>
               <Button onClick={handleSaveSchema} disabled={saving} size="sm">
                 <Save className="h-4 w-4 mr-2" />
-                {saving ? 'Saving...' : 'Save Changes'}
+                {saving
+                  ? t('common.actions.save.cta.loading')
+                  : t('common.actions.save_changes.cta')}
               </Button>
             </div>
           </div>
@@ -2171,12 +2214,14 @@ const ReportView = () => {
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent className="sm:max-w-[425px]">
           <DialogHeader>
-            <DialogTitle>Delete</DialogTitle>
+            <DialogTitle>{t('common.confirmations.delete.title')}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="p-3 bg-muted rounded-md">
               <DialogDescription>
-                <strong>{report?.title || schema?.title || 'This dashboard'}</strong> will be moved to trash and can be restored later.
+                {t('common.confirmations.restore_notice.paragraph', {
+                  name: report?.title || schema?.title || t('report_view.delete_report_dialog.name_fallback.label'),
+                })}
               </DialogDescription>
             </div>
           </div>
@@ -2187,7 +2232,7 @@ const ReportView = () => {
               onClick={() => setShowDeleteDialog(false)}
               disabled={deleting}
             >
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button
               type="button"
@@ -2195,7 +2240,9 @@ const ReportView = () => {
               onClick={handleDeleteReport}
               disabled={deleting}
             >
-              {deleting ? 'Deleting...' : 'Delete'}
+              {deleting
+                ? t('common.actions.delete.cta.loading')
+                : t('common.actions.delete.cta.default')}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -9,6 +9,7 @@ import {
   getDashboardSearchOptionId,
   type DashboardSearchResult,
 } from '@/utils/dashboardSearch';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 const MAX_RESULTS = 8;
 
@@ -27,6 +28,7 @@ type SearchInputProps = Omit<
 export function SearchInput({ className, ...props }: SearchInputProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { t } = useLocale();
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -141,7 +143,7 @@ export function SearchInput({ className, ...props }: SearchInputProps) {
           ]
             .filter(Boolean)
             .join(' ')}
-          placeholder="Search data, dashboards, SQL…"
+          placeholder={t('app_shell.search_form.query_input.placeholder.instruction')}
           role="combobox"
           aria-expanded={showDropdown}
           aria-controls="dashboard-search-results"
@@ -159,19 +161,19 @@ export function SearchInput({ className, ...props }: SearchInputProps) {
           {isLoading && (
             <div className="flex items-center gap-2 px-4 py-3 text-sm text-[var(--text-muted)]">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Loading dashboards…
+              {t('app_shell.search_form.results_list.paragraph.loading')}
             </div>
           )}
 
           {!isLoading && isError && (
             <div className="px-4 py-3 text-sm text-[var(--text-muted)]">
-              Failed to load dashboards
+              {t('app_shell.search_form.results_list.error')}
             </div>
           )}
 
           {!isLoading && !isError && results.length === 0 && (
             <div className="px-4 py-3 text-sm text-[var(--text-muted)]">
-              No dashboards match your keywords
+              {t('app_shell.search_form.results_list.paragraph.empty')}
             </div>
           )}
 
@@ -203,15 +205,21 @@ export function SearchInput({ className, ...props }: SearchInputProps) {
                       </span>
                       {dashboard.matchedPanelTitles.length > 0 && (
                         <span className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">
-                          Widgets: {dashboard.matchedPanelTitles.slice(0, 3).join(', ')}
+                          {t('app_shell.search_form.result_item.matched_panels.label', {
+                            titles: dashboard.matchedPanelTitles.slice(0, 3).join(', '),
+                          })}
                           {dashboard.matchedPanelTitles.length > 3
-                            ? ` +${dashboard.matchedPanelTitles.length - 3}`
+                            ? ` ${t('app_shell.search_form.result_item.panels_overflow.label', {
+                                count: dashboard.matchedPanelTitles.length - 3,
+                              })}`
                             : ''}
                         </span>
                       )}
                       {dashboard.matchedSqlSnippets.length > 0 && (
                         <span className="mt-0.5 block truncate font-mono text-[11px] text-[var(--text-muted)]">
-                          SQL: {dashboard.matchedSqlSnippets.join(' · ')}
+                          {t('app_shell.search_form.result_item.matched_sql.label', {
+                            snippets: dashboard.matchedSqlSnippets.join(' · '),
+                          })}
                         </span>
                       )}
                       {dashboard.matchedPanelTitles.length === 0 &&

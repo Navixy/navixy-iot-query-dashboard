@@ -16,6 +16,23 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import { useLocale } from "@/i18n/LocaleProvider"
+
+// Internal region ids stay English (they are grouping keys); the visible group
+// headings are translated through this slug map.
+const REGION_VALUE_KEYS: Record<string, string> = {
+  'Auto-Detect': 'auto_detect',
+  'Americas': 'americas',
+  'Europe': 'europe',
+  'Asia': 'asia',
+  'Africa': 'africa',
+  'Australia & Pacific': 'australia_pacific',
+  'Atlantic': 'atlantic',
+  'Indian Ocean': 'indian_ocean',
+  'Arctic': 'arctic',
+  'Antarctica': 'antarctica',
+  'Other': 'other',
+}
 
 interface TimezoneOption {
   value: string
@@ -37,6 +54,7 @@ export function TimezoneCombobox({
   browserTimezone,
 }: TimezoneComboboxProps) {
   const [open, setOpen] = React.useState(false)
+  const { t } = useLocale()
 
   // Get all available timezones from Intl API
   const getAllTimezones = React.useMemo(() => {
@@ -58,7 +76,7 @@ export function TimezoneCombobox({
     if (browserTimezone) {
       tzList.push({
         value: browserTimezone,
-        label: `🌐 Browser Auto-Detect (${browserTimezone})`,
+        label: t('settings.timezone_selector.browser_option.menu_item', { value: browserTimezone }),
         region: 'Auto-Detect'
       })
     }
@@ -124,7 +142,7 @@ export function TimezoneCombobox({
     })
 
     return tzList
-  }, [getAllTimezones, browserTimezone])
+  }, [getAllTimezones, browserTimezone, t])
 
   const selectedTimezone = timezones.find(tz => tz.value === value)
 
@@ -141,16 +159,16 @@ export function TimezoneCombobox({
           {selectedTimezone ? (
             <span className="truncate text-left flex-1">{selectedTimezone.label}</span>
           ) : (
-            <span className="text-muted-foreground">Select timezone...</span>
+            <span className="text-muted-foreground">{t('settings.timezone_selector.placeholder.instruction')}</span>
           )}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-[400px] p-0" align="start">
         <Command>
-          <CommandInput placeholder="Search timezone..." />
+          <CommandInput placeholder={t('settings.timezone_selector.search_input.placeholder.instruction')} />
           <CommandList className="max-h-[400px]">
-            <CommandEmpty>No timezone found.</CommandEmpty>
+            <CommandEmpty>{t('settings.timezone_selector.results_list.paragraph.empty')}</CommandEmpty>
             {Object.entries(
               timezones.reduce((acc, tz) => {
                 const region = tz.region || 'Other'
@@ -166,7 +184,10 @@ export function TimezoneCombobox({
                 return a.localeCompare(b)
               })
               .map(([region, tzs]) => (
-                <CommandGroup key={region} heading={region}>
+                <CommandGroup
+                  key={region}
+                  heading={t(`settings.timezone_selector.region_values.${REGION_VALUE_KEYS[region] ?? 'other'}`)}
+                >
                   {tzs.map((tz) => (
                     <CommandItem
                       key={tz.value}

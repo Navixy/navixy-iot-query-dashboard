@@ -6,6 +6,7 @@
 import React from 'react';
 import { useDroppable } from '@dnd-kit/core';
 import { Plus } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface CanvasDropZoneProps {
   zoneId: 'canvas-top' | 'canvas-bottom';
@@ -22,6 +23,7 @@ export const CanvasDropZone: React.FC<CanvasDropZoneProps> = ({
   top = 0,
   height = 64,
 }) => {
+  const { t } = useLocale();
   const { setNodeRef, isOver } = useDroppable({
     id: zoneId,
     data: {
@@ -34,9 +36,9 @@ export const CanvasDropZone: React.FC<CanvasDropZoneProps> = ({
     return null;
   }
 
-  const label = zoneId === 'canvas-top' 
-    ? 'Drop to place above rows' 
-    : 'Drop to place below rows';
+  const label = zoneId === 'canvas-top'
+    ? t('report_view.canvas.drop_above_rows.label')
+    : t('report_view.canvas.drop_below_rows.label');
 
   return (
     <>

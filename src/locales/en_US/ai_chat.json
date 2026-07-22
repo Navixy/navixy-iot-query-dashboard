@@ -1,0 +1,172 @@
+{
+  "transcript": {
+    "label": "Conversation with the AI assistant"
+  },
+  "empty_state": {
+    "header": {
+      "title": {
+        "question": "What do you want to monitor?"
+      },
+      "subtitle": {
+        "instruction": "Describe the dashboard you need in plain language. The assistant may ask a few questions. Then it will build a dashboard that you can preview against your own data."
+      }
+    },
+    "history_error": {
+      "paragraph": {
+        "failure": "Failed to load your chat history. You can still send a message to start a fresh conversation."
+      }
+    }
+  },
+  "composer": {
+    "message_input": {
+      "label": "Message to the AI assistant",
+      "placeholder": {
+        "instruction": "Describe the dashboard you want..."
+      }
+    },
+    "send_button": {
+      "cta": "Send"
+    }
+  },
+  "typing_indicator": {
+    "paragraph": {
+      "loading": "Still working. Processing complex dashboards can take a while."
+    },
+    "status": {
+      "loading": "The assistant is preparing a reply."
+    }
+  },
+  "result_card": {
+    "header": {
+      "label": "Result is ready"
+    },
+    "panel_count": {
+      "label": "Panels: {count}"
+    },
+    "preview_button": {
+      "cta": "Preview"
+    },
+    "apply_button": {
+      "cta": "Apply",
+      "tooltip": {
+        "role": "Create this dashboard with the Editor role",
+        "pending": "Wait for the current reply to finish",
+        "applying": "Creating dashboard...",
+        "preview": "Preview this dashboard first",
+        "previewing": "Wait for the preview to finish"
+      }
+    }
+  },
+  "preview_dialog": {
+    "header": {
+      "subtitle": "Previewed against your data. Nothing will be saved until you apply."
+    },
+    "status": {
+      "paragraph": {
+        "loading": "Loading panels…"
+      },
+      "no_panels": {
+        "paragraph": {
+          "empty": "This dashboard has no data panels."
+        }
+      },
+      "loading_count": {
+        "paragraph": {
+          "loading": "Loading panels: {count}…"
+        }
+      },
+      "all_loaded": {
+        "paragraph": {
+          "success": "All panels loaded: {total}."
+        }
+      },
+      "partial": {
+        "paragraph": {
+          "failure": "Panels loaded: {loaded} of {total}. Failed panels: {failed}. Check them before applying."
+        }
+      },
+      "not_checked": {
+        "paragraph": {
+          "warning": "Panels not checked: {count}. No SQL to run."
+        }
+      }
+    },
+    "globals_error": {
+      "paragraph": {
+        "failure": "Failed to read your global variables. This preview won't run like the saved dashboard. Nothing was executed."
+      },
+      "retry_button": {
+        "cta": "Try again"
+      }
+    },
+    "unreadable_result": {
+      "paragraph": {
+        "failure": "Failed to read this result as a dashboard. Ask the assistant to rebuild it."
+      }
+    },
+    "footer_note": {
+      "paragraph": "AI-generated SQL can reference columns that don't exist. Check that each panel renders before applying. Data may be cached for up to 5 minutes."
+    }
+  },
+  "session": {
+    "not_persisted": {
+      "paragraph": "Chat history isn't being saved for this workspace. It may be lost when the service restarts."
+    }
+  },
+  "apply": {
+    "menu_read_error": {
+      "paragraph": {
+        "failure": "Failed to read the menu. {detail}"
+      }
+    },
+    "section_create_error": {
+      "paragraph": {
+        "failure": "Failed to create the \"{section}\" section. {detail} If you deleted it earlier, restore it in \"Edit menu\" and try again."
+      }
+    },
+    "section_no_id_error": {
+      "paragraph": {
+        "failure": "Failed to create the \"{section}\" section. The server returned no id."
+      }
+    },
+    "saved_not_opened_error": {
+      "paragraph": {
+        "failure": "\"{title}\" was created, but it couldn't be opened. Find it in the sidebar under \"{section}\"."
+      }
+    }
+  },
+  "send_error": {
+    "unconfirmed_state": {
+      "paragraph": {
+        "failure": "Failed to confirm the state of this chat. Check your connection and try again."
+      }
+    },
+    "awaiting_reply": {
+      "paragraph": {
+        "failure": "A previous message is still awaiting a reply. Reload the page before sending again."
+      }
+    },
+    "session_changed": {
+      "paragraph": {
+        "failure": "Your session changed before the message was sent. The message wasn't delivered."
+      }
+    },
+    "signed_out": {
+      "paragraph": {
+        "failure": "You're not signed in. The message wasn't sent."
+      }
+    }
+  },
+  "turn_error": {
+    "connection_lost": {
+      "paragraph": {
+        "failure": "The connection was lost while the assistant was replying. Your message was delivered. The reply may appear the next time you open this page."
+      }
+    },
+    "request_failed": {
+      "paragraph": {
+        "failure": "The request failed. Please try again."
+      }
+    }
+  }
+}

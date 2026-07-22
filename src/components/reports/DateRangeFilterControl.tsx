@@ -14,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { CalendarIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { parseTimeExpression, formatDateToLocalInput } from '@/utils/timeParser';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 /** Minimal preset shape this control needs; both DateRangePreset and the
  * timepicker's quick-range presets satisfy it. */
@@ -42,6 +43,7 @@ export const DateRangeFilterControl: React.FC<DateRangeFilterControlProps> = ({
   presets,
   onChange,
 }) => {
+  const { t } = useLocale();
   const validFrom = fromDate instanceof Date && !isNaN(fromDate.getTime());
   const validTo = toDate instanceof Date && !isNaN(toDate.getTime());
 
@@ -58,14 +60,16 @@ export const DateRangeFilterControl: React.FC<DateRangeFilterControlProps> = ({
             )}
           >
             <CalendarIcon className="mr-2 h-4 w-4" />
-            {validFrom && validTo ? displayLabel : <span>Pick a date range</span>}
+            {validFrom && validTo ? displayLabel : <span>{t('report_view.date_range_filter.trigger.placeholder.instruction')}</span>}
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-0" align="start">
           <div className="p-3 border-b">
             <div className="space-y-2">
-              <Label className="text-xs">Quick Ranges</Label>
+              <Label className="text-xs">{t('report_view.date_range_filter.quick_ranges.label')}</Label>
               <div className="flex flex-wrap gap-2">
+                {/* preset.display comes from DATE_RANGE_PRESETS (filterVariables.ts) —
+                    left un-keyed pending the locale-source decision on date-range presets. */}
                 {presets.map((preset) => (
                   <Button
                     key={preset.id ?? preset.display}
@@ -84,7 +88,7 @@ export const DateRangeFilterControl: React.FC<DateRangeFilterControlProps> = ({
           </div>
           <div className="p-3 space-y-2">
             <div className="space-y-1">
-              <Label className="text-xs">From</Label>
+              <Label className="text-xs">{t('report_view.date_range_filter.from_input.label')}</Label>
               <Input
                 type="datetime-local"
                 value={validFrom ? formatDateToLocalInput(fromDate) : ''}
@@ -96,7 +100,7 @@ export const DateRangeFilterControl: React.FC<DateRangeFilterControlProps> = ({
               />
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">To</Label>
+              <Label className="text-xs">{t('report_view.date_range_filter.to_input.label')}</Label>
               <Input
                 type="datetime-local"
                 value={validTo ? formatDateToLocalInput(toDate) : ''}

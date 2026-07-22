@@ -18,6 +18,8 @@ import {
 } from '@/components/ui/select';
 import { RotateCcw, Check, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { TFunction } from '@/i18n/makeT';
 import { Dashboard, DashboardParameter } from '@/types/dashboard-types';
 import { parseTimeExpression, formatDateToLocalInput } from '@/utils/timeParser';
 import { extractParameterNames, filterUsedParameters, walkSqlPanels } from '@/utils/sqlParameterExtractor';
@@ -68,6 +70,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
   syncParametersToUrl = true
 }) => {
   const { prefs: datetimePrefs } = useDatetimePrefs();
+  const { t } = useLocale();
 
   // Get declared parameters from x-navixy.params
   const declaredParams = useMemo(() => dashboard['x-navixy']?.params || [], [dashboard]);
@@ -78,7 +81,9 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
   // Get quick ranges from timepicker
   const quickRanges: TimeRangePreset[] = dashboard.timepicker?.quickRanges || [];
 
-  // Add common presets if not already present
+  // Add common presets if not already present.
+  // NOTE: preset `display` labels are left un-keyed pending the locale-source
+  // decision on date-range presets (see DATE_RANGE_PRESETS in filterVariables.ts).
   const allPresets: TimeRangePreset[] = [
     ...quickRanges,
     { from: 'now/d', to: 'now', display: 'Today' },
@@ -120,7 +125,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
         paramMap.set('__from', {
           ...fromParam,
           type: 'time',
-          label: fromParam.label || 'From',
+          label: fromParam.label || t('report_view.parameter_bar.from_param_fallback.label'),
           default: fromParam.default || dashboard.time.from,
           order: fromParam.order ?? -2
         });
@@ -131,7 +136,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
         paramMap.set('__to', {
           ...toParam,
           type: 'time',
-          label: toParam.label || 'To',
+          label: toParam.label || t('report_view.parameter_bar.to_param_fallback.label'),
           default: toParam.default || dashboard.time.to,
           order: toParam.order ?? -1
         });
@@ -147,7 +152,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
       if (b.order !== undefined) return 1;
       return a.name.localeCompare(b.name);
     });
-  }, [declaredParams, inferredParams, dashboard.time]);
+  }, [declaredParams, inferredParams, dashboard.time, t]);
 
   // Local date-range filter variables (templating.list[] with x-navixy.control = 'daterange')
   const dateRangeFilters = useMemo(() => getDateRangeFilters(dashboard), [dashboard]);
@@ -442,7 +447,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
   return (
     <Card className={cn("p-4 flex flex-col", className)}>
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold">Parameters</h3>
+        <h3 className="text-sm font-semibold">{t('report_view.parameter_bar.header.title')}</h3>
         <Button
           variant="outline"
           size="sm"
@@ -450,7 +455,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
           className="h-8"
         >
           <RotateCcw className="h-3 w-3 mr-1" />
-          Reset to defaults
+          {t('report_view.parameter_bar.reset_button.cta')}
         </Button>
       </div>
 
@@ -458,7 +463,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
         {/* Time Range Picker — same control as the local date-range filters */}
         {timeParams.length > 0 && (
           <DateRangeFilterControl
-            label="Time Range"
+            label={t('report_view.parameter_bar.time_range.label')}
             fromDate={fromDate}
             toDate={toDate}
             displayLabel={`${formatTimestamp(fromDate, datetimePrefs, { includeTime: false })} - ${formatTimestamp(toDate, datetimePrefs, { includeTime: false })}`}
@@ -525,9 +530,9 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
             <Label className="text-xs font-medium whitespace-nowrap">
               {param.label || param.name}:
             </Label>
-            {renderParameterInput(param, pendingValues[param.name], (value) => 
+            {renderParameterInput(param, pendingValues[param.name], (value) =>
               handleParamChange(param.name, value)
-            )}
+            , t)}
           </div>
         ))}
       </div>
@@ -541,12 +546,12 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
           {hasPendingChanges ? (
             <>
               <Check className="h-4 w-4" />
-              Apply
+              {t('report_view.parameter_bar.apply_button.cta.pending')}
             </>
           ) : (
             <>
               <RefreshCw className="h-4 w-4" />
-              Update
+              {t('report_view.parameter_bar.apply_button.cta.default')}
             </>
           )}
         </Button>
@@ -561,7 +566,8 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
 function renderParameterInput(
   param: DashboardParameter,
   value: unknown,
-  onChange: (value: unknown) => void
+  onChange: (value: unknown) => void,
+  t: TFunction
 ): React.ReactNode {
   switch (param.type) {
     case 'number':
@@ -605,8 +611,8 @@ function renderParameterInput(
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="true">True</SelectItem>
-            <SelectItem value="false">False</SelectItem>
+            <SelectItem value="true">{t('report_view.parameter_bar.boolean_input.true_option.menu_item')}</SelectItem>
+            <SelectItem value="false">{t('report_view.parameter_bar.boolean_input.false_option.menu_item')}</SelectItem>
           </SelectContent>
         </Select>
       );

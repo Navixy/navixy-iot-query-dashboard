@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/select';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface DataTableProps<TData> {
   data: TData[];
@@ -42,6 +43,7 @@ interface DataTableProps<TData> {
 
 export function DataTable<TData,>({ data, columns, loading, columnTypes, pagination }: DataTableProps<TData>) {
   const [sorting, setSorting] = useState<SortingState>([]);
+  const { t } = useLocale();
 
   const table = useReactTable({
     data,
@@ -73,8 +75,8 @@ export function DataTable<TData,>({ data, columns, loading, columnTypes, paginat
     return (
       <div className="flex items-center justify-center py-12 border border-border rounded-md bg-surface-2">
         <div className="text-center space-y-2">
-          <p className="text-text-muted">No data available</p>
-          <p className="text-sm text-text-muted">Try adjusting your query</p>
+          <p className="text-text-muted">{t('common.no_data.paragraph.empty')}</p>
+          <p className="text-sm text-text-muted">{t('common.no_data.paragraph.instruction')}</p>
         </div>
       </div>
     );
@@ -135,7 +137,7 @@ export function DataTable<TData,>({ data, columns, loading, columnTypes, paginat
       {pagination && (
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-sm text-text-secondary">Rows per page</span>
+            <span className="text-sm text-text-secondary">{t('common.pagination.rows_per_page.label')}</span>
             <Select
               value={pagination.pageSize.toString()}
               onValueChange={(value) => pagination.onPageSizeChange(Number(value))}
@@ -155,7 +157,11 @@ export function DataTable<TData,>({ data, columns, loading, columnTypes, paginat
 
           <div className="flex items-center gap-2">
             <span className="text-sm text-text-secondary">
-              Page {pagination.page} of {totalPages} ({pagination.total} total)
+              {t('common.pagination.page_summary.label', {
+                page: pagination.page,
+                pages: totalPages,
+                total: pagination.total,
+              })}
             </span>
             <div className="flex gap-1">
               <Button

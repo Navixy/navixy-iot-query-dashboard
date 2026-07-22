@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { ThemeProvider } from "next-themes";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { DatetimePrefsProvider } from "@/contexts/DatetimePrefsContext";
+import { AppLocaleProvider } from "@/i18n/AppLocaleProvider";
 import Index from "./pages/Index";
 import Login from "./pages/Login";
 import AppPage from "./pages/App";
@@ -34,7 +35,8 @@ const App = () => (
           }}
         >
           <AuthProvider>
-            <DatetimePrefsProvider>
+            <AppLocaleProvider>
+              <DatetimePrefsProvider>
               <Routes>
                 <Route path="/" element={<Index />} />
                 <Route path="/login" element={<Login />} />
@@ -58,7 +60,8 @@ const App = () => (
                 <Route path="/test/line-chart" element={<LineChartTest />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>
-            </DatetimePrefsProvider>
+              </DatetimePrefsProvider>
+            </AppLocaleProvider>
           </AuthProvider>
         </BrowserRouter>
       </TooltipProvider>

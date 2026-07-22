@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/tooltip';
 import { useEditorStore } from '@/layout/state/editorStore';
 import { CHART_DOCK_WIDTH_REM } from './ChartLibraryPanel';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 // Shared square-button styling for the floating edit toolbar.
 const TOOLBAR_BTN_BASE = "h-12 w-12 rounded-lg shadow-lg hover:shadow-xl transition-all duration-200";
@@ -64,6 +65,7 @@ export const EditToolbar = ({
   onManageVariables,
   className
 }: EditToolbarProps) => {
+  const { t } = useLocale();
   const chartLibraryOpen = useEditorStore((state) => state.chartLibraryOpen);
   const toggleChartLibrary = useEditorStore((state) => state.toggleChartLibrary);
   // Undo/redo (DO-291). Subscribe to stack *lengths* so the buttons enable/disable live.
@@ -124,7 +126,7 @@ export const EditToolbar = ({
             </Button>
           </TooltipTrigger>
           <TooltipContent side="left">
-            <p>{isEditing ? 'Exit Edit Mode' : 'Enter Edit Mode'}</p>
+            <p>{isEditing ? t('report_view.edit_toolbar.exit_edit_button.tooltip') : t('report_view.edit_toolbar.edit_button.tooltip')}</p>
           </TooltipContent>
         </Tooltip>
 
@@ -137,7 +139,7 @@ export const EditToolbar = ({
                 <Button
                   onClick={undo}
                   disabled={!canUndo}
-                  aria-label="Undo"
+                  aria-label={t('report_view.edit_toolbar.undo_button.label')}
                   className={TOOLBAR_BTN_HISTORY}
                   size="lg"
                 >
@@ -145,7 +147,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>Undo ({undoHint})</p>
+                <p>{t('report_view.edit_toolbar.undo_button.tooltip', { value: undoHint })}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -154,7 +156,7 @@ export const EditToolbar = ({
                 <Button
                   onClick={redo}
                   disabled={!canRedo}
-                  aria-label="Redo"
+                  aria-label={t('report_view.edit_toolbar.redo_button.label')}
                   className={TOOLBAR_BTN_HISTORY}
                   size="lg"
                 >
@@ -162,7 +164,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>Redo ({redoHint})</p>
+                <p>{t('report_view.edit_toolbar.redo_button.tooltip', { value: redoHint })}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -181,7 +183,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>New Row</p>
+                <p>{t('report_view.edit_toolbar.new_row_button.tooltip')}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -197,7 +199,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>New Panel</p>
+                <p>{t('report_view.edit_toolbar.new_panel_button.tooltip')}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -219,7 +221,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>Chart Library</p>
+                <p>{t('report_view.edit_toolbar.chart_library_button.tooltip')}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -240,7 +242,7 @@ export const EditToolbar = ({
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="left">
-                  <p>Dashboard Filters</p>
+                  <p>{t('report_view.edit_toolbar.filters_button.tooltip')}</p>
                 </TooltipContent>
               </Tooltip>
             )}
@@ -265,7 +267,7 @@ export const EditToolbar = ({
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="left">
-                  <p>Tidy Up Layout</p>
+                  <p>{t('report_view.edit_toolbar.tidy_up_button.tooltip')}</p>
                 </TooltipContent>
               </Tooltip>
             )}
@@ -285,7 +287,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>Full Schema</p>
+                <p>{t('report_view.edit_toolbar.full_schema_button.tooltip')}</p>
               </TooltipContent>
             </Tooltip>
 
@@ -305,7 +307,7 @@ export const EditToolbar = ({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="left">
-                <p>Delete Dashboard</p>
+                <p>{t('report_view.edit_toolbar.delete_button.tooltip')}</p>
               </TooltipContent>
             </Tooltip>
           </>

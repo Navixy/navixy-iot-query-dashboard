@@ -1,0 +1,134 @@
+{
+  "actions": {
+    "cancel": {
+      "cta": "Cancel"
+    },
+    "delete": {
+      "cta": {
+        "default": "Delete",
+        "loading": "Deleting…"
+      }
+    },
+    "save": {
+      "cta": {
+        "default": "Save",
+        "loading": "Saving…"
+      }
+    },
+    "save_changes": {
+      "cta": "Save changes"
+    },
+    "rename": {
+      "cta": "Rename"
+    },
+    "retry": {
+      "cta": "Retry"
+    },
+    "show_all": {
+      "cta": "Show all"
+    },
+    "test_query": {
+      "cta": "Test query"
+    }
+  },
+  "branding": {
+    "title": "Dashboards and reports"
+  },
+  "demo_mode": {
+    "title": {
+      "default": "Demo mode",
+      "compact": "Demo"
+    }
+  },
+  "no_data": {
+    "paragraph": {
+      "empty": "No data available",
+      "instruction": "Change your query"
+    },
+    "export": {
+      "paragraph": {
+        "empty": "No data to export"
+      }
+    }
+  },
+  "not_found": {
+    "header": {
+      "title": "404"
+    },
+    "paragraph": {
+      "empty": "Oops! Page not found"
+    },
+    "home_link": {
+      "cta": "Return to home"
+    }
+  },
+  "pagination": {
+    "rows_per_page": {
+      "label": "Rows per page:"
+    },
+    "page_summary": {
+      "label": "Page {page} of {pages} (total: {total})"
+    },
+    "range": {
+      "label": "{start}–{end} of rows (total: {total})"
+    },
+    "rows": {
+      "label": "Rows: {count}"
+    },
+    "rows_returned": {
+      "label": "Rows returned: {count}"
+    },
+    "first_page_button": {
+      "tooltip": "First page"
+    },
+    "previous_page_button": {
+      "tooltip": "Previous page"
+    },
+    "next_page_button": {
+      "tooltip": "Next page"
+    },
+    "last_page_button": {
+      "tooltip": "Last page"
+    }
+  },
+  "roles": {
+    "admin": "Admin",
+    "editor": "Editor",
+    "viewer": "Viewer"
+  },
+  "states": {
+    "creating": "Creating…",
+    "testing": "Testing…",
+    "exporting": "Exporting…",
+    "loading": "Loading…"
+  },
+  "execution": {
+    "query_time": {
+      "label": "Query time: {value} ms"
+    }
+  },
+  "errors": {
+    "query_failed": "Failed to run the query",
+    "report_not_found": "Item not found"
+  },
+  "validation": {
+    "label_required": "Label is required"
+  },
+  "confirmations": {
+    "delete": {
+      "title": "Delete"
+    },
+    "restore_notice": {
+      "paragraph": "{name} will be moved to the trash and can be restored later."
+    }
+  },
+  "no_section": {
+    "label": "No section"
+  },
+  "test_results": {
+    "label": "Test results",
+    "paragraph": {
+      "empty": "Click \"Test query\" to see results"
+    }
+  }
+}

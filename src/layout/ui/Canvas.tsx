@@ -38,6 +38,7 @@ import { PanelGallery } from './PanelGallery';
 import { AddPanelGhost } from './AddPanelGhost';
 import { ChartLibraryPanel } from '@/components/reports/ChartLibraryPanel';
 import type { ChartPresetPanel } from '@/types/chart-catalog';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface CanvasProps {
   renderPanelContent: (panel: Panel) => React.ReactNode;
@@ -76,6 +77,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   const resizeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Use a more specific selector to ensure re-renders when panels change
+  const { t } = useLocale();
   const dashboard = useEditorStore((state) => state.dashboard);
   const dashboardPanelsLength = useEditorStore((state) => state.dashboard?.panels.length ?? 0);
   const selectedPanelId = useEditorStore((state) => state.selectedPanelId);
@@ -1065,7 +1067,7 @@ export const Canvas: React.FC<CanvasProps> = ({
               <DropZone
                 zoneId="canvas-top"
                 type="canvas-top"
-                label="Drop to place above rows"
+                label={t('report_view.canvas.drop_above_rows.label')}
                 visible={true}
                 containerWidth={containerWidth}
                 top={0}
@@ -1095,7 +1097,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                   key={`row-pocket-${band.rowId}`}
                   zoneId={`row-pocket-${band.rowId}`}
                   type="row-pocket"
-                  label={row.collapsed ? 'Drop to add to row' : 'Drop to place in this section'}
+                  label={row.collapsed ? t('report_view.canvas.drop_add_to_row.label') : t('report_view.canvas.drop_in_section.label')}
                   visible={!isDraggingPanelFromThisRow}
                   containerWidth={containerWidth}
                   top={bandTop}
@@ -1109,7 +1111,7 @@ export const Canvas: React.FC<CanvasProps> = ({
               <DropZone
                 zoneId="canvas-bottom"
                 type="canvas-bottom"
-                label="Drop to place below rows"
+                label={t('report_view.canvas.drop_below_rows.label')}
                 visible={true}
                 containerWidth={containerWidth}
                 top={bottomRowBandBottom * GRID_UNIT_HEIGHT}
@@ -1377,7 +1379,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                 <div className="text-xs text-gray-500 mb-2">
                   {dragPreview.x}, {dragPreview.y} | {dragPreview.gridPos.w}×{dragPreview.gridPos.h}
                 </div>
-                <div className="text-sm">Dragging...</div>
+                <div className="text-sm">{t('report_view.canvas.dragging.label')}</div>
               </div>
             </Card>
           ) : activeId && activeId.toString().startsWith('preset-') && draggedPreset ? (

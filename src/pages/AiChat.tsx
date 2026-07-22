@@ -4,6 +4,7 @@ import { useMutationState, useQueryClient } from '@tanstack/react-query';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLocale } from '@/i18n/LocaleProvider';
 import {
   agentChatMutationKey,
   agentSessionQueryKey,
@@ -77,6 +78,7 @@ function turnToBubble(turn: AgentTurn, index: number): ChatBubble {
 
 const AiChat = () => {
   const { user, loading, authSessionId } = useAuth();
+  const { t } = useLocale();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -448,7 +450,7 @@ const AiChat = () => {
                     {
                       id: nextLiveId(),
                       role: 'assistant',
-                      text: 'The connection was lost while the assistant was replying. Your message was delivered — the reply may appear the next time you open this page.',
+                      text: t('ai_chat.turn_error.connection_lost.paragraph.failure'),
                       isError: true,
                     },
                   ]
@@ -468,7 +470,7 @@ const AiChat = () => {
               {
                 id: nextLiveId(),
                 role: 'assistant',
-                text: failed.errorMessage || 'The request failed. Please try again.',
+                text: failed.errorMessage || t('ai_chat.turn_error.request_failed.paragraph.failure'),
                 isError: true,
               },
             ]);
@@ -512,8 +514,9 @@ const AiChat = () => {
     };
     void run();
     // lockAwaitingServerReply is a stable useCallback([]) — listed to satisfy the
-    // exhaustive-deps rule without re-running this reconciliation pass.
-  }, [failedChatTurns, queryClient, authSessionId, lockAwaitingServerReply]);
+    // exhaustive-deps rule without re-running this reconciliation pass. `t` is
+    // memoized per locale, so it is stable for the life of a language selection.
+  }, [failedChatTurns, queryClient, authSessionId, lockAwaitingServerReply, t]);
 
   // With gcTime: Infinity keeping unresolved turns alive across remounts (review
   // !62 round 6, Important 3), SUCCEEDED turns would otherwise pile up in the
@@ -630,8 +633,7 @@ const AiChat = () => {
           // reload does survive — a restart, a replica switch or the 2 h TTL
           // is what loses it.
           <p className="mt-2 text-xs text-muted-foreground">
-            Chat history is not being saved for this workspace and may be lost
-            when the service restarts.
+            {t('ai_chat.session.not_persisted.paragraph')}
           </p>
         )}
       </div>

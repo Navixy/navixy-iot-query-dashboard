@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/utils/errors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface AnnotationEditorProps {
   open: boolean;
@@ -28,6 +29,7 @@ interface AnnotationEditorProps {
 }
 
 export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }: AnnotationEditorProps) {
+  const { t } = useLocale();
   const [sectionName, setSectionName] = useState(annotation.section_name || '');
   const [text, setText] = useState(annotation.text || '');
   const [markdown, setMarkdown] = useState(annotation.markdown || false);
@@ -46,11 +48,11 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
       
       onSave(updatedAnnotation);
       onClose();
-      
-      toast.success('Annotation updated successfully');
+
+      toast.success(t('report_view.annotation_editor.save_toast.paragraph.success'));
     } catch (err) {
       console.error('Error saving annotation:', err);
-      toast.error('Failed to save annotation');
+      toast.error(t('report_view.annotation_editor.save_toast.paragraph.failure'));
     } finally {
       setSaving(false);
     }
@@ -71,10 +73,12 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
     try {
       await onDelete();
       onClose();
-      toast.success('Annotation deleted successfully');
+      toast.success(t('report_view.annotation_editor.delete_toast.paragraph.success'));
     } catch (error) {
       console.error('Error deleting annotation:', error);
-      toast.error(getErrorMessage(error, 'Failed to delete annotation'));
+      toast.error(t('report_view.annotation_editor.delete_toast.paragraph.failure'), {
+        description: getErrorMessage(error),
+      });
     } finally {
       setDeleting(false);
       setShowDeleteDialog(false);
@@ -85,9 +89,9 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-3xl h-[80vh] flex flex-col p-0 bg-[var(--surface-1)] border-[var(--border)] overflow-hidden">
         <DialogHeader className="px-6 pt-6 pb-4 flex-shrink-0 border-b border-[var(--border)] bg-[var(--surface-1)] rounded-t-lg">
-          <DialogTitle className="text-[var(--text-primary)]">Edit Annotation</DialogTitle>
+          <DialogTitle className="text-[var(--text-primary)]">{t('report_view.annotation_editor.header.title')}</DialogTitle>
           <DialogDescription className="text-[var(--text-secondary)]">
-            Modify the annotation content and formatting options
+            {t('report_view.annotation_editor.header.subtitle')}
           </DialogDescription>
         </DialogHeader>
 
@@ -96,13 +100,13 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
             {/* Section Name */}
             <div className="space-y-2">
               <Label htmlFor="section-name" className="text-sm font-medium text-[var(--text-primary)]">
-                Section Name (Optional)
+                {t('report_view.annotation_editor.section_name_input.label')}
               </Label>
               <Input
                 id="section-name"
                 value={sectionName}
                 onChange={(e) => setSectionName(e.target.value)}
-                placeholder="Enter section name..."
+                placeholder={t('report_view.annotation_editor.section_name_input.placeholder.instruction')}
                 className="bg-[var(--surface-2)] border-[var(--border)] text-[var(--text-primary)]"
               />
             </div>
@@ -113,11 +117,11 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="text-content" className="text-sm font-medium text-[var(--text-primary)]">
-                  Content
+                  {t('report_view.annotation_editor.content_input.label')}
                 </Label>
                 <div className="flex items-center space-x-2">
                   <Label htmlFor="markdown-toggle" className="text-sm text-[var(--text-secondary)]">
-                    Markdown
+                    {t('report_view.annotation_editor.markdown_toggle.label')}
                   </Label>
                   <Switch
                     id="markdown-toggle"
@@ -130,12 +134,12 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
                 id="text-content"
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                placeholder="Enter your annotation content..."
+                placeholder={t('report_view.annotation_editor.content_input.placeholder.instruction')}
                 className="min-h-[300px] bg-[var(--surface-2)] border-[var(--border)] text-[var(--text-primary)] resize-none"
               />
               {markdown && (
                 <p className="text-xs text-[var(--text-secondary)]">
-                  Markdown formatting is enabled. Use **bold**, *italic*, `code`, etc.
+                  {t('report_view.annotation_editor.content_input.input_hint.instruction')}
                 </p>
               )}
             </div>
@@ -144,7 +148,7 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
             {text && (
               <div className="space-y-2">
                 <Label className="text-sm font-medium text-[var(--text-primary)]">
-                  Preview
+                  {t('report_view.annotation_editor.preview.label')}
                 </Label>
                 <div className="border rounded-md p-4 bg-[var(--surface-2)] min-h-[100px]">
                   {sectionName && (
@@ -175,18 +179,18 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
                 disabled={saving || deleting}
               >
                 <Trash2 className="h-4 w-4 mr-2" />
-                Delete Annotation
+                {t('report_view.annotation_editor.delete_button.cta')}
               </Button>
             )}
           </div>
           <div className="flex gap-2">
             <Button onClick={handleClose} variant="ghost" size="sm">
               <X className="h-4 w-4 mr-2" />
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button onClick={handleSave} disabled={saving} size="sm">
               <Save className="h-4 w-4 mr-2" />
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? t('common.actions.save.cta.loading') : t('common.actions.save_changes.cta')}
             </Button>
           </div>
         </div>
@@ -198,31 +202,31 @@ export function AnnotationEditor({ open, onClose, annotation, onSave, onDelete }
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-600">
               <Trash2 className="h-5 w-5" />
-              Delete Annotation
+              {t('report_view.annotation_editor.delete_dialog.title')}
             </DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this annotation? This action cannot be undone.
+              {t('report_view.annotation_editor.delete_dialog.paragraph.confirmation')}
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
             <p className="text-sm text-muted-foreground">
-              Annotation: <span className="font-medium">{annotation.section_name || 'Untitled Annotation'}</span>
+              {t('report_view.annotation_editor.delete_dialog.annotation_name.label')} <span className="font-medium">{annotation.section_name || t('report_view.annotation_editor.delete_dialog.untitled.label')}</span>
             </p>
           </div>
           <div className="flex justify-end gap-2">
-            <Button 
-              variant="outline" 
+            <Button
+              variant="outline"
               onClick={() => setShowDeleteDialog(false)}
               disabled={deleting}
             >
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
-            <Button 
-              variant="destructive" 
+            <Button
+              variant="destructive"
               onClick={handleDelete}
               disabled={deleting}
             >
-              {deleting ? 'Deleting...' : 'Delete Annotation'}
+              {deleting ? t('common.actions.delete.cta.loading') : t('report_view.annotation_editor.delete_dialog.confirm_button.cta.default')}
             </Button>
           </div>
         </DialogContent>

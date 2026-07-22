@@ -1,0 +1,198 @@
+{
+  "header": {
+    "title": "Settings",
+    "subtitle": "Configure application settings and preferences"
+  },
+  "tabs_toolbar": {
+    "preferences_option": {
+      "menu_item": "Preferences"
+    },
+    "configuration_option": {
+      "menu_item": "Configuration"
+    }
+  },
+  "preferences_form": {
+    "title": "User preferences",
+    "subtitle": "Configure your personal preferences and display settings",
+    "language_input": {
+      "label": "Language",
+      "input_hint": "The language of menus, buttons, and messages in this app"
+    },
+    "timezone_input": {
+      "label": "Timezone",
+      "input_hint": "All date and time values in reports will be displayed in the selected timezone"
+    },
+    "date_format_input": {
+      "label": "Date format",
+      "placeholder": {
+        "instruction": "Select date format"
+      },
+      "dd_mm_yyyy_option": {
+        "menu_item": "01/12/2021 (DD/MM/YYYY)"
+      },
+      "dd_mm_yyyy_dots_option": {
+        "menu_item": "01.12.2021 (DD.MM.YYYY)"
+      },
+      "mm_dd_yyyy_option": {
+        "menu_item": "12-01-2021 (MM-DD-YYYY)"
+      },
+      "yyyy_mm_dd_option": {
+        "menu_item": "2021-12-01 (YYYY-MM-DD)"
+      },
+      "dd_mmm_yyyy_option": {
+        "menu_item": "1 Dec 2021 (DD MMM YYYY)"
+      },
+      "dd_mmmm_yyyy_option": {
+        "menu_item": "1 December 2021 (DD MMMM YYYY)"
+      }
+    },
+    "time_format_input": {
+      "label": "Time format",
+      "placeholder": {
+        "instruction": "Select time format"
+      },
+      "h12_option": {
+        "menu_item": "12:13 PM (12-hour clock)"
+      },
+      "h24_option": {
+        "menu_item": "12:13 (24-hour clock)"
+      }
+    },
+    "save_button": {
+      "cta": {
+        "default": "Save preferences"
+      },
+      "paragraph": {
+        "success": "Preferences saved",
+        "failure": "Failed to save preferences"
+      }
+    }
+  },
+  "demo_banner": {
+    "paragraph": "You are in demo mode. All changes are stored locally in your browser and won't affect the original database.",
+    "reset_button": {
+      "label": "Reset demo data",
+      "sublabel": "Discard all local changes and reload the original templates",
+      "cta": {
+        "default": "Reset to original",
+        "loading": "Resetting…"
+      },
+      "paragraph": {
+        "confirmation": "This will discard all your local changes and reload the original report templates from the database. Proceed?",
+        "success": "Demo data was reset to the original templates.",
+        "failure": "Failed to reset demo data"
+      }
+    }
+  },
+  "demo_alert": {
+    "label": "Demo mode active",
+    "paragraph": {
+      "default": "Your changes are saved locally and persist across browser sessions.",
+      "instruction": "To discard all local changes and restore the original templates from the database, click the button below."
+    }
+  },
+  "global_variables_table": {
+    "title": "Global variables",
+    "subtitle": {
+      "instruction": "Define global variables that can be used in SQL queries with this syntax:"
+    },
+    "paragraph": {
+      "empty": "No global variables defined",
+      "failure": "Failed to load global variables"
+    },
+    "label_column": {
+      "column_header": "Label"
+    },
+    "description_column": {
+      "column_header": "Description"
+    },
+    "value_column": {
+      "column_header": "Value"
+    },
+    "actions_column": {
+      "column_header": "Actions"
+    },
+    "label_input": {
+      "placeholder": "Variable name"
+    },
+    "description_input": {
+      "placeholder": "Description (optional)"
+    },
+    "value_input": {
+      "placeholder": "Value (optional)"
+    },
+    "save_button": {
+      "paragraph": {
+        "success": "Variable updated",
+        "failure": "Failed to update the variable"
+      }
+    },
+    "cancel_button": {
+      "tooltip": "Cancel"
+    },
+    "edit_button": {
+      "tooltip": "Edit variable"
+    },
+    "delete_button": {
+      "tooltip": "Delete variable",
+      "paragraph": {
+        "confirmation": "Are you sure you want to delete this variable?",
+        "success": "Variable deleted",
+        "failure": "Failed to delete the variable"
+      }
+    },
+    "add_button": {
+      "cta": "Add variable"
+    }
+  },
+  "variable_form": {
+    "title": "Add new variable",
+    "label_input": {
+      "label": "Label"
+    },
+    "description_input": {
+      "label": "Description"
+    },
+    "value_input": {
+      "label": "Value"
+    },
+    "create_button": {
+      "cta": "Create variable",
+      "paragraph": {
+        "success": "Variable created",
+        "failure": "Failed to create the variable"
+      }
+    }
+  },
+  "timezone_selector": {
+    "placeholder": {
+      "instruction": "Select timezone…"
+    },
+    "search_input": {
+      "placeholder": {
+        "instruction": "Search timezone…"
+      }
+    },
+    "results_list": {
+      "paragraph": {
+        "empty": "No timezone found"
+      }
+    },
+    "browser_option": {
+      "menu_item": "Browser auto-detect: {value}"
+    },
+    "region_values": {
+      "auto_detect": "Auto-detect",
+      "americas": "Americas",
+      "europe": "Europe",
+      "asia": "Asia",
+      "africa": "Africa",
+      "australia_pacific": "Australia and Pacific",
+      "atlantic": "Atlantic",
+      "indian_ocean": "Indian Ocean",
+      "arctic": "Arctic",
+      "antarctica": "Antarctica",
+      "other": "Other"
+    }
+  }
+}

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 /**
  * Three-dot pulse shown while a chat turn is in flight. Mounted fresh for each
@@ -16,9 +17,8 @@ import { useEffect, useState } from 'react';
  */
 const STILL_WORKING_AFTER_MS = 10_000;
 
-const STILL_WORKING_TEXT = 'Still working — complex dashboards can take a while.';
-
 export function TypingIndicator() {
+  const { t } = useLocale();
   const [slow, setSlow] = useState(false);
 
   useEffect(() => {
@@ -34,9 +34,11 @@ export function TypingIndicator() {
         <span className="h-2 w-2 rounded-full bg-muted-foreground/60 animate-bounce motion-reduce:animate-none" />
       </span>
       {slow ? (
-        <span className="text-sm text-muted-foreground">{STILL_WORKING_TEXT}</span>
+        <span className="text-sm text-muted-foreground">
+          {t('ai_chat.typing_indicator.paragraph.loading')}
+        </span>
       ) : (
-        <span className="sr-only">The assistant is preparing a reply.</span>
+        <span className="sr-only">{t('ai_chat.typing_indicator.status.loading')}</span>
       )}
     </div>
   );

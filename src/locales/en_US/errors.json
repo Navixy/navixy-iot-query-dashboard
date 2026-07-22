@@ -1,0 +1,89 @@
+{
+  "sql": {
+    "query_failed": {
+      "paragraph": {
+        "failure": "Query failed. Please check SQL syntax and parameter values."
+      }
+    },
+    "invalid_value": {
+      "paragraph": {
+        "failure": "Invalid value type for SQL parameter. {detail}"
+      },
+      "fallback": {
+        "instruction": "Check date/number parameters and their formats."
+      }
+    },
+    "syntax_error": {
+      "paragraph": {
+        "failure": "SQL syntax error. {detail}"
+      },
+      "fallback": {
+        "instruction": "Please check the query syntax near the reported position."
+      }
+    },
+    "unknown_column": {
+      "paragraph": {
+        "failure": "Unknown column in query. {detail}"
+      },
+      "fallback": {
+        "instruction": "Check the selected table aliases and column names."
+      }
+    },
+    "table_not_found": {
+      "paragraph": {
+        "failure": "Table or view not found. {detail}"
+      },
+      "fallback": {
+        "instruction": "Check schema and table names in the query."
+      }
+    },
+    "function_mismatch": {
+      "paragraph": {
+        "failure": "SQL function mismatch. {detail}"
+      },
+      "fallback": {
+        "instruction": "Check function name and argument types."
+      }
+    },
+    "insufficient_privileges": {
+      "paragraph": {
+        "failure": "Insufficient privileges. {detail}"
+      },
+      "fallback": {
+        "instruction": "The database user lacks access to this table or function."
+      }
+    },
+    "duplicate_key": {
+      "paragraph": {
+        "failure": "Duplicate key violation. {detail}"
+      },
+      "fallback": {
+        "instruction": "A row with this key already exists."
+      }
+    },
+    "foreign_key": {
+      "paragraph": {
+        "failure": "Foreign key violation. {detail}"
+      },
+      "fallback": {
+        "instruction": "The referenced record doesn't exist or can't be removed."
+      }
+    },
+    "network": {
+      "paragraph": {
+        "failure": "Network issue while executing query. {detail}"
+      },
+      "fallback": {
+        "instruction": "Please retry in a few seconds."
+      }
+    },
+    "timeout": {
+      "paragraph": {
+        "failure": "Query timeout exceeded. {detail}"
+      },
+      "fallback": {
+        "instruction": "Try narrowing date range or simplifying SQL."
+      }
+    }
+  }
+}

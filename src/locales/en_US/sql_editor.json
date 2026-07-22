@@ -1,0 +1,64 @@
+{
+  "header": {
+    "title": "SQL editor",
+    "subtitle": "You can safely explore your data with SELECT queries. Your data remains protected from accidental changes."
+  },
+  "access_denied_toast": {
+    "paragraph": {
+      "failure": "Access denied. You need the Admin or Editor role."
+    }
+  },
+  "query_tabs": {
+    "add_button": {
+      "tooltip": "Add new tab"
+    },
+    "tab_default_name": {
+      "label": "Query {number}"
+    },
+    "close_toast": {
+      "paragraph": {
+        "failure": "You can't close the last tab"
+      }
+    }
+  },
+  "execution_meta": {
+    "fetch_time": {
+      "label": "Fetch time: {value} ms"
+    },
+    "executed_at": {
+      "label": "Executed: {time}"
+    }
+  },
+  "execute_button": {
+    "cta": {
+      "default": "Execute query",
+      "loading": "Executing…"
+    }
+  },
+  "export_button": {
+    "cta": "Export CSV"
+  },
+  "error_alert": {
+    "label": "Error:"
+  },
+  "results": {
+    "paragraph": {
+      "empty": "No results returned"
+    }
+  },
+  "execute_toast": {
+    "empty_query": {
+      "paragraph": {
+        "failure": "Enter an SQL query"
+      }
+    },
+    "paragraph": {
+      "success": "Query executed"
+    }
+  },
+  "export_toast": {
+    "paragraph": {
+      "success": "CSV exported"
+    }
+  }
+}

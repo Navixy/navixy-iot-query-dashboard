@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { clsx } from 'clsx';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ArrowRight, LayoutGrid, MessageSquareText } from 'lucide-react';
@@ -23,13 +24,17 @@ import { ArrowRight, LayoutGrid, MessageSquareText } from 'lucide-react';
  * Not exported, exactly as on DO-288: nothing imports it, and exporting a non-component
  * from a page file trips react-refresh/only-export-components (allowConstantExport covers
  * primitives, not array literals) — the repo's lint gate is otherwise warning-free.
+ *
+ * Localized: the copy fields hold i18n KEY PATHS, resolved with t() at the render sites
+ * below. The array SHAPE — its name and its field names — is unchanged on purpose, so
+ * converging with DO-288 stays the one-array-element edit described above.
  */
 const WIZARD_OPTIONS = [
   {
     path: '/app/chat',
     icon: MessageSquareText,
-    title: 'AI Assistant',
-    tagline: 'From a plain-language description to a working dashboard',
+    title: 'app_landing.option_card.ai_assistant.title',
+    tagline: 'app_landing.option_card.ai_assistant.sublabel',
     // "before it is added to your reports", NOT "before anything is saved" — and the
     // distinction is a real one, not pedantry. What Apply gates is REPORT CREATION
     // (POST /api/reports), never storage: on the common path the assistant turn, INCLUDING
@@ -46,15 +51,14 @@ const WIZARD_OPTIONS = [
     // (§7 tracks each). Three were a sentence beginning "always" or "never"; the fourth
     // was a table — which read as more rigorous and was incomplete in a new way.
     // Change the table in §7, not this sentence.
-    description:
-      'Describe what you want to monitor in plain language. The assistant asks a few clarifying questions, then builds a full SQL-backed dashboard you can preview against your own data before it is added to your reports.',
-    bestFor: 'You know what you want to see but not which tables or queries it takes to get there.',
+    description: 'app_landing.option_card.ai_assistant.paragraph',
+    bestFor: 'app_landing.option_card.ai_assistant.best_for.paragraph',
     highlights: [
-      'Plain-language interview — refine the result by continuing the conversation',
-      'Preview every panel against your real data before it becomes a report',
-      'Saved into an "AI Dashboards" section in your sidebar',
+      'app_landing.option_card.ai_assistant.interview_item.list_item',
+      'app_landing.option_card.ai_assistant.preview_item.list_item',
+      'app_landing.option_card.ai_assistant.section_item.list_item',
     ],
-    cta: 'Start chatting',
+    cta: 'app_landing.option_card.ai_assistant.cta',
     // NOT DO-288's 'default'. This repo's Button is hand-written, not stock shadcn:
     // button.tsx's VARIANT_STYLES is a Partial<> holding only primary/secondary/ghost, so
     // 'default' — which IS in the ButtonVariant union, widened so the shadcn
@@ -75,11 +79,12 @@ const GRID_CLASS = WIZARD_OPTIONS.length > 1
   : 'grid gap-6 max-w-xl mx-auto';
 
 const FRAMING = WIZARD_OPTIONS.length > 1
-  ? 'Both paths create a full SQL-backed report without writing queries. Choose the approach that fits how you think — question-first or template-first.'
-  : 'Describe what you want to monitor and the assistant will build a dashboard for you.';
+  ? 'app_landing.header.subtitle.instruction.multi_option'
+  : 'app_landing.header.subtitle.instruction.single_option';
 
 const AppPage = () => {
   const { user, loading } = useAuth();
+  const { t } = useLocale();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -109,13 +114,13 @@ const AppPage = () => {
               and as the sidebar Home fill in AppSidebar. (!65 review) */}
           <div className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-4 py-1.5 text-sm font-medium text-accent">
             <LayoutGrid className="h-4 w-4" />
-            Get started
+            {t('app_landing.header.badge.label')}
           </div>
           <h1 className="text-3xl md:text-4xl font-bold text-foreground tracking-tight">
-            How do you want to build your dashboard?
+            {t('app_landing.header.title.question')}
           </h1>
           <p className="text-muted-foreground text-lg max-w-2xl mx-auto">
-            {FRAMING}
+            {t(FRAMING)}
           </p>
         </div>
 
@@ -140,8 +145,8 @@ const AppPage = () => {
                           text-muted-foreground are all emitted AFTER these, and silently won.
                           Same reason MenuEditor's row-action button uses !h-6 !w-6 !p-0.
                           (!65 review) */}
-                      <CardTitle className="!text-2xl">{option.title}</CardTitle>
-                      <p className="text-sm font-medium text-accent">{option.tagline}</p>
+                      <CardTitle className="!text-2xl">{t(option.title)}</CardTitle>
+                      <p className="text-sm font-medium text-accent">{t(option.tagline)}</p>
                     </div>
                   </div>
                   {/* !leading-relaxed, not leading-relaxed: Tailwind's font-size utilities set a
@@ -152,13 +157,15 @@ const AppPage = () => {
                       that wins the font-size also has to be spent on anything it collides with.
                       (!65 review round 3) */}
                   <CardDescription className="!text-base !leading-relaxed !text-text-secondary">
-                    {option.description}
+                    {t(option.description)}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-5">
                   <p className="text-sm text-muted-foreground">
-                    <span className="font-medium text-foreground">Best for:</span>{' '}
-                    {option.bestFor}
+                    <span className="font-medium text-foreground">
+                      {t('app_landing.option_card.best_for_label.label')}
+                    </span>{' '}
+                    {t(option.bestFor)}
                   </p>
                   {/* Token class, not the arbitrary `text-[var(--text-secondary)]` form, matching
                       the description above. No `!` here: nothing on this element competes, and an
@@ -167,7 +174,7 @@ const AppPage = () => {
                     {option.highlights.map((item) => (
                       <li key={item} className="flex gap-2">
                         <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                        <span>{item}</span>
+                        <span>{t(item)}</span>
                       </li>
                     ))}
                   </ul>
@@ -195,7 +202,7 @@ const AppPage = () => {
                       'w-full justify-center !h-12 !text-base group-hover:shadow-md',
                     )}
                   >
-                    {option.cta}
+                    {t(option.cta)}
                     <ArrowRight className="ml-2 h-5 w-5 transition-transform group-hover:translate-x-0.5" />
                   </Link>
                 </CardContent>

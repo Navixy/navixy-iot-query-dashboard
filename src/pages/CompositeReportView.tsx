@@ -72,6 +72,7 @@ import {
 import { buildExportZoneFields, normaliseUsedParams } from '@/utils/exportRequest';
 import { useDatetimePrefs } from '@/contexts/DatetimePrefsContext';
 import { createRunGate } from '@/utils/runGate';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { ExportDialog } from '@/components/export/ExportDialog';
 import { ChartSeriesPicker } from '@/components/reports/ChartSeriesPicker';
 import { resolvePlottedGroups } from '@/lib/chartGroups';
@@ -130,6 +131,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 }
 
 export default function CompositeReportView() {
+  const { t } = useLocale();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { token } = useAuth();
@@ -288,7 +290,7 @@ export default function CompositeReportView() {
       } catch (rawErr: unknown) {
         if (cancelled) return;
         const error = toErrorMeta(rawErr);
-        setLoadError(error.message || 'Failed to load report');
+        setLoadError(error.message || t('composite_report.error_state.load_failure.paragraph.failure'));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -298,7 +300,7 @@ export default function CompositeReportView() {
     return () => {
       cancelled = true;
     };
-  }, [id, reloadNonce]);
+  }, [id, reloadNonce, t]);
 
   // Execute query when the report loads, and re-execute when the effective
   // zone changes — server preferences merging in after the first execution,
@@ -362,12 +364,12 @@ export default function CompositeReportView() {
       const error = toErrorMeta(rawErr);
       setExecution({
         loading: false,
-        error: error.message || 'Query execution failed',
+        error: error.message || t('common.errors.query_failed'),
         data: null,
         lastExecuted: null,
       });
     }
-  }, [id, sqlQuery, buildQueryParams, runGate]);
+  }, [id, sqlQuery, buildQueryParams, runGate, t]);
 
   // Convert rows to objects for easier processing
   const rowObjects = useMemo(() => {
@@ -498,7 +500,7 @@ export default function CompositeReportView() {
         }
       } catch (error) {
         console.error('Geocoding error:', error);
-        toast.error('Geocoding failed. Please try again.');
+        toast.error(t('composite_report.report_viewer.geocode_toast.paragraph.failure'));
       }
 
       setGeocoding(false);
@@ -507,7 +509,7 @@ export default function CompositeReportView() {
     geocodeCoordinates();
     // geocodedAddresses is set by this effect; including it would cause a re-geocode loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [geocodeEnabled, gpsPairs, rowObjects]);
+  }, [geocodeEnabled, gpsPairs, rowObjects, t]);
 
   // Get address for coordinates
   const getAddressForCoords = useCallback((lat: number, lng: number): string | null => {
@@ -675,11 +677,11 @@ export default function CompositeReportView() {
         }
         return next;
       });
-      toast.success('SQL query saved');
+      toast.success(t('composite_report.sql_form.save_toast.paragraph.success'));
       return true;
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Failed to save: ${error.message}`);
+      toast.error(t('composite_report.sql_form.save_toast.paragraph.failure'), { description: error.message });
       return false;
     } finally {
       setSavingSql(false);
@@ -742,10 +744,10 @@ export default function CompositeReportView() {
       }
 
       setReport(response.data);
-      toast.success('Chart settings saved');
+      toast.success(t('composite_report.chart_viewer.save_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Failed to save chart settings: ${error.message}`);
+      toast.error(t('composite_report.chart_viewer.save_toast.paragraph.failure'), { description: error.message });
     } finally {
       setSavingChartConfig(false);
     }
@@ -797,10 +799,10 @@ export default function CompositeReportView() {
       if (maxRowsChanged) {
         setPendingExecute(true);
       }
-      toast.success('Table settings saved');
+      toast.success(t('composite_report.table_settings_form.save_toast.paragraph.success'));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Failed to save table settings: ${error.message}`);
+      toast.error(t('composite_report.table_settings_form.save_toast.paragraph.failure'), { description: error.message });
     } finally {
       setSavingTableConfig(false);
     }
@@ -843,11 +845,15 @@ export default function CompositeReportView() {
       }
 
       setReport(response.data);
-      toast.success(`Map ${enabled ? 'enabled' : 'disabled'}`);
+      toast.success(
+        enabled
+          ? t('composite_report.report_viewer.map_toggle.enabled_toast.paragraph.success')
+          : t('composite_report.report_viewer.map_toggle.disabled_toast.paragraph.success'),
+      );
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       setReport(previousReport);
-      toast.error(`Failed to update map setting: ${error.message}`);
+      toast.error(t('composite_report.report_viewer.map_toggle.save_toast.paragraph.failure'), { description: error.message });
     } finally {
       setSavingMapConfig(false);
     }
@@ -928,13 +934,13 @@ export default function CompositeReportView() {
       if (blob) {
         const extension = format === 'csv' ? 'csv' : 'xlsx';
         downloadBlob(blob, `${report?.slug || 'composite-report'}.${extension}`);
-        toast.success(`${format.toUpperCase()} export downloaded`);
+        toast.success(t('composite_report.report_viewer.export_toast.paragraph.success', { format: format.toUpperCase() }));
       } else {
         throw new Error('Export failed');
       }
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Export failed: ${error.message}`);
+      toast.error(t('composite_report.report_viewer.export_toast.paragraph.failure'), { description: error.message });
     } finally {
       setExporting(null);
     }
@@ -963,9 +969,9 @@ export default function CompositeReportView() {
           config: updatedConfig,
         });
         setReport({ ...report, config: updatedConfig });
-        toast.success('Export header settings saved');
+        toast.success(t('composite_report.report_viewer.export_header_toast.paragraph.success'));
       } catch {
-        toast.error('Failed to save export header settings');
+        toast.error(t('composite_report.report_viewer.export_header_toast.paragraph.failure'));
       }
     }
 
@@ -993,13 +999,13 @@ export default function CompositeReportView() {
       });
       if (blob) {
         downloadBlob(blob, `${report?.slug || 'composite-report'}.html`);
-        toast.success('HTML export downloaded');
+        toast.success(t('composite_report.report_viewer.export_toast.paragraph.success', { format: 'HTML' }));
       } else {
         throw new Error('Export failed');
       }
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Export failed: ${error.message}`);
+      toast.error(t('composite_report.report_viewer.export_toast.paragraph.failure'), { description: error.message });
     } finally {
       setExporting(null);
     }
@@ -1026,13 +1032,13 @@ export default function CompositeReportView() {
       });
       if (blob) {
         downloadBlob(blob, `${report?.slug || 'composite-report'}.pdf`);
-        toast.success('PDF export downloaded');
+        toast.success(t('composite_report.report_viewer.export_toast.paragraph.success', { format: 'PDF' }));
       } else {
         throw new Error('PDF export failed');
       }
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`PDF export failed: ${error.message}`);
+      toast.error(t('composite_report.report_viewer.export_toast.paragraph.failure'), { description: error.message });
     } finally {
       setExporting(null);
     }
@@ -1054,15 +1060,15 @@ export default function CompositeReportView() {
       <AppLayout>
         <div className="flex flex-col items-center justify-center h-full gap-4">
           <AlertCircle className="h-12 w-12 text-muted-foreground" />
-          <p className="text-muted-foreground">{loadError || 'Report not found'}</p>
+          <p className="text-muted-foreground">{loadError || t('common.errors.report_not_found')}</p>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={() => setReloadNonce((n) => n + 1)}>
               <RefreshCw className="mr-2 h-4 w-4" />
-              Retry
+              {t('common.actions.retry.cta')}
             </Button>
             <Button variant="outline" onClick={() => navigate('/app')}>
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Home
+              {t('composite_report.error_state.home_button.cta')}
             </Button>
           </div>
         </div>
@@ -1087,7 +1093,7 @@ export default function CompositeReportView() {
           <div className="flex items-center gap-2 print:hidden">
             <div className="h-9 inline-flex items-center gap-1.5 px-1 text-sm">
               <Label htmlFor="map-enabled-toggle" className="text-sm font-medium text-muted-foreground leading-none cursor-pointer">
-                Map
+                {t('composite_report.report_viewer.map_toggle.label')}
               </Label>
               <Switch
                 id="map-enabled-toggle"
@@ -1104,7 +1110,7 @@ export default function CompositeReportView() {
               disabled={execution.loading}
             >
               <RefreshCw className={`h-4 w-4 mr-2 ${execution.loading ? 'animate-spin' : ''}`} />
-              Refresh
+              {t('composite_report.report_viewer.refresh_button.cta')}
             </Button>
 
             <DropdownMenu>
@@ -1119,18 +1125,18 @@ export default function CompositeReportView() {
                   ) : (
                     <FileSpreadsheet className="h-4 w-4 mr-2" />
                   )}
-                  Excel
+                  {t('composite_report.report_viewer.excel_menu.trigger.cta')}
                   <ChevronDown className="h-3 w-3 ml-1" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={() => openExportDialog('xlsx')}>
                   <FileSpreadsheet className="h-4 w-4 mr-2" />
-                  Excel (.xlsx)
+                  {t('composite_report.report_viewer.excel_menu.xlsx_option.menu_item')}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => openExportDialog('csv')}>
                   <FileText className="h-4 w-4 mr-2" />
-                  CSV (.csv)
+                  {t('composite_report.report_viewer.excel_menu.csv_option.menu_item')}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1146,7 +1152,7 @@ export default function CompositeReportView() {
               ) : (
                 <FileCode2 className="h-4 w-4 mr-2" />
               )}
-              HTML
+              {t('composite_report.report_viewer.html_button.cta')}
             </Button>
             <Button
               variant="outline"
@@ -1159,7 +1165,7 @@ export default function CompositeReportView() {
               ) : (
                 <FileText className="h-4 w-4 mr-2" />
               )}
-              PDF
+              {t('composite_report.report_viewer.pdf_button.cta')}
             </Button>
           </div>
         </div>
@@ -1169,16 +1175,16 @@ export default function CompositeReportView() {
           <div className="flex items-center gap-4 text-sm text-muted-foreground">
             <span className="flex items-center gap-1">
               <Clock className="h-4 w-4" />
-              Last updated: {formatTimestamp(execution.lastExecuted, datetimePrefs)}
+              {t('composite_report.report_viewer.execution_meta.last_updated.label', { time: formatTimestamp(execution.lastExecuted, datetimePrefs) })}
             </span>
             {execution.data?.stats && (
               <>
                 <span className="flex items-center gap-1">
                   <Database className="h-4 w-4" />
-                  {execution.data.stats.rowCount} rows
+                  {t('common.pagination.rows.label', { count: execution.data.stats.rowCount })}
                 </span>
                 <span>
-                  Query time: {execution.data.stats.elapsedMs}ms
+                  {t('common.execution.query_time.label', { value: execution.data.stats.elapsedMs })}
                 </span>
               </>
             )}
@@ -1190,9 +1196,9 @@ export default function CompositeReportView() {
       {templateParamNames.length > 0 && (
         <Card className="mb-6 print:hidden">
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">Parameters</CardTitle>
+            <CardTitle className="text-base">{t('composite_report.parameters_form.header.title')}</CardTitle>
             <CardDescription>
-              Values for placeholders such as <code className="text-xs">{'${from}'}</code> in the <strong>saved</strong> SQL (Save SQL if you edited the query below). Use Refresh or Apply after changing values.
+              {t('composite_report.parameters_form.header.subtitle.instruction')} <code className="text-xs">{'${from}'}</code>. {t('composite_report.parameters_form.apply_hint.paragraph.instruction')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -1275,7 +1281,7 @@ export default function CompositeReportView() {
                       value={stored}
                       placeholder={
                         globalVariables.find((g) => g.label === name)?.value ||
-                        `Enter ${name}`
+                        t('composite_report.parameters_form.value_input.placeholder.instruction', { name })
                       }
                       onChange={(e) =>
                         setParameterValues((prev) => ({
@@ -1295,7 +1301,7 @@ export default function CompositeReportView() {
                 ) : (
                   <Check className="h-4 w-4 mr-1" />
                 )}
-                Apply and run query
+                {t('composite_report.parameters_form.apply_button.cta')}
               </Button>
             </div>
           </CardContent>
@@ -1308,9 +1314,9 @@ export default function CompositeReportView() {
           <Button variant="ghost" className="w-full justify-start p-0 h-auto hover:bg-transparent">
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               {sqlExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-              <span>SQL Query</span>
+              <span>{t('composite_report.sql_form.toggle.label')}</span>
               {editableSql !== report.sql_query && (
-                <span className="text-xs text-amber-500">(unsaved changes)</span>
+                <span className="text-xs text-amber-500">{t('composite_report.sql_form.unsaved_badge.label')}</span>
               )}
             </div>
           </Button>
@@ -1322,7 +1328,7 @@ export default function CompositeReportView() {
                 value={editableSql}
                 onChange={(e) => setEditableSql(e.target.value)}
                 className="font-mono text-sm min-h-[200px] resize-y"
-                placeholder="Enter SQL query..."
+                placeholder={t('composite_report.sql_form.query_input.placeholder.instruction')}
               />
               <div className="flex gap-2">
                 <Button
@@ -1336,7 +1342,7 @@ export default function CompositeReportView() {
                   ) : (
                     <Save className="h-4 w-4 mr-2" />
                   )}
-                  Save
+                  {t('common.actions.save.cta.default')}
                 </Button>
                 <Button
                   variant="default"
@@ -1349,7 +1355,7 @@ export default function CompositeReportView() {
                   ) : (
                     <Play className="h-4 w-4 mr-2" />
                   )}
-                  Save & Run
+                  {t('composite_report.sql_form.save_and_run_button.cta')}
                 </Button>
               </div>
             </CardContent>
@@ -1364,7 +1370,7 @@ export default function CompositeReportView() {
             <div className="flex items-start gap-3 text-destructive">
               <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
               <div>
-                <p className="font-medium">Query Error</p>
+                <p className="font-medium">{t('composite_report.report_viewer.query_error.header.title')}</p>
                 <p className="text-sm mt-1">{execution.error}</p>
               </div>
             </div>
@@ -1377,7 +1383,7 @@ export default function CompositeReportView() {
         <div className="flex items-center justify-center py-12">
           <div className="flex items-center gap-3 text-muted-foreground">
             <Loader2 className="h-6 w-6 animate-spin" />
-            <span>Executing query...</span>
+            <span>{t('composite_report.report_viewer.loading.paragraph.loading')}</span>
           </div>
         </div>
       )}
@@ -1394,28 +1400,28 @@ export default function CompositeReportView() {
                     <div>
                       <div className="flex items-center gap-2">
                         <TableIcon className="h-5 w-5 text-muted-foreground" />
-                        <CardTitle className="text-xl">Data Table</CardTitle>
+                        <CardTitle className="text-xl">{t('composite_report.table_viewer.header.title')}</CardTitle>
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2 print:hidden"
                           onClick={() => setTableSettingsExpanded(prev => !prev)}
-                          title="Table settings"
+                          title={t('composite_report.table_viewer.settings_button.tooltip')}
                         >
                           <Settings className="h-4 w-4" />
                         </Button>
                         {tableConfigChanged && (
-                          <span className="text-xs text-amber-500 print:hidden">unsaved</span>
+                          <span className="text-xs text-amber-500 print:hidden">{t('composite_report.table_viewer.unsaved_badge.label')}</span>
                         )}
                       </div>
                       <CardDescription className="mt-1">
-                        {execution.data.rows.length} rows loaded
+                        {t('composite_report.table_viewer.row_count.label', { count: execution.data.rows.length })}
                       </CardDescription>
                     </div>
 
                     {/* Geocode Checkbox - show if any GPS column pairs detected */}
                     {gpsPairs.length > 0 && (
-                      <div className="flex items-center gap-2 print:hidden" title={!hasSessionId ? 'Geocoding requires a session. Please log in via the Navixy platform.' : undefined}>
+                      <div className="flex items-center gap-2 print:hidden" title={!hasSessionId ? t('composite_report.table_viewer.geocode_toggle.tooltip.disabled') : undefined}>
                         <Checkbox
                           id="geocode"
                           checked={geocodeEnabled}
@@ -1433,8 +1439,8 @@ export default function CompositeReportView() {
                           htmlFor="geocode"
                           className={`text-sm font-medium leading-none flex items-center gap-1 ${!hasSessionId ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
                         >
-                          {!hasSessionId ? <Lock className="h-3 w-3" /> : <Circle className="h-3 w-3 fill-current" aria-label="Map" />}
-                          Geocode to address
+                          {!hasSessionId ? <Lock className="h-3 w-3" /> : <Circle className="h-3 w-3 fill-current" aria-label={t('composite_report.table_viewer.geocode_toggle.marker_icon.label')} />}
+                          {t('composite_report.table_viewer.geocode_toggle.label')}
                           {geocoding && <Loader2 className="h-3 w-3 animate-spin ml-1" />}
                         </label>
                       </div>
@@ -1445,20 +1451,20 @@ export default function CompositeReportView() {
                   <AlertDialog open={geocodeConfirmOpen} onOpenChange={setGeocodeConfirmOpen}>
                     <AlertDialogContent>
                       <AlertDialogHeader>
-                        <AlertDialogTitle>Enable Geocoding?</AlertDialogTitle>
+                        <AlertDialogTitle>{t('composite_report.table_viewer.geocode_dialog.title.question')}</AlertDialogTitle>
                         <AlertDialogDescription className="space-y-2">
                           <p>
-                            This will geocode <strong>{geocodableCount.toLocaleString()}</strong> unique coordinate{geocodableCount !== 1 ? 's' : ''} to street addresses.
+                            {t('composite_report.table_viewer.geocode_dialog.count_notice.paragraph.warning', { count: geocodableCount.toLocaleString() })}
                           </p>
                           <p>
-                            This operation may take some time and will be billed according to your Navixy geocoding tariff.
+                            {t('composite_report.table_viewer.geocode_dialog.billing_notice.paragraph')}
                           </p>
                         </AlertDialogDescription>
                       </AlertDialogHeader>
                       <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogCancel>{t('common.actions.cancel.cta')}</AlertDialogCancel>
                         <AlertDialogAction onClick={() => setGeocodeEnabled(true)}>
-                          Geocode {geocodableCount.toLocaleString()} coordinates
+                          {t('composite_report.table_viewer.geocode_dialog.confirm_button.cta.confirmation', { count: geocodableCount.toLocaleString() })}
                         </AlertDialogAction>
                       </AlertDialogFooter>
                     </AlertDialogContent>
@@ -1470,7 +1476,7 @@ export default function CompositeReportView() {
                   <div className="px-6 pb-4 space-y-3 border-b print:hidden">
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
                       <div className="space-y-1">
-                        <Label className="text-xs text-muted-foreground">Page Size</Label>
+                        <Label className="text-xs text-muted-foreground">{t('composite_report.table_settings_form.page_size_input.label')}</Label>
                         <Select
                           value={String(editPageSize)}
                           onValueChange={(v) => setEditPageSize(parseInt(v))}
@@ -1479,15 +1485,15 @@ export default function CompositeReportView() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="25">25 rows</SelectItem>
-                            <SelectItem value="50">50 rows</SelectItem>
-                            <SelectItem value="100">100 rows</SelectItem>
-                            <SelectItem value="200">200 rows</SelectItem>
+                            <SelectItem value="25">{t('common.pagination.rows.label', { count: 25 })}</SelectItem>
+                            <SelectItem value="50">{t('common.pagination.rows.label', { count: 50 })}</SelectItem>
+                            <SelectItem value="100">{t('common.pagination.rows.label', { count: 100 })}</SelectItem>
+                            <SelectItem value="200">{t('common.pagination.rows.label', { count: 200 })}</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                       <div className="space-y-1">
-                        <Label className="text-xs text-muted-foreground">Max Rows</Label>
+                        <Label className="text-xs text-muted-foreground">{t('composite_report.table_settings_form.max_rows_input.label')}</Label>
                         <Select
                           value={String(editMaxRows)}
                           onValueChange={(v) => setEditMaxRows(parseInt(v))}
@@ -1510,7 +1516,7 @@ export default function CompositeReportView() {
                           checked={editShowTotals}
                           onCheckedChange={setEditShowTotals}
                         />
-                        <Label htmlFor="editShowTotals" className="text-sm">Show Totals</Label>
+                        <Label htmlFor="editShowTotals" className="text-sm">{t('composite_report.table_settings_form.show_totals_toggle.label')}</Label>
                       </div>
                       <Button
                         variant="outline"
@@ -1524,7 +1530,7 @@ export default function CompositeReportView() {
                         ) : (
                           <Save className="h-4 w-4 mr-2" />
                         )}
-                        Save
+                        {t('composite_report.table_settings_form.save_button.cta')}
                       </Button>
                     </div>
                   </div>
@@ -1576,7 +1582,9 @@ export default function CompositeReportView() {
                                       const pairAsLat = gpsPairs.find(p => p.latColumn === col.name);
                                       if (pairAsLat) {
                                         const prefix = col.name.replace(/[_]?(lat|latitude|y_coord|y_coordinate|y)$/i, '').replace(/_+$/, '');
-                                        const label = prefix ? `${prefix.charAt(0).toUpperCase() + prefix.slice(1)} Address` : 'Address';
+                                        const label = prefix
+                                          ? t('composite_report.table_viewer.address_column_prefixed.column_header', { prefix: prefix.charAt(0).toUpperCase() + prefix.slice(1) })
+                                          : t('composite_report.table_viewer.address_column.column_header');
                                         return (
                                           <TableHead key={col.name} className="whitespace-nowrap bg-background">
                                             {label}
@@ -1613,7 +1621,7 @@ export default function CompositeReportView() {
                                             return (
                                               <TableCell key={cellIdx} className="max-w-[400px]">
                                                 {address || (geocoding ? (
-                                                  <span className="text-muted-foreground italic">Loading...</span>
+                                                  <span className="text-muted-foreground italic">{t('common.states.loading')}</span>
                                                 ) : (
                                                   <span className="text-muted-foreground">{`${lat.toFixed(6)}, ${lng.toFixed(6)}`}</span>
                                                 ))}
@@ -1643,7 +1651,7 @@ export default function CompositeReportView() {
                                         <TableCell key={colIdx} className="font-semibold">
                                           {colIdx in numericTotals
                                             ? formatCellValue(numericTotals[colIdx], datetimePrefs)
-                                            : colIdx === 0 ? 'Total' : ''}
+                                            : colIdx === 0 ? t('composite_report.table_viewer.totals_row.label') : ''}
                                         </TableCell>
                                       );
                                     }).filter(Boolean)}
@@ -1665,18 +1673,18 @@ export default function CompositeReportView() {
                                   ) : (
                                     <FileSpreadsheet className="h-4 w-4 mr-2" />
                                   )}
-                                  Download
+                                  {t('composite_report.report_viewer.download_button.cta')}
                                   <ChevronDown className="h-3 w-3 ml-1" />
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="start">
                                 <DropdownMenuItem onClick={() => openExportDialog('xlsx')}>
                                   <FileSpreadsheet className="h-4 w-4 mr-2" />
-                                  Excel (.xlsx)
+                                  {t('composite_report.report_viewer.excel_menu.xlsx_option.menu_item')}
                                 </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => openExportDialog('csv')}>
                                   <FileText className="h-4 w-4 mr-2" />
-                                  CSV (.csv)
+                                  {t('composite_report.report_viewer.excel_menu.csv_option.menu_item')}
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -1684,23 +1692,25 @@ export default function CompositeReportView() {
 
                           <div className="flex items-center gap-4">
                             <span className="text-sm text-muted-foreground">
-                              {totalRows === 0 ? 'No rows' : `${startIdx + 1}–${endIdx} of ${totalRows} rows`}
+                              {totalRows === 0
+                                ? t('composite_report.table_viewer.pagination.empty.label')
+                                : t('common.pagination.range.label', { start: startIdx + 1, end: endIdx, total: totalRows })}
                             </span>
                             {totalPages > 1 && (
                               <div className="flex items-center gap-1">
-                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(1)} disabled={safeTablePage === 1} title="First page">
+                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(1)} disabled={safeTablePage === 1} title={t('common.pagination.first_page_button.tooltip')}>
                                   <ChevronsLeft className="h-4 w-4" />
                                 </Button>
-                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(p => Math.max(1, p - 1))} disabled={safeTablePage === 1} title="Previous page">
+                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(p => Math.max(1, p - 1))} disabled={safeTablePage === 1} title={t('common.pagination.previous_page_button.tooltip')}>
                                   <ChevronLeft className="h-4 w-4" />
                                 </Button>
                                 <span className="text-sm text-muted-foreground px-2">
                                   {safeTablePage} / {totalPages}
                                 </span>
-                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(p => Math.min(totalPages, p + 1))} disabled={safeTablePage >= totalPages} title="Next page">
+                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(p => Math.min(totalPages, p + 1))} disabled={safeTablePage >= totalPages} title={t('common.pagination.next_page_button.tooltip')}>
                                   <ChevronRight className="h-4 w-4" />
                                 </Button>
-                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(totalPages)} disabled={safeTablePage >= totalPages} title="Last page">
+                                <Button variant="secondary" className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center" onClick={() => setTablePage(totalPages)} disabled={safeTablePage >= totalPages} title={t('common.pagination.last_page_button.tooltip')}>
                                   <ChevronsRight className="h-4 w-4" />
                                 </Button>
                               </div>
@@ -1722,17 +1732,17 @@ export default function CompositeReportView() {
                 <CardHeader className="pb-3">
                   <div className="flex items-center gap-2">
                     <LineChart className="h-5 w-5 text-muted-foreground" />
-                    <CardTitle className="text-xl">Chart</CardTitle>
+                    <CardTitle className="text-xl">{t('composite_report.chart_viewer.header.title')}</CardTitle>
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {/* Column Selectors */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 print:hidden">
                     <div className="space-y-2">
-                      <Label htmlFor="x-axis">X-axis</Label>
+                      <Label htmlFor="x-axis">{t('composite_report.chart_viewer.x_axis_input.label')}</Label>
                       <Select value={chartXColumn} onValueChange={setChartXColumn}>
                         <SelectTrigger id="x-axis">
-                          <SelectValue placeholder="Select column" />
+                          <SelectValue placeholder={t('composite_report.chart_viewer.column_input.placeholder.instruction')} />
                         </SelectTrigger>
                         <SelectContent>
                           {availableColumns.map(col => (
@@ -1742,10 +1752,10 @@ export default function CompositeReportView() {
                       </Select>
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="y-axis">Y-axis</Label>
+                      <Label htmlFor="y-axis">{t('composite_report.chart_viewer.y_axis_input.label')}</Label>
                       <Select value={chartYColumn} onValueChange={setChartYColumn}>
                         <SelectTrigger id="y-axis">
-                          <SelectValue placeholder="Select column" />
+                          <SelectValue placeholder={t('composite_report.chart_viewer.column_input.placeholder.instruction')} />
                         </SelectTrigger>
                         <SelectContent>
                           {availableColumns.map(col => (
@@ -1755,7 +1765,7 @@ export default function CompositeReportView() {
                       </Select>
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="group-by">Group by</Label>
+                      <Label htmlFor="group-by">{t('composite_report.chart_viewer.group_by_input.label')}</Label>
                       <Select value={chartColorColumn} onValueChange={(val) => {
                         setChartColorColumn(val);
                         // Both are scoped to the old column's values. Clear them
@@ -1767,10 +1777,10 @@ export default function CompositeReportView() {
                         setPickedGroups([]);
                       }}>
                         <SelectTrigger id="group-by">
-                          <SelectValue placeholder="None" />
+                          <SelectValue placeholder={t('composite_report.chart_viewer.group_by_input.none_option.menu_item')} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="none">None</SelectItem>
+                          <SelectItem value="none">{t('composite_report.chart_viewer.group_by_input.none_option.menu_item')}</SelectItem>
                           {availableColumns.map(col => (
                             <SelectItem key={col} value={col}>{col}</SelectItem>
                           ))}
@@ -1792,18 +1802,19 @@ export default function CompositeReportView() {
                       ) : (
                         <Save className="h-4 w-4 mr-2" />
                       )}
-                      Save Chart Settings
+                      {t('composite_report.chart_viewer.save_button.cta')}
                     </Button>
                     {chartConfigChanged && (
-                      <span className="text-xs text-amber-500">Unsaved changes</span>
+                      <span className="text-xs text-amber-500">{t('composite_report.chart_viewer.unsaved_badge.label')}</span>
                     )}
                   </div>
 
                   {/* Chart Title */}
                   {chartXColumn && chartYColumn && (
                     <p className="text-sm font-medium text-muted-foreground">
-                      {chartYColumn} over {chartXColumn}
-                      {chartColorColumn && chartColorColumn !== 'none' && ` (grouped by ${chartColorColumn})`}
+                      {chartColorColumn && chartColorColumn !== 'none'
+                        ? t('composite_report.chart_viewer.chart_title_grouped.label', { yColumn: chartYColumn, xColumn: chartXColumn, group: chartColorColumn })
+                        : t('composite_report.chart_viewer.chart_title.label', { yColumn: chartYColumn, xColumn: chartXColumn })}
                     </p>
                   )}
 
@@ -1910,7 +1921,7 @@ export default function CompositeReportView() {
                                   ${isActive ? '' : 'opacity-40 grayscale'}
                                   ${isIsolated ? 'bg-muted ring-1 ring-primary/30' : ''}
                                 `}
-                                title={isActive ? 'Click to filter' : 'Click to show only this'}
+                                title={isActive ? t('composite_report.chart_viewer.legend.filter_button.tooltip') : t('composite_report.chart_viewer.legend.isolate_button.tooltip')}
                               >
                                 <span
                                   className="w-3 h-3 rounded-full flex-shrink-0"
@@ -1927,7 +1938,7 @@ export default function CompositeReportView() {
                               onClick={() => setSelectedGroups([])}
                               className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
                             >
-                              Show all
+                              {t('common.actions.show_all.cta')}
                             </button>
                           )}
                           {allGroupValues.length > 1 && (
@@ -1957,7 +1968,7 @@ export default function CompositeReportView() {
                     </div>
                   ) : (
                     <div className="h-[200px] flex items-center justify-center text-muted-foreground">
-                      Select X and Y axis columns to generate chart
+                      {t('composite_report.chart_viewer.paragraph.empty')}
                     </div>
                   )}
                 </CardContent>
@@ -1972,10 +1983,10 @@ export default function CompositeReportView() {
                 <CardHeader className="pb-3">
                   <div className="flex items-center gap-2">
                     <MapIcon className="h-5 w-5 text-muted-foreground" />
-                    <CardTitle className="text-xl">Location Map</CardTitle>
+                    <CardTitle className="text-xl">{t('composite_report.map_viewer.header.title')}</CardTitle>
                   </div>
                   <CardDescription>
-                    {gpsPoints.length} location{gpsPoints.length !== 1 ? 's' : ''} on map
+                    {t('composite_report.map_viewer.header.subtitle', { count: gpsPoints.length })}
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -1999,15 +2010,15 @@ export default function CompositeReportView() {
                 <CardHeader className="pb-3">
                   <div className="flex items-center gap-2">
                     <MapIcon className="h-5 w-5 text-muted-foreground" />
-                    <CardTitle className="text-xl">Location Map</CardTitle>
+                    <CardTitle className="text-xl">{t('composite_report.map_viewer.header.title')}</CardTitle>
                   </div>
                 </CardHeader>
                 <CardContent>
                   <div className="flex items-center justify-center py-8 text-muted-foreground">
                     <p>
                       {execution.data.gps
-                        ? 'GPS columns were detected, but no rows contain a usable location (no GPS fix)'
-                        : 'No GPS coordinates detected in query results'}
+                        ? t('composite_report.map_viewer.no_fix_notice.paragraph.empty')
+                        : t('composite_report.map_viewer.no_coordinates_notice.paragraph.empty')}
                     </p>
                   </div>
                 </CardContent>

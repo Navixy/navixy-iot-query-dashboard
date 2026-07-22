@@ -1,0 +1,253 @@
+{
+  "header": {
+    "title": "Dashboards and reports",
+    "search_input": {
+      "placeholder": {
+        "instruction": "Search…"
+      }
+    }
+  },
+  "tree": {
+    "loading": {
+      "paragraph": {
+        "loading": "Loading menu…"
+      }
+    },
+    "load_error": {
+      "paragraph": {
+        "failure": "Failed to load the menu"
+      }
+    },
+    "drop_zone": {
+      "paragraph": {
+        "instruction": "Drop items here"
+      }
+    }
+  },
+  "done_editing_button": {
+    "cta": "Done editing"
+  },
+  "tools_menu": {
+    "trigger": {
+      "label": "Tools"
+    },
+    "new_section_option": {
+      "menu_item": "New section"
+    },
+    "new_dashboard_option": {
+      "menu_item": "New dashboard"
+    },
+    "new_report_option": {
+      "menu_item": "New report"
+    },
+    "edit_menu_option": {
+      "menu_item": "Edit menu"
+    },
+    "sql_editor_option": {
+      "menu_item": "SQL editor"
+    }
+  },
+  "rename_dialog": {
+    "title": {
+      "section": "Rename section",
+      "report": "Rename item"
+    },
+    "paragraph": {
+      "instruction": {
+        "section": "Enter a new name for this section.",
+        "report": "Enter a new name for this item."
+      }
+    },
+    "name_input": {
+      "label": "Name",
+      "placeholder": {
+        "instruction": {
+          "section": "Enter section name…",
+          "report": "Enter item name…"
+        }
+      }
+    },
+    "empty_name_toast": {
+      "paragraph": {
+        "failure": "Enter a name"
+      }
+    },
+    "section_missing_toast": {
+      "paragraph": {
+        "failure": "Section not found"
+      }
+    },
+    "report_missing_toast": {
+      "paragraph": {
+        "failure": "Item not found"
+      }
+    }
+  },
+  "delete_dialog": {
+    "section_notice": {
+      "paragraph": {
+        "warning": "Deleting a section will affect its items. Choose what to do with the items in this section."
+      }
+    },
+    "strategy_input": {
+      "label": "What should happen to the items in this section?"
+    },
+    "move_option": {
+      "label": "Move all items to the root (recommended)"
+    },
+    "delete_children_option": {
+      "label": "Delete all items"
+    },
+    "name_fallback": {
+      "label": {
+        "section": "This section",
+        "report": "This item"
+      }
+    }
+  },
+  "create_section_dialog": {
+    "title": "Create new section",
+    "paragraph": {
+      "instruction": "Create a new section to organize your items."
+    },
+    "name_input": {
+      "label": "Name",
+      "placeholder": {
+        "instruction": "Enter section name…"
+      }
+    },
+    "create_button": {
+      "cta": {
+        "default": "Create section"
+      }
+    },
+    "empty_name_toast": {
+      "paragraph": {
+        "failure": "Enter a section name"
+      }
+    }
+  },
+  "create_dashboard_dialog": {
+    "title": "Create new dashboard",
+    "paragraph": {
+      "instruction": "Create a new dashboard. You can choose which section it belongs to or leave it in the root."
+    },
+    "title_input": {
+      "label": "Title",
+      "placeholder": {
+        "instruction": "Enter dashboard title…"
+      }
+    },
+    "section_input": {
+      "label": "Section",
+      "placeholder": {
+        "instruction": "Select section (optional)"
+      },
+      "root_option": {
+        "menu_item": "Root (no section)"
+      }
+    },
+    "create_button": {
+      "cta": {
+        "default": "Create dashboard"
+      }
+    },
+    "empty_title_toast": {
+      "paragraph": {
+        "failure": "Enter a dashboard title"
+      }
+    }
+  },
+  "create_report_dialog": {
+    "title": "Create new report",
+    "paragraph": {
+      "instruction": "Create a new report with table, chart, and map visualizations. You can choose which section it belongs to or leave it in the root."
+    },
+    "title_input": {
+      "label": "Title",
+      "placeholder": {
+        "instruction": "Enter report title (optional)…"
+      }
+    },
+    "section_input": {
+      "label": "Section",
+      "placeholder": {
+        "instruction": "Select section (optional)"
+      },
+      "root_option": {
+        "menu_item": "Root (no section)"
+      }
+    },
+    "continue_button": {
+      "cta": "Continue"
+    }
+  },
+  "reorder_toast": {
+    "paragraph": {
+      "success": "Menu order updated",
+      "failure": "Failed to reorder the menu"
+    },
+    "conflict": {
+      "paragraph": {
+        "failure": "The menu was updated elsewhere. Refresh and try again."
+      }
+    }
+  },
+  "rename_section_toast": {
+    "paragraph": {
+      "success": "Section renamed",
+      "failure": "Failed to rename the section"
+    }
+  },
+  "rename_report_toast": {
+    "paragraph": {
+      "success": "Item renamed",
+      "failure": "Failed to rename the item"
+    }
+  },
+  "delete_section_toast": {
+    "moved": {
+      "paragraph": {
+        "success": "Section deleted. Items moved to the root: {count}."
+      }
+    },
+    "deleted": {
+      "paragraph": {
+        "success": "Section deleted. Items also deleted: {count}."
+      }
+    },
+    "paragraph": {
+      "failure": "Failed to delete the section"
+    }
+  },
+  "delete_report_toast": {
+    "paragraph": {
+      "success": "Item deleted",
+      "failure": "Failed to delete the item"
+    }
+  },
+  "restore_section_toast": {
+    "paragraph": {
+      "success": "Section restored",
+      "failure": "Failed to restore the section"
+    }
+  },
+  "restore_report_toast": {
+    "paragraph": {
+      "success": "Item restored",
+      "failure": "Failed to restore the item"
+    }
+  },
+  "create_section_toast": {
+    "paragraph": {
+      "success": "Section created",
+      "failure": "Failed to create the section"
+    }
+  },
+  "create_dashboard_toast": {
+    "paragraph": {
+      "success": "Dashboard created",
+      "failure": "Failed to create the dashboard"
+    }
+  }
+}

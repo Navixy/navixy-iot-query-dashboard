@@ -12,6 +12,7 @@ import { toast } from 'sonner';
 import { formatSql } from '@/lib/sqlFormatter';
 import { useSqlExecution } from '@/hooks/use-sql-execution';
 import { getErrorMessage } from '@/utils/errors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface ElementEditorProps {
   open: boolean;
@@ -26,6 +27,7 @@ interface ElementEditorProps {
 }
 
 export function ElementEditor({ open, onClose, element, onSave, onDelete }: ElementEditorProps) {
+  const { t } = useLocale();
   const [sql, setSql] = useState(() => formatSql(element.sql));
   const [params, setParams] = useState(JSON.stringify(element.params || {}, null, 2));
   const [saving, setSaving] = useState(false);
@@ -43,7 +45,7 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
       onClose();
     } catch (err) {
       console.error('Invalid JSON in parameters:', err);
-      toast.error('Invalid JSON in parameters');
+      toast.error(t('report_view.element_editor.save_params_error_toast.paragraph.failure'));
     } finally {
       setSaving(false);
     }
@@ -63,8 +65,8 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
       } catch (err) {
         const errorMsg = getErrorMessage(err, 'Invalid JSON in parameters');
         console.error('Failed to parse parameters:', err);
-        toast.error('Invalid Parameters', {
-          description: errorMsg + '. Proceeding with empty parameters.',
+        toast.error(t('report_view.element_editor.test_params_error_toast.title'), {
+          description: t('report_view.element_editor.test_params_error_toast.paragraph.failure', { error: errorMsg }),
         });
         // Continue with empty params instead of failing completely
         parsedParams = {};
@@ -91,7 +93,9 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
       }
     } catch (err) {
       console.error('Unexpected error executing query:', err);
-      toast.error(getErrorMessage(err, 'Failed to execute query'));
+      toast.error(t('common.errors.query_failed'), {
+        description: getErrorMessage(err),
+      });
     }
   };
 
@@ -173,10 +177,12 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
     try {
       await onDelete();
       onClose();
-      toast.success('Element deleted successfully');
+      toast.success(t('report_view.element_editor.delete_toast.paragraph.success'));
     } catch (error) {
       console.error('Error deleting element:', error);
-      toast.error(getErrorMessage(error, 'Failed to delete element'));
+      toast.error(t('report_view.element_editor.delete_toast.paragraph.failure'), {
+        description: getErrorMessage(error),
+      });
     } finally {
       setDeleting(false);
       setShowDeleteDialog(false);
@@ -187,16 +193,16 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl h-[85vh] flex flex-col p-0 bg-[var(--surface-1)] border-[var(--border)] overflow-hidden">
         <DialogHeader className="px-6 pt-6 pb-4 flex-shrink-0 border-b border-[var(--border)] bg-[var(--surface-1)] rounded-t-lg">
-          <DialogTitle className="text-[var(--text-primary)]">Edit: {element.label}</DialogTitle>
+          <DialogTitle className="text-[var(--text-primary)]">{t('report_view.element_editor.header.title', { label: element.label })}</DialogTitle>
           <DialogDescription className="text-[var(--text-secondary)]">
-            Modify the SQL query and parameters for this element
+            {t('report_view.element_editor.header.subtitle')}
           </DialogDescription>
         </DialogHeader>
 
         <Tabs defaultValue="sql" className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <TabsList className="mx-6 grid w-[calc(100%-3rem)] grid-cols-2 flex-shrink-0">
-            <TabsTrigger value="sql">SQL Query</TabsTrigger>
-            <TabsTrigger value="params">Parameters</TabsTrigger>
+            <TabsTrigger value="sql">{t('report_view.element_editor.sql_tab.menu_item')}</TabsTrigger>
+            <TabsTrigger value="params">{t('report_view.element_editor.params_tab.menu_item')}</TabsTrigger>
           </TabsList>
           
           {/* SQL Query Tab */}
@@ -205,10 +211,10 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
               {/* SQL Editor - 50% */}
               <div className="flex-1 flex flex-col min-h-0 basis-0">
                 <div className="flex justify-between items-center mb-2 flex-shrink-0">
-                  <Label className="text-sm font-medium">SQL Query</Label>
+                  <Label className="text-sm font-medium">{t('report_view.element_editor.sql_input.label')}</Label>
                   <Button onClick={handleTestQuery} disabled={executing || !sql.trim()} size="sm" variant="outline">
                     <Play className="h-3.5 w-3.5 mr-1.5" />
-                    {executing ? 'Testing...' : 'Test Query'}
+                    {executing ? t('common.states.testing') : t('common.actions.test_query.cta')}
                   </Button>
                 </div>
                 <div className="flex-1 border rounded-md overflow-hidden min-h-0">
@@ -230,12 +236,16 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
                 )}
 
                 <div className="flex justify-between items-center mb-2 flex-shrink-0">
-                  <Label className="text-sm font-medium">Test Results</Label>
+                  <Label className="text-sm font-medium">{t('common.test_results.label')}</Label>
                   {results && (
                     <span className="text-xs text-muted-foreground">
                       {pagination
-                        ? `Showing ${((pagination.page - 1) * pagination.pageSize) + 1}-${Math.min(pagination.page * pagination.pageSize, pagination.total)} of ${pagination.total} row${pagination.total !== 1 ? 's' : ''}`
-                        : `${results.rowCount} row${results.rowCount !== 1 ? 's' : ''} returned`}
+                        ? t('common.pagination.range.label', {
+                            start: ((pagination.page - 1) * pagination.pageSize) + 1,
+                            end: Math.min(pagination.page * pagination.pageSize, pagination.total),
+                            total: pagination.total,
+                          })
+                        : t('common.pagination.rows_returned.label', { count: results.rowCount })}
                     </span>
                   )}
                 </div>
@@ -265,7 +275,7 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
                     />
                   ) : (
                     <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-                      Click "Test Query" to see results
+                      {t('common.test_results.paragraph.empty')}
                     </div>
                   )}
                 </div>
@@ -275,7 +285,7 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
           
           {/* Parameters Tab */}
           <TabsContent value="params" className="flex-1 m-0 mt-4 px-6 data-[state=active]:flex flex-col min-h-0 overflow-hidden bg-[var(--surface-1)]">
-            <Label className="mb-2 flex-shrink-0 text-sm font-medium text-[var(--text-primary)]">Query Parameters (JSON)</Label>
+            <Label className="mb-2 flex-shrink-0 text-sm font-medium text-[var(--text-primary)]">{t('report_view.element_editor.params_input.label')}</Label>
             <Textarea
               value={params}
               onChange={(e) => setParams(e.target.value)}
@@ -295,18 +305,18 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
                 disabled={saving || deleting}
               >
                 <Trash2 className="h-4 w-4 mr-2" />
-                Delete Element
+                {t('report_view.element_editor.delete_button.cta')}
               </Button>
             )}
           </div>
           <div className="flex gap-2">
             <Button onClick={onClose} variant="ghost" size="sm">
               <X className="h-4 w-4 mr-2" />
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button onClick={handleSave} disabled={saving} size="sm">
               <Save className="h-4 w-4 mr-2" />
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? t('common.actions.save.cta.loading') : t('common.actions.save_changes.cta')}
             </Button>
           </div>
         </div>
@@ -318,31 +328,31 @@ export function ElementEditor({ open, onClose, element, onSave, onDelete }: Elem
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-600">
               <Trash2 className="h-5 w-5" />
-              Delete Element
+              {t('report_view.element_editor.delete_dialog.title')}
             </DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this element? This action cannot be undone.
+              {t('report_view.element_editor.delete_dialog.paragraph.confirmation')}
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
             <p className="text-sm text-muted-foreground">
-              Element: <span className="font-medium">{element.label}</span>
+              {t('report_view.element_editor.delete_dialog.element_name.label')} <span className="font-medium">{element.label}</span>
             </p>
           </div>
           <div className="flex justify-end gap-2">
-            <Button 
-              variant="outline" 
+            <Button
+              variant="outline"
               onClick={() => setShowDeleteDialog(false)}
               disabled={deleting}
             >
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
-            <Button 
-              variant="destructive" 
+            <Button
+              variant="destructive"
               onClick={handleDelete}
               disabled={deleting}
             >
-              {deleting ? 'Deleting...' : 'Delete Element'}
+              {deleting ? t('common.actions.delete.cta.loading') : t('report_view.element_editor.delete_dialog.confirm_button.cta.default')}
             </Button>
           </div>
         </DialogContent>

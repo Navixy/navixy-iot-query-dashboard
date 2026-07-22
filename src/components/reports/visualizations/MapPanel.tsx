@@ -7,6 +7,7 @@ import React, { useMemo, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { isDisplayableCoordinate } from '@/utils/gps';
 
 const dotMarkerIcon = L.divIcon({
@@ -116,6 +117,7 @@ function ViewTracker({ onViewChange }: { onViewChange?: (viewState: MapViewState
  * Show All button component - fits map to show all markers
  */
 function ShowAllButton({ points }: { points: GPSPoint[] }) {
+  const { t } = useLocale();
   const map = useMap();
   const buttonRef = useRef<HTMLButtonElement>(null);
 
@@ -164,9 +166,9 @@ function ShowAllButton({ points }: { points: GPSPoint[] }) {
           cursor: 'pointer',
           pointerEvents: 'auto'  // Ensure button receives pointer events
         }}
-        title="Fit map to show all locations"
+        title={t('report_view.map_panel.show_all_button.tooltip')}
       >
-        Show all
+        {t('common.actions.show_all.cta')}
       </button>
     </div>
   );
@@ -236,10 +238,11 @@ function formatValue(value: unknown): string {
 function PopupContent({ 
   point, 
   popupColumns 
-}: { 
-  point: GPSPoint; 
+}: {
+  point: GPSPoint;
   popupColumns?: string[];
 }) {
+  const { t } = useLocale();
   const dataEntries = useMemo(() => {
     if (!point.data) return [];
     
@@ -268,11 +271,11 @@ function PopupContent({
       <table style={{ fontSize: '12px', width: '100%' }}>
         <tbody>
           <tr>
-            <td style={{ fontWeight: 500, paddingRight: 8 }}>Lat:</td>
+            <td style={{ fontWeight: 500, paddingRight: 8 }}>{t('report_view.map_panel.latitude.label')}</td>
             <td>{point.lat.toFixed(6)}</td>
           </tr>
           <tr>
-            <td style={{ fontWeight: 500, paddingRight: 8 }}>Lon:</td>
+            <td style={{ fontWeight: 500, paddingRight: 8 }}>{t('report_view.map_panel.longitude.label')}</td>
             <td>{point.lon.toFixed(6)}</td>
           </tr>
           {dataEntries.map(([key, value]) => (
@@ -301,6 +304,7 @@ export function MapPanel({
   onViewChange,
   showLocationCount = true,
 }: MapPanelProps) {
+  const { t } = useLocale();
   const mapRef = useRef<L.Map>(null);
 
   // Filter and validate GPS points. isDisplayableCoordinate also drops the (0,0)
@@ -328,9 +332,9 @@ export function MapPanel({
         style={{ height }}
       >
         <div className="text-center text-muted-foreground">
-          <p className="text-lg font-medium">No GPS data available</p>
+          <p className="text-lg font-medium">{t('report_view.map_panel.empty_state.paragraph.empty')}</p>
           <p className="text-sm mt-1">
-            The query result doesn't contain valid GPS coordinates
+            {t('report_view.map_panel.empty_state.paragraph.instruction')}
           </p>
         </div>
       </div>
@@ -399,7 +403,7 @@ export function MapPanel({
               href="https://www.navixy.com" 
               target="_blank" 
               rel="noopener noreferrer"
-              title="Powered by Navixy"
+              title={t('report_view.map_panel.attribution_link.tooltip')}
               style={{ display: 'block' }}
             >
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -420,7 +424,7 @@ export function MapPanel({
       </div>
       {showLocationCount && (
         <div className="text-xs text-muted-foreground mt-2">
-          Showing {validPoints.length} location{validPoints.length !== 1 ? 's' : ''}
+          {t('report_view.map_panel.location_count.label', { count: validPoints.length })}
         </div>
       )}
     </div>

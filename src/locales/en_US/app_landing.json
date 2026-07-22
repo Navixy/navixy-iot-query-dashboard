@@ -1,0 +1,39 @@
+{
+  "header": {
+    "badge": {
+      "label": "Get started"
+    },
+    "title": {
+      "question": "How do you want to build your dashboard?"
+    },
+    "subtitle": {
+      "instruction": {
+        "single_option": "Describe what you want to monitor and the assistant will build a dashboard for you.",
+        "multi_option": "Both paths create a full SQL-backed dashboard without writing queries. Choose the approach that fits how you think: question-first or template-first."
+      }
+    }
+  },
+  "option_card": {
+    "best_for_label": {
+      "label": "Best for:"
+    },
+    "ai_assistant": {
+      "title": "AI Assistant",
+      "sublabel": "From a plain-language description to a working dashboard",
+      "paragraph": "Describe what you want to monitor in plain language. The assistant will ask a few clarifying questions and build a full SQL-backed dashboard that you can preview against your own data before it's added to your sidebar.",
+      "best_for": {
+        "paragraph": "You know what you want to see but not which tables or queries it takes to get there."
+      },
+      "interview_item": {
+        "list_item": "Plain-language interview. Refine the result by continuing the conversation."
+      },
+      "preview_item": {
+        "list_item": "Preview every panel against your real data before it becomes a dashboard."
+      },
+      "section_item": {
+        "list_item": "Saved into the \"AI Dashboards\" section in your sidebar."
+      },
+      "cta": "Start chatting"
+    }
+  }
+}

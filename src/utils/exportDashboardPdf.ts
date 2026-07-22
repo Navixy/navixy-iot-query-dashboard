@@ -32,7 +32,15 @@ export interface DashboardPdfOptions {
   fileName?: string;
   /** Generation timestamp; defaults to now. */
   generatedAt?: Date;
+  /**
+   * Localized note stamped onto a clipped (too-tall) table panel. Defaults to
+   * English so the util stays usable standalone; the app passes a translated
+   * string. Rendered into the exported PDF, so it is user-facing.
+   */
+  partialDataNote?: string;
 }
+
+const DEFAULT_PARTIAL_DATA_NOTE = 'Partial data shown — export Excel or CSV for all rows.';
 
 // A4 landscape in PDF points (1pt = 1/72"). Dashboards use a wide 24-column grid,
 // so landscape wastes less space than portrait.
@@ -261,7 +269,7 @@ function measureExpansion(root: HTMLElement): ExpansionPlan {
 }
 
 /** Apply the reflow/expansion plan to the off-screen clone of the grid. */
-function applyExpansion(root: HTMLElement, plan: ExpansionPlan): void {
+function applyExpansion(root: HTMLElement, plan: ExpansionPlan, partialDataNote: string): void {
   root.style.height = `${plan.captureHeight}px`;
   const container = findGridContainer(root);
   if (!container) return;
@@ -302,7 +310,7 @@ function applyExpansion(root: HTMLElement, plan: ExpansionPlan): void {
 
     if (p.clip) {
       const note = document.createElement('div');
-      note.textContent = 'Partial data shown — export Excel or CSV for all rows.';
+      note.textContent = partialDataNote;
       note.style.cssText =
         `position:absolute;left:0;right:0;bottom:0;height:${DISCLAIMER_HEIGHT}px;` +
         'display:flex;align-items:center;justify-content:center;' +
@@ -359,7 +367,7 @@ export async function exportDashboardToPdf(
     if (!plan.panels.length) {
       throw new Error("Couldn't find the dashboard grid to export.");
     }
-    applyExpansion(clone, plan);
+    applyExpansion(clone, plan, options.partialDataNote ?? DEFAULT_PARTIAL_DATA_NOTE);
     void clone.offsetHeight; // force a layout pass before capturing
 
     // Shrink the scale — below 1x if needed — so the output canvas stays within both the

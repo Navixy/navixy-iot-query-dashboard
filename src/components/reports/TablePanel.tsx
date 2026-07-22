@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/select';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import type { QueryResult, VisualizationConfig } from '@/types/dashboard-types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 /** Standard page-size options offered by the "Rows per page" dropdown. */
 const PAGE_SIZES: number[] = [10, 25, 50, 100, 250];
@@ -36,6 +37,7 @@ type SortConfig = {
 } | null;
 
 export function TablePanel({ data, visualization }: TablePanelProps) {
+  const { t } = useLocale();
   const showHeader = visualization?.showHeader !== false; // Default: true
   const sortable = visualization?.sortable !== false; // Default: true
   const showPagination = visualization?.showPagination !== false; // Default: true
@@ -189,7 +191,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
   };
 
   if (!data.rows || data.rows.length === 0) {
-    return <div className="text-[var(--text-muted)] py-4">No data</div>;
+    return <div className="text-[var(--text-muted)] py-4">{t('common.no_data.paragraph.empty')}</div>;
   }
 
   return (
@@ -233,7 +235,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
             {paginatedRows.length === 0 ? (
               <tr>
                 <td colSpan={data.columns.length} className="py-8 text-center text-[var(--text-muted)]">
-                  No data to display
+                  {t('common.no_data.paragraph.empty')}
                 </td>
               </tr>
             ) : (
@@ -271,7 +273,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
         <div className="flex-shrink-0 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-2 pb-1 border-t border-[var(--border)] bg-[var(--surface-2)]">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
-              <span className="text-sm text-[var(--text-secondary)]">Rows per page:</span>
+              <span className="text-sm text-[var(--text-secondary)]">{t('report_view.table_panel.rows_per_page.label')}</span>
               {/*
                 Single always-controlled Select. `localPageSize === undefined`
                 means "show all rows", represented by the explicit "All" option,
@@ -303,14 +305,18 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
                   {PAGE_SIZES.map((size) => (
                     <SelectItem key={size} value={size.toString()}>{size}</SelectItem>
                   ))}
-                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="all">{t('report_view.table_panel.all_option.menu_item')}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <span className="text-sm text-[var(--text-secondary)]">
-              {localPageSize 
-                ? `Showing ${sortedRows.length === 0 ? 0 : ((currentPage - 1) * effectivePageSize) + 1} to ${Math.min(currentPage * effectivePageSize, sortedRows.length)} of ${sortedRows.length} rows`
-                : `${sortedRows.length} row${sortedRows.length !== 1 ? 's' : ''}`
+              {localPageSize
+                ? t('common.pagination.range.label', {
+                    start: sortedRows.length === 0 ? 0 : ((currentPage - 1) * effectivePageSize) + 1,
+                    end: Math.min(currentPage * effectivePageSize, sortedRows.length),
+                    total: sortedRows.length,
+                  })
+                : t('common.pagination.rows.label', { count: sortedRows.length })
               }
             </span>
           </div>
@@ -318,7 +324,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
           {totalPages > 1 && (
             <div className="flex items-center gap-2">
               <span className="text-sm text-[var(--text-secondary)]">
-                Page {currentPage} of {totalPages}
+                {t('report_view.table_panel.page_summary.label', { page: currentPage, pages: totalPages })}
               </span>
               <div className="flex gap-1">
                 <Button
@@ -326,7 +332,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
                   onClick={() => setCurrentPage(1)}
                   disabled={currentPage === 1}
                   className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center"
-                  title="First page"
+                  title={t('common.pagination.first_page_button.tooltip')}
                 >
                   <ChevronsLeft className="h-4 w-4" />
                 </Button>
@@ -335,7 +341,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
                   onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                   disabled={currentPage === 1}
                   className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center"
-                  title="Previous page"
+                  title={t('common.pagination.previous_page_button.tooltip')}
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -344,7 +350,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
                   onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                   disabled={currentPage >= totalPages}
                   className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center"
-                  title="Next page"
+                  title={t('common.pagination.next_page_button.tooltip')}
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>
@@ -353,7 +359,7 @@ export function TablePanel({ data, visualization }: TablePanelProps) {
                   onClick={() => setCurrentPage(totalPages)}
                   disabled={currentPage >= totalPages}
                   className="h-8 w-8 !px-0 !py-0 min-w-8 flex items-center justify-center"
-                  title="Last page"
+                  title={t('common.pagination.last_page_button.tooltip')}
                 >
                   <ChevronsRight className="h-4 w-4" />
                 </Button>

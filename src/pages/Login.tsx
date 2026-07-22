@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import { BarChart3, Database, CheckCircle2, XCircle, Loader2, Users, FlaskConical } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface DatabaseConnection {
   connectionType: 'url' | 'host';
@@ -35,6 +36,7 @@ interface UserDbConnection {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 const Login = () => {
+  const { t } = useLocale();
   const [email, setEmail] = useState(import.meta.env.VITE_DEFAULT_USER_EMAIL || '');
   const [role, setRole] = useState<'admin' | 'editor' | 'viewer'>('admin');
   const [isLoading, setIsLoading] = useState(false);
@@ -148,7 +150,7 @@ const Login = () => {
     
     if (connectionMethod === 'url') {
       if (!connection.url || !connection.url.trim()) {
-        toast.error('Please provide a database connection URL');
+        toast.error(t('login.iot_db_form.url_input.error.instruction'));
         setIsTestingConnection(false);
         return;
       }
@@ -157,7 +159,7 @@ const Login = () => {
       };
     } else {
       if (!connection.host || !connection.database || !connection.user) {
-        toast.error('Please provide host, database, and user for database connection');
+        toast.error(t('login.iot_db_form.error.instruction'));
         setIsTestingConnection(false);
         return;
       }
@@ -182,12 +184,12 @@ const Login = () => {
 
       if (!response.ok) {
         const text = await response.text();
-        let errorMessage = 'Connection failed';
+        let errorMessage = t('login.connection_form.test_result.error.default');
         try {
           const data = JSON.parse(text);
           errorMessage = data.error?.message || data.message || errorMessage;
         } catch {
-          errorMessage = text || `HTTP ${response.status}`;
+          errorMessage = text || t('login.connection_form.test_result.error.failure', { value: `HTTP ${response.status}` });
         }
         setTestResult({ success: false, message: errorMessage });
         toast.error(errorMessage);
@@ -197,17 +199,19 @@ const Login = () => {
       const data = await response.json();
 
       if (data.success) {
-        setTestResult({ success: true, message: data.message || 'Database connection successful!' });
-        toast.success('Database connection successful!');
+        setTestResult({ success: true, message: data.message || t('login.connection_form.test_result.paragraph.success') });
+        toast.success(t('login.connection_form.test_result.paragraph.success'));
       } else {
-        const errorMessage = data.error?.message || data.message || data.error || 'Connection failed';
+        const errorMessage = data.error?.message || data.message || data.error || t('login.connection_form.test_result.error.default');
         setTestResult({ success: false, message: errorMessage });
         toast.error(errorMessage);
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Network error';
-      setTestResult({ success: false, message: `Network error: ${errorMessage}` });
-      toast.error(`Connection test failed: ${errorMessage}`);
+      const message = t('login.connection_form.test_result.error.failure', {
+        value: error instanceof Error ? error.message : String(error),
+      });
+      setTestResult({ success: false, message });
+      toast.error(message);
     } finally {
       setIsTestingConnection(false);
     }
@@ -229,7 +233,7 @@ const Login = () => {
     
     if (userDbConnectionMethod === 'url') {
       if (!userDbConnection.url || !userDbConnection.url.trim()) {
-        toast.error('Please provide a User Settings database connection URL');
+        toast.error(t('login.user_db_form.url_input.error.instruction'));
         setIsTestingUserDbConnection(false);
         return;
       }
@@ -238,7 +242,7 @@ const Login = () => {
       };
     } else {
       if (!userDbConnection.host || !userDbConnection.database || !userDbConnection.user) {
-        toast.error('Please provide host, database, and user for User Settings database connection');
+        toast.error(t('login.user_db_form.error.instruction'));
         setIsTestingUserDbConnection(false);
         return;
       }
@@ -263,12 +267,12 @@ const Login = () => {
 
       if (!response.ok) {
         const text = await response.text();
-        let errorMessage = 'Connection failed';
+        let errorMessage = t('login.connection_form.test_result.error.default');
         try {
           const data = JSON.parse(text);
           errorMessage = data.error?.message || data.message || errorMessage;
         } catch {
-          errorMessage = text || `HTTP ${response.status}`;
+          errorMessage = text || t('login.connection_form.test_result.error.failure', { value: `HTTP ${response.status}` });
         }
         setUserDbTestResult({ success: false, message: errorMessage });
         toast.error(errorMessage);
@@ -278,17 +282,19 @@ const Login = () => {
       const data = await response.json();
 
       if (data.success) {
-        setUserDbTestResult({ success: true, message: data.message || 'User Settings database connection successful!' });
-        toast.success('User Settings database connection successful!');
+        setUserDbTestResult({ success: true, message: data.message || t('login.connection_form.test_result.paragraph.success') });
+        toast.success(t('login.connection_form.test_result.paragraph.success'));
       } else {
-        const errorMessage = data.error?.message || data.message || data.error || 'Connection failed';
+        const errorMessage = data.error?.message || data.message || data.error || t('login.connection_form.test_result.error.default');
         setUserDbTestResult({ success: false, message: errorMessage });
         toast.error(errorMessage);
       }
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Network error';
-      setUserDbTestResult({ success: false, message: `Network error: ${errorMessage}` });
-      toast.error(`Connection test failed: ${errorMessage}`);
+      const message = t('login.connection_form.test_result.error.failure', {
+        value: error instanceof Error ? error.message : String(error),
+      });
+      setUserDbTestResult({ success: false, message });
+      toast.error(message);
     } finally {
       setIsTestingUserDbConnection(false);
     }
@@ -304,7 +310,7 @@ const Login = () => {
       : constructUrl(connection);
 
     if (!iotUrl) {
-      toast.error('Please provide an IoT database connection URL');
+      toast.error(t('login.iot_db_form.url_input.error.instruction'));
       setIsLoading(false);
       return;
     }
@@ -315,7 +321,7 @@ const Login = () => {
       : constructUrl(userDbConnection);
 
     if (!userUrl) {
-      toast.error('Please provide a User Settings database connection URL');
+      toast.error(t('login.user_db_form.url_input.error.instruction'));
       setIsLoading(false);
       return;
     }
@@ -323,17 +329,17 @@ const Login = () => {
     // Use demo sign-in if demo mode is enabled
     if (isDemoMode) {
       const { error } = await signInDemo(email, role, iotUrl, userUrl);
-      
+
       if (error) {
-        toast.error(error.message || 'Failed to sign in with Demo mode');
+        toast.error(t('login.login_form.demo_sign_in_button.error'), { description: error.message });
       } else {
-        toast.success('Signed in with Demo mode. Changes will be stored locally.');
+        toast.success(t('login.login_form.demo_sign_in_button.paragraph.success'));
       }
     } else {
       const { error } = await signIn(email, role, iotUrl, userUrl);
-      
+
       if (error) {
-        toast.error(error.message || 'Failed to sign in');
+        toast.error(t('login.login_form.sign_in_button.error'), { description: error.message });
       }
     }
     
@@ -351,18 +357,18 @@ const Login = () => {
               </div>
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-text-primary">Navixy Reports</h1>
-              <p className="text-text-muted">Design and view analytics reports</p>
+              <h1 className="text-2xl font-bold text-text-primary">{t('common.branding.title')}</h1>
+              <p className="text-text-muted">{t('login.header.subtitle')}</p>
             </div>
           </div>
           
           <form onSubmit={handleSignIn} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-text-secondary">Email</Label>
+              <Label htmlFor="email" className="text-text-secondary">{t('login.login_form.email_input.label')}</Label>
               <Input
                 id="email"
                 type="email"
-                placeholder="your@email.com"
+                placeholder={t('login.login_form.email_input.placeholder')}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
@@ -372,15 +378,15 @@ const Login = () => {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="role" className="text-text-secondary">Role</Label>
+              <Label htmlFor="role" className="text-text-secondary">{t('login.login_form.role_input.label')}</Label>
               <Select value={role} onValueChange={(value: 'admin' | 'editor' | 'viewer') => setRole(value)}>
                 <SelectTrigger className="bg-surface-3 border-border">
-                  <SelectValue placeholder="Select role" />
+                  <SelectValue placeholder={t('login.login_form.role_input.placeholder.instruction')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="admin">Admin</SelectItem>
-                  <SelectItem value="editor">Editor</SelectItem>
-                  <SelectItem value="viewer">Viewer</SelectItem>
+                  <SelectItem value="admin">{t('common.roles.admin')}</SelectItem>
+                  <SelectItem value="editor">{t('common.roles.editor')}</SelectItem>
+                  <SelectItem value="viewer">{t('common.roles.viewer')}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -390,7 +396,7 @@ const Login = () => {
               <div className="space-y-2">
                 <Label className="text-text-secondary font-semibold flex items-center gap-2">
                   <Database className="h-4 w-4" />
-                  IoT Database Connection
+                  {t('login.iot_db_form.title')}
                 </Label>
                 <div className="flex gap-4">
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -405,7 +411,7 @@ const Login = () => {
                       }}
                       className="h-4 w-4"
                     />
-                    <span className="text-sm text-text-secondary">URL</span>
+                    <span className="text-sm text-text-secondary">{t('login.connection_form.url_option.label')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
@@ -419,14 +425,14 @@ const Login = () => {
                       }}
                       className="h-4 w-4"
                     />
-                    <span className="text-sm text-text-secondary">Connection Parameters</span>
+                    <span className="text-sm text-text-secondary">{t('login.connection_form.parameters_option.label')}</span>
                   </label>
                 </div>
               </div>
 
               {connectionMethod === 'url' ? (
                 <div className="space-y-2">
-                  <Label htmlFor="db-url" className="text-text-secondary">Connection URL</Label>
+                  <Label htmlFor="db-url" className="text-text-secondary">{t('login.connection_form.url_input.label')}</Label>
                   <Input
                     id="db-url"
                     type="text"
@@ -444,7 +450,7 @@ const Login = () => {
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-2">
-                      <Label htmlFor="db-host" className="text-text-secondary text-sm">Host</Label>
+                      <Label htmlFor="db-host" className="text-text-secondary text-sm">{t('login.connection_form.host_input.label')}</Label>
                       <Input
                         id="db-host"
                         type="text"
@@ -458,7 +464,7 @@ const Login = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="db-port" className="text-text-secondary text-sm">Port</Label>
+                      <Label htmlFor="db-port" className="text-text-secondary text-sm">{t('login.connection_form.port_input.label')}</Label>
                       <Input
                         id="db-port"
                         type="number"
@@ -473,7 +479,7 @@ const Login = () => {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="db-database" className="text-text-secondary text-sm">Database</Label>
+                    <Label htmlFor="db-database" className="text-text-secondary text-sm">{t('login.connection_form.database_input.label')}</Label>
                     <Input
                       id="db-database"
                       type="text"
@@ -488,7 +494,7 @@ const Login = () => {
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-2">
-                      <Label htmlFor="db-user" className="text-text-secondary text-sm">User</Label>
+                      <Label htmlFor="db-user" className="text-text-secondary text-sm">{t('login.connection_form.user_input.label')}</Label>
                       <Input
                         id="db-user"
                         type="text"
@@ -502,7 +508,7 @@ const Login = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="db-password" className="text-text-secondary text-sm">Password</Label>
+                      <Label htmlFor="db-password" className="text-text-secondary text-sm">{t('login.connection_form.password_input.label')}</Label>
                       <Input
                         id="db-password"
                         type="password"
@@ -527,7 +533,7 @@ const Login = () => {
                       }}
                       className="rounded border-border"
                     />
-                    <Label htmlFor="db-ssl" className="text-text-secondary text-sm cursor-pointer">Use SSL</Label>
+                    <Label htmlFor="db-ssl" className="text-text-secondary text-sm cursor-pointer">{t('login.connection_form.ssl_toggle.label')}</Label>
                   </div>
                 </div>
               )}
@@ -561,12 +567,12 @@ const Login = () => {
                 {isTestingConnection ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Testing...
+                    {t('common.states.testing')}
                   </>
                 ) : (
                   <>
                     <Database className="mr-2 h-4 w-4" />
-                    Test IoT Connection
+                    {t('login.iot_db_form.test_button.cta.default')}
                   </>
                 )}
               </Button>
@@ -577,7 +583,7 @@ const Login = () => {
               <div className="space-y-2">
                 <Label className="text-text-secondary font-semibold flex items-center gap-2">
                   <Users className="h-4 w-4" />
-                  User Settings Database Connection
+                  {t('login.user_db_form.title')}
                 </Label>
                 <div className="flex gap-4">
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -592,7 +598,7 @@ const Login = () => {
                       }}
                       className="h-4 w-4"
                     />
-                    <span className="text-sm text-text-secondary">URL</span>
+                    <span className="text-sm text-text-secondary">{t('login.connection_form.url_option.label')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
@@ -606,14 +612,14 @@ const Login = () => {
                       }}
                       className="h-4 w-4"
                     />
-                    <span className="text-sm text-text-secondary">Connection Parameters</span>
+                    <span className="text-sm text-text-secondary">{t('login.connection_form.parameters_option.label')}</span>
                   </label>
                 </div>
               </div>
 
               {userDbConnectionMethod === 'url' ? (
                 <div className="space-y-2">
-                  <Label htmlFor="user-db-url" className="text-text-secondary">Connection URL</Label>
+                  <Label htmlFor="user-db-url" className="text-text-secondary">{t('login.connection_form.url_input.label')}</Label>
                   <Input
                     id="user-db-url"
                     type="text"
@@ -631,7 +637,7 @@ const Login = () => {
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-2">
-                      <Label htmlFor="user-db-host" className="text-text-secondary text-sm">Host</Label>
+                      <Label htmlFor="user-db-host" className="text-text-secondary text-sm">{t('login.connection_form.host_input.label')}</Label>
                       <Input
                         id="user-db-host"
                         type="text"
@@ -645,7 +651,7 @@ const Login = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="user-db-port" className="text-text-secondary text-sm">Port</Label>
+                      <Label htmlFor="user-db-port" className="text-text-secondary text-sm">{t('login.connection_form.port_input.label')}</Label>
                       <Input
                         id="user-db-port"
                         type="number"
@@ -660,7 +666,7 @@ const Login = () => {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="user-db-database" className="text-text-secondary text-sm">Database</Label>
+                    <Label htmlFor="user-db-database" className="text-text-secondary text-sm">{t('login.connection_form.database_input.label')}</Label>
                     <Input
                       id="user-db-database"
                       type="text"
@@ -675,7 +681,7 @@ const Login = () => {
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-2">
-                      <Label htmlFor="user-db-user" className="text-text-secondary text-sm">User</Label>
+                      <Label htmlFor="user-db-user" className="text-text-secondary text-sm">{t('login.connection_form.user_input.label')}</Label>
                       <Input
                         id="user-db-user"
                         type="text"
@@ -689,7 +695,7 @@ const Login = () => {
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="user-db-password" className="text-text-secondary text-sm">Password</Label>
+                      <Label htmlFor="user-db-password" className="text-text-secondary text-sm">{t('login.connection_form.password_input.label')}</Label>
                       <Input
                         id="user-db-password"
                         type="password"
@@ -714,7 +720,7 @@ const Login = () => {
                       }}
                       className="rounded border-border"
                     />
-                    <Label htmlFor="user-db-ssl" className="text-text-secondary text-sm cursor-pointer">Use SSL</Label>
+                    <Label htmlFor="user-db-ssl" className="text-text-secondary text-sm cursor-pointer">{t('login.connection_form.ssl_toggle.label')}</Label>
                   </div>
                 </div>
               )}
@@ -748,12 +754,12 @@ const Login = () => {
                 {isTestingUserDbConnection ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Testing...
+                    {t('common.states.testing')}
                   </>
                 ) : (
                   <>
                     <Users className="mr-2 h-4 w-4" />
-                    Test User Settings Connection
+                    {t('login.user_db_form.test_button.cta.default')}
                   </>
                 )}
               </Button>
@@ -774,11 +780,10 @@ const Login = () => {
                     className="text-amber-700 dark:text-amber-400 font-medium cursor-pointer flex items-center gap-2"
                   >
                     <FlaskConical className="h-4 w-4" />
-                    Demo Mode
+                    {t('common.demo_mode.title.default')}
                   </Label>
                   <p className="text-xs text-amber-600/80 dark:text-amber-400/70 mt-0.5">
-                    Load existing reports once, then store all changes locally in your browser. 
-                    No modifications will be saved to the User Settings database.
+                    {t('login.login_form.demo_toggle.sublabel')}
                   </p>
                 </div>
               </div>
@@ -788,10 +793,14 @@ const Login = () => {
               {isLoading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  {isDemoMode ? 'Starting Demo Mode...' : 'Signing in...'}
+                  {isDemoMode
+                    ? t('login.login_form.demo_sign_in_button.cta.loading')
+                    : t('login.login_form.sign_in_button.cta.loading')}
                 </>
               ) : (
-                isDemoMode ? 'Start Demo Mode' : 'Sign In'
+                isDemoMode
+                  ? t('login.login_form.demo_sign_in_button.cta.default')
+                  : t('login.login_form.sign_in_button.cta.default')
               )}
             </Button>
           </form>

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCreateReportMutation } from '@/hooks/use-menu-mutations';
 import { useEditorStore } from '@/layout/state/editorStore';
@@ -20,12 +21,13 @@ interface ResultCardProps {
   isPending: boolean;
 }
 
+/** i18n key paths — resolved with t() at the render site below. */
 const APPLY_DISABLED_TOOLTIP: Record<'role' | 'pending' | 'applying' | 'preview' | 'previewing', string> = {
-  role: 'Ask an editor to create this dashboard',
-  pending: 'Wait for the current reply to finish',
-  applying: 'Creating the dashboard...',
-  preview: 'Preview this dashboard first',
-  previewing: 'Wait for the preview to finish',
+  role: 'ai_chat.result_card.apply_button.tooltip.role',
+  pending: 'ai_chat.result_card.apply_button.tooltip.pending',
+  applying: 'ai_chat.result_card.apply_button.tooltip.applying',
+  preview: 'ai_chat.result_card.apply_button.tooltip.preview',
+  previewing: 'ai_chat.result_card.apply_button.tooltip.previewing',
 };
 
 /**
@@ -37,6 +39,7 @@ const APPLY_DISABLED_TOOLTIP: Record<'role' | 'pending' | 'applying' | 'preview'
  * on POST /api/reports and POST /api/sections. (DO-313)
  */
 export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
+  const { t } = useLocale();
   const { user } = useAuth();
   const navigate = useNavigate();
   const createReportMutation = useCreateReportMutation();
@@ -150,11 +153,11 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
             disabled={!applyEnabled}
             className="disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Apply
+            {t('ai_chat.result_card.apply_button.cta')}
           </Button>
         </span>
       </TooltipTrigger>
-      {disabledReason && <TooltipContent>{APPLY_DISABLED_TOOLTIP[disabledReason]}</TooltipContent>}
+      {disabledReason && <TooltipContent>{t(APPLY_DISABLED_TOOLTIP[disabledReason])}</TooltipContent>}
     </Tooltip>
   );
 
@@ -166,15 +169,18 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
       )}
     >
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        Result ready
+        {t('ai_chat.result_card.header.label')}
       </p>
       <p className="mt-1 text-sm font-medium text-foreground">{result.title}</p>
+      {/* Noun first, count after the colon: the runtime has no plural rules, and
+          "1 panel" / "N panels" chosen in code cannot be translated (Russian has
+          three forms). See previewStatusText.ts for the full reasoning. */}
       <p className="text-xs text-muted-foreground">
-        {panelCount === 1 ? '1 panel' : `${panelCount} panels`}
+        {t('ai_chat.result_card.panel_count.label', { count: panelCount })}
       </p>
       <div className="mt-3 flex items-center gap-2">
         <Button variant="secondary" onClick={openPreview}>
-          Preview
+          {t('ai_chat.result_card.preview_button.cta')}
         </Button>
         {applyButton}
       </div>

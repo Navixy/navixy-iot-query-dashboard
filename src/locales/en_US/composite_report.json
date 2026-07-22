@@ -1,0 +1,450 @@
+{
+  "error_state": {
+    "load_failure": {
+      "paragraph": {
+        "failure": "Failed to load the report"
+      }
+    },
+    "home_button": {
+      "cta": "Back to home"
+    }
+  },
+  "report_viewer": {
+    "map_toggle": {
+      "label": "Map",
+      "enabled_toast": {
+        "paragraph": {
+          "success": "Map enabled"
+        }
+      },
+      "disabled_toast": {
+        "paragraph": {
+          "success": "Map disabled"
+        }
+      },
+      "save_toast": {
+        "paragraph": {
+          "failure": "Failed to update the map settings"
+        }
+      }
+    },
+    "refresh_button": {
+      "cta": "Refresh"
+    },
+    "excel_menu": {
+      "trigger": {
+        "cta": "Excel"
+      },
+      "xlsx_option": {
+        "menu_item": "Excel (.xlsx)"
+      },
+      "csv_option": {
+        "menu_item": "CSV (.csv)"
+      }
+    },
+    "html_button": {
+      "cta": "HTML"
+    },
+    "pdf_button": {
+      "cta": "PDF"
+    },
+    "download_button": {
+      "cta": "Download"
+    },
+    "execution_meta": {
+      "last_updated": {
+        "label": "Last updated: {time}"
+      }
+    },
+    "export_toast": {
+      "paragraph": {
+        "success": "{format} export downloaded",
+        "failure": "Failed to export the report"
+      }
+    },
+    "export_header_toast": {
+      "paragraph": {
+        "success": "Export header settings saved",
+        "failure": "Failed to save export header settings"
+      }
+    },
+    "geocode_toast": {
+      "paragraph": {
+        "failure": "Failed to geocode the coordinates. Try again."
+      }
+    },
+    "query_error": {
+      "header": {
+        "title": "Query error"
+      }
+    },
+    "loading": {
+      "paragraph": {
+        "loading": "Executing query…"
+      }
+    }
+  },
+  "parameters_form": {
+    "header": {
+      "title": "Parameters",
+      "subtitle": {
+        "instruction": "Set values for placeholders in the saved SQL query, such as"
+      }
+    },
+    "apply_hint": {
+      "paragraph": {
+        "instruction": "Save the query if you edited it, then click \"Refresh\" or \"Apply and run query\" to see the changes."
+      }
+    },
+    "value_input": {
+      "placeholder": {
+        "instruction": "Enter {name}"
+      }
+    },
+    "apply_button": {
+      "cta": "Apply and run query"
+    }
+  },
+  "sql_form": {
+    "toggle": {
+      "label": "SQL query"
+    },
+    "unsaved_badge": {
+      "label": "Unsaved changes"
+    },
+    "query_input": {
+      "placeholder": {
+        "instruction": "Enter SQL query…"
+      }
+    },
+    "save_and_run_button": {
+      "cta": "Save and run"
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "SQL query saved",
+        "failure": "Failed to save the SQL query"
+      }
+    }
+  },
+  "table_viewer": {
+    "header": {
+      "title": "Data table"
+    },
+    "settings_button": {
+      "tooltip": "Table settings"
+    },
+    "unsaved_badge": {
+      "label": "Unsaved changes"
+    },
+    "row_count": {
+      "label": "Rows loaded: {count}"
+    },
+    "geocode_toggle": {
+      "label": "Geocode to address",
+      "tooltip": {
+        "disabled": "Geocoding requires an active session. Sign in through the Navixy platform."
+      },
+      "marker_icon": {
+        "label": "Map"
+      }
+    },
+    "geocode_dialog": {
+      "title": {
+        "question": "Enable geocoding?"
+      },
+      "count_notice": {
+        "paragraph": {
+          "warning": "This will geocode unique coordinates ({count}) to street addresses."
+        }
+      },
+      "billing_notice": {
+        "paragraph": "This may take some time and will be billed according to your Navixy geocoding tariff plan."
+      },
+      "confirm_button": {
+        "cta": {
+          "confirmation": "Geocode coordinates: {count}"
+        }
+      }
+    },
+    "address_column": {
+      "column_header": "Address"
+    },
+    "address_column_prefixed": {
+      "column_header": "{prefix} Address"
+    },
+    "totals_row": {
+      "label": "Total"
+    },
+    "pagination": {
+      "empty": {
+        "label": "No rows"
+      }
+    }
+  },
+  "table_settings_form": {
+    "page_size_input": {
+      "label": "Page size"
+    },
+    "max_rows_input": {
+      "label": "Max rows"
+    },
+    "show_totals_toggle": {
+      "label": "Show the \"Total\" row"
+    },
+    "save_button": {
+      "cta": "Save table settings"
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "Table settings saved",
+        "failure": "Failed to save table settings"
+      }
+    }
+  },
+  "chart_viewer": {
+    "header": {
+      "title": "Chart"
+    },
+    "x_axis_input": {
+      "label": "X-axis"
+    },
+    "y_axis_input": {
+      "label": "Y-axis"
+    },
+    "group_by_input": {
+      "label": "Group by",
+      "none_option": {
+        "menu_item": "None"
+      }
+    },
+    "column_input": {
+      "placeholder": {
+        "instruction": "Select column"
+      }
+    },
+    "save_button": {
+      "cta": "Save chart settings"
+    },
+    "unsaved_badge": {
+      "label": "Unsaved changes"
+    },
+    "chart_title": {
+      "label": "{yColumn} over {xColumn}"
+    },
+    "chart_title_grouped": {
+      "label": "{yColumn} over {xColumn} (grouped by: {group})"
+    },
+    "legend": {
+      "filter_button": {
+        "tooltip": "Click to filter"
+      },
+      "isolate_button": {
+        "tooltip": "Click to show only this"
+      }
+    },
+    "paragraph": {
+      "empty": "Select X- and Y-axis columns to generate the chart"
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "Chart settings saved",
+        "failure": "Failed to save chart settings"
+      }
+    }
+  },
+  "map_viewer": {
+    "header": {
+      "title": "Location map",
+      "subtitle": "Locations on the map: {count}"
+    },
+    "no_coordinates_notice": {
+      "paragraph": {
+        "empty": "No GPS coordinates in the query results"
+      }
+    },
+    "no_fix_notice": {
+      "paragraph": {
+        "empty": "GPS columns were detected, but no rows contain a usable location (no GPS fix)"
+      }
+    }
+  },
+  "series_selector": {
+    "trigger": {
+      "label": "Groups: {count} of {total}"
+    },
+    "search_input": {
+      "placeholder": {
+        "instruction": "Search groups…"
+      }
+    },
+    "paragraph": {
+      "empty": "No groups found."
+    },
+    "plotted_option": {
+      "label": "{group}, plotted"
+    },
+    "unplotted_option": {
+      "label": "{group}, not plotted"
+    },
+    "overflow_notice": {
+      "paragraph": "More matches: {count}. Search to narrow them down."
+    },
+    "reset_button": {
+      "cta": "Reset to default"
+    }
+  },
+  "report_editor": {
+    "header": {
+      "title": {
+        "new": "New report",
+        "edit": "Edit report"
+      },
+      "subtitle": "Create a report with table, chart, and map visualizations from an SQL query"
+    },
+    "back_button": {
+      "cta": "Back"
+    },
+    "validation": {
+      "title": {
+        "paragraph": {
+          "failure": "Enter a title before saving"
+        }
+      },
+      "query": {
+        "paragraph": {
+          "failure": "Enter an SQL query before saving"
+        }
+      }
+    },
+    "save_toast": {
+      "created": {
+        "paragraph": {
+          "success": "Report created"
+        }
+      },
+      "updated": {
+        "paragraph": {
+          "success": "Report updated"
+        }
+      },
+      "paragraph": {
+        "failure": "Failed to save the report"
+      }
+    },
+    "query_tab": {
+      "menu_item": "SQL query"
+    },
+    "config_tab": {
+      "menu_item": "Components"
+    }
+  },
+  "basic_info_form": {
+    "header": {
+      "title": "Basic information"
+    },
+    "title_input": {
+      "label": "Title",
+      "placeholder": {
+        "instruction": "My report"
+      }
+    },
+    "description_input": {
+      "label": "Description",
+      "placeholder": {
+        "instruction": "Optional description"
+      }
+    }
+  },
+  "query_editor": {
+    "header": {
+      "title": "SQL query",
+      "subtitle": "Enter the SQL query to power the report"
+    },
+    "detect_button": {
+      "cta": "Detect columns"
+    },
+    "detected_columns": {
+      "label": "Detected columns"
+    },
+    "gps_detected": {
+      "label": "GPS columns detected: {lat}, {lon}"
+    },
+    "detect_toast": {
+      "paragraph": {
+        "success": "Detected columns: {count}",
+        "failure": "Failed to detect columns"
+      },
+      "empty_query": {
+        "paragraph": {
+          "failure": "Enter an SQL query first"
+        }
+      }
+    }
+  },
+  "table_config_form": {
+    "header": {
+      "title": "Table"
+    },
+    "page_size_input": {
+      "label": "Page size"
+    },
+    "max_rows_input": {
+      "label": "Max rows"
+    },
+    "show_totals_toggle": {
+      "label": "Show the \"Total\" row"
+    }
+  },
+  "chart_config_form": {
+    "header": {
+      "title": "Chart"
+    },
+    "type_input": {
+      "label": "Chart type",
+      "timeseries_option": {
+        "menu_item": "Time series (line)"
+      },
+      "bar_option": {
+        "menu_item": "Bar chart"
+      }
+    },
+    "x_axis_input": {
+      "label": "X-axis column",
+      "placeholder": {
+        "instruction": "Select column",
+        "disabled": "Click \"Detect columns\" in the \"SQL query\" tab first"
+      }
+    },
+    "y_axis_input": {
+      "label": "Y-axis columns (select one or more)",
+      "paragraph": {
+        "empty": "Click \"Detect columns\" in the \"SQL query\" tab first"
+      }
+    }
+  },
+  "map_config_form": {
+    "header": {
+      "title": "Map",
+      "subtitle": "Displays data points on an interactive map (requires GPS coordinates)"
+    },
+    "auto_detect_toggle": {
+      "label": "Auto-detect GPS columns"
+    },
+    "lat_input": {
+      "label": "Latitude column",
+      "placeholder": {
+        "instruction": "Select column"
+      }
+    },
+    "lon_input": {
+      "label": "Longitude column",
+      "placeholder": {
+        "instruction": "Select column"
+      }
+    },
+    "auto_detected": {
+      "label": "Will use the auto-detected columns: {lat}, {lon}"
+    }
+  }
+}

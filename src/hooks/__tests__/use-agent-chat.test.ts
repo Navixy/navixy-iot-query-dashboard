@@ -237,7 +237,7 @@ describe('createAgentChatContext — an unvalidated cached snapshot is not autho
     const pending = createAgentChatContext(client, 'refresh');
     fail(new Error('network down'));
 
-    await expect(pending).rejects.toThrow(/could not confirm/i);
+    await expect(pending).rejects.toThrow(/failed to confirm/i);
   });
 
   it('STILL sends when the read fails with an EMPTY cache — B5-R5 is untouched', async () => {

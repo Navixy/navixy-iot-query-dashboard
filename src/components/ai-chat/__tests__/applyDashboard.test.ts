@@ -128,7 +128,7 @@ describe('applyDashboard', () => {
     await applyDashboard({ result, ...h });
 
     expect(toastError).toHaveBeenCalledTimes(1);
-    expect(toastError.mock.calls[0][0]).toContain('restore it from the menu editor');
+    expect(toastError.mock.calls[0][0]).toContain('restore it in "Edit menu"');
     expect(h.mutateAsync).not.toHaveBeenCalled();
     expect(h.navigate).not.toHaveBeenCalled();
     expect(h.onSettled).toHaveBeenCalledTimes(1);
@@ -222,7 +222,7 @@ describe('applyDashboard', () => {
       // was assumed to have raised it), Apply re-enabled, one click from a duplicate.
       expect(h.onSettled).not.toHaveBeenCalled();
       expect(toastError).toHaveBeenCalledTimes(1);
-      expect(toastError.mock.calls[0][0]).toContain('was created, but could not be opened');
+      expect(toastError.mock.calls[0][0]).toContain("was created, but it couldn't be opened");
     });
   });
 

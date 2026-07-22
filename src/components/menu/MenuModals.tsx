@@ -16,6 +16,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useRenameSectionMutation, useRenameReportMutation, useDeleteSectionMutation, useDeleteReportMutation, useCreateSectionMutation, useCreateReportMutation, useMenuTree } from '@/hooks/use-menu-mutations';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 // Rename Modal Component
 interface RenameModalProps {
@@ -24,6 +25,7 @@ interface RenameModalProps {
 }
 
 export function RenameModal({ item, onClose }: RenameModalProps) {
+  const { t } = useLocale();
   const [name, setName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -41,7 +43,7 @@ export function RenameModal({ item, onClose }: RenameModalProps) {
     e.preventDefault();
     
     if (!item || !name.trim()) {
-      toast.error('Name cannot be empty');
+      toast.error(t('menu_editor.rename_dialog.empty_name_toast.paragraph.failure'));
       return;
     }
 
@@ -57,7 +59,7 @@ export function RenameModal({ item, onClose }: RenameModalProps) {
         // Find the current section to get its version
         const currentSection = (menuTree?.sections || []).find(s => s.id === item.id);
         if (!currentSection) {
-          toast.error('Section not found');
+          toast.error(t('menu_editor.rename_dialog.section_missing_toast.paragraph.failure'));
           return;
         }
         
@@ -78,7 +80,7 @@ export function RenameModal({ item, onClose }: RenameModalProps) {
         }
         
         if (!currentReport) {
-          toast.error('Dashboard not found');
+          toast.error(t('menu_editor.rename_dialog.report_missing_toast.paragraph.failure'));
           return;
         }
         
@@ -109,17 +111,19 @@ export function RenameModal({ item, onClose }: RenameModalProps) {
     <Dialog open={!!item} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Rename {item.type === 'section' ? 'Section' : 'Dashboard'}</DialogTitle>
+          {/* Per-entity keys (not a {type} placeholder) so translations don't have
+              to make one sentence agree with an inserted noun. */}
+          <DialogTitle>{t(`menu_editor.rename_dialog.title.${item.type}`)}</DialogTitle>
           <DialogDescription>
-            Enter a new name for this {item.type}.
+            {t(`menu_editor.rename_dialog.paragraph.instruction.${item.type}`)}
           </DialogDescription>
         </DialogHeader>
-        
+
         <form onSubmit={handleSubmit}>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="name" className="text-right">
-                Name
+                {t('menu_editor.rename_dialog.name_input.label')}
               </Label>
               <Input
                 id="name"
@@ -127,22 +131,22 @@ export function RenameModal({ item, onClose }: RenameModalProps) {
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="col-span-3"
-                placeholder={`Enter ${item.type} name...`}
+                placeholder={t(`menu_editor.rename_dialog.name_input.placeholder.instruction.${item.type}`)}
                 maxLength={120}
                 autoFocus
               />
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
-            <Button 
-              type="submit" 
+            <Button
+              type="submit"
               disabled={isSubmitting || !name.trim() || name.trim() === item.name}
             >
-              {isSubmitting ? 'Saving...' : 'Save'}
+              {isSubmitting ? t('common.actions.save.cta.loading') : t('common.actions.save.cta.default')}
             </Button>
           </DialogFooter>
         </form>
@@ -160,6 +164,7 @@ interface DeleteModalProps {
 }
 
 export function DeleteModal({ item, strategy, onClose, onStrategyChange }: DeleteModalProps) {
+  const { t } = useLocale();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const deleteSectionMutation = useDeleteSectionMutation();
@@ -202,61 +207,65 @@ export function DeleteModal({ item, strategy, onClose, onStrategyChange }: Delet
     <Dialog open={!!item} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Delete</DialogTitle>
+          <DialogTitle>{t('common.confirmations.delete.title')}</DialogTitle>
           {item.type === 'section' && (
             <DialogDescription>
-              Deleting a section will affect its reports. Choose what to do with the reports in this section.
+              {t('menu_editor.delete_dialog.section_notice.paragraph.warning')}
             </DialogDescription>
           )}
         </DialogHeader>
-        
+
         <form onSubmit={handleSubmit}>
           <div className="grid gap-4 py-4">
             {item.type === 'section' && (
               <div className="space-y-3">
-                <Label className="text-sm font-medium">What should happen to the reports in this section?</Label>
+                <Label className="text-sm font-medium">{t('menu_editor.delete_dialog.strategy_input.label')}</Label>
                 <RadioGroup value={strategy || ''} onValueChange={onStrategyChange}>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="move_children_to_root" id="move-to-root" />
                     <Label htmlFor="move-to-root" className="text-sm">
-                      Move all reports to Root (recommended)
+                      {t('menu_editor.delete_dialog.move_option.label')}
                     </Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="delete_children" id="delete-children" />
                     <Label htmlFor="delete-children" className="text-sm">
-                      Delete all reports
+                      {t('menu_editor.delete_dialog.delete_children_option.label')}
                     </Label>
                   </div>
                 </RadioGroup>
               </div>
             )}
-            
+
             {/* For a dashboard/report this line is the dialog's accessible
                 description; a section already has one in the header above. */}
             <div className="p-3 bg-muted rounded-md">
               {item.type === 'section' ? (
                 <p className="text-sm text-muted-foreground">
-                  <strong>{item.name || 'This section'}</strong> will be moved to trash and can be restored later.
+                  {t('common.confirmations.restore_notice.paragraph', {
+                    name: item.name || t('menu_editor.delete_dialog.name_fallback.label.section'),
+                  })}
                 </p>
               ) : (
                 <DialogDescription>
-                  <strong>{item.name || 'This item'}</strong> will be moved to trash and can be restored later.
+                  {t('common.confirmations.restore_notice.paragraph', {
+                    name: item.name || t('menu_editor.delete_dialog.name_fallback.label.report'),
+                  })}
                 </DialogDescription>
               )}
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
-            <Button 
-              type="submit" 
+            <Button
+              type="submit"
               variant="destructive"
               disabled={isSubmitting || (item.type === 'section' && !strategy)}
             >
-              {isSubmitting ? 'Deleting...' : 'Delete'}
+              {isSubmitting ? t('common.actions.delete.cta.loading') : t('common.actions.delete.cta.default')}
             </Button>
           </DialogFooter>
         </form>
@@ -272,6 +281,7 @@ interface CreateSectionModalProps {
 }
 
 export function CreateSectionModal({ isOpen, onClose }: CreateSectionModalProps) {
+  const { t } = useLocale();
   const [name, setName] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -282,7 +292,7 @@ export function CreateSectionModal({ isOpen, onClose }: CreateSectionModalProps)
     e.preventDefault();
     
     if (!name.trim()) {
-      toast.error('Section name cannot be empty');
+      toast.error(t('menu_editor.create_section_dialog.empty_name_toast.paragraph.failure'));
       return;
     }
 
@@ -317,17 +327,17 @@ export function CreateSectionModal({ isOpen, onClose }: CreateSectionModalProps)
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Create New Section</DialogTitle>
+          <DialogTitle>{t('menu_editor.create_section_dialog.title')}</DialogTitle>
           <DialogDescription>
-            Create a new section to organize your reports.
+            {t('menu_editor.create_section_dialog.paragraph.instruction')}
           </DialogDescription>
         </DialogHeader>
-        
+
         <form onSubmit={handleSubmit}>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="section-name" className="text-right">
-                Name
+                {t('menu_editor.create_section_dialog.name_input.label')}
               </Label>
               <Input
                 id="section-name"
@@ -335,22 +345,22 @@ export function CreateSectionModal({ isOpen, onClose }: CreateSectionModalProps)
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="col-span-3"
-                placeholder="Enter section name..."
+                placeholder={t('menu_editor.create_section_dialog.name_input.placeholder.instruction')}
                 maxLength={120}
                 autoFocus
               />
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
-            <Button 
-              type="submit" 
+            <Button
+              type="submit"
               disabled={isSubmitting || !name.trim()}
             >
-              {isSubmitting ? 'Creating...' : 'Create Section'}
+              {isSubmitting ? t('common.states.creating') : t('menu_editor.create_section_dialog.create_button.cta.default')}
             </Button>
           </DialogFooter>
         </form>
@@ -366,6 +376,7 @@ interface CreateReportModalProps {
 }
 
 export function CreateReportModal({ isOpen, onClose }: CreateReportModalProps) {
+  const { t } = useLocale();
   const [title, setTitle] = useState('');
   const [parentSectionId, setParentSectionId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -378,7 +389,7 @@ export function CreateReportModal({ isOpen, onClose }: CreateReportModalProps) {
     e.preventDefault();
     
     if (!title.trim()) {
-      toast.error('Dashboard title cannot be empty');
+      toast.error(t('menu_editor.create_dashboard_dialog.empty_title_toast.paragraph.failure'));
       return;
     }
 
@@ -464,17 +475,17 @@ export function CreateReportModal({ isOpen, onClose }: CreateReportModalProps) {
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Create New Dashboard</DialogTitle>
+          <DialogTitle>{t('menu_editor.create_dashboard_dialog.title')}</DialogTitle>
           <DialogDescription>
-            Create a new dashboard. You can choose which section it belongs to or leave it in the root.
+            {t('menu_editor.create_dashboard_dialog.paragraph.instruction')}
           </DialogDescription>
         </DialogHeader>
-        
+
         <form onSubmit={handleSubmit}>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="report-title" className="text-right">
-                Title
+                {t('menu_editor.create_dashboard_dialog.title_input.label')}
               </Label>
               <Input
                 id="report-title"
@@ -482,22 +493,22 @@ export function CreateReportModal({ isOpen, onClose }: CreateReportModalProps) {
                 onChange={(e) => setTitle(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="col-span-3"
-                placeholder="Enter report title..."
+                placeholder={t('menu_editor.create_dashboard_dialog.title_input.placeholder.instruction')}
                 maxLength={120}
                 autoFocus
               />
             </div>
-            
+
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="parent-section" className="text-right">
-                Section
+                {t('menu_editor.create_dashboard_dialog.section_input.label')}
               </Label>
               <Select value={parentSectionId || 'root'} onValueChange={(value) => setParentSectionId(value === 'root' ? null : value)}>
                 <SelectTrigger className="col-span-3">
-                  <SelectValue placeholder="Select section (optional)" />
+                  <SelectValue placeholder={t('menu_editor.create_dashboard_dialog.section_input.placeholder.instruction')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="root">Root (no section)</SelectItem>
+                  <SelectItem value="root">{t('menu_editor.create_dashboard_dialog.section_input.root_option.menu_item')}</SelectItem>
                   {(menuTree?.sections || []).map((section) => (
                     <SelectItem key={section.id} value={section.id}>
                       {section.name}
@@ -507,16 +518,16 @@ export function CreateReportModal({ isOpen, onClose }: CreateReportModalProps) {
               </Select>
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
-            <Button 
-              type="submit" 
+            <Button
+              type="submit"
               disabled={isSubmitting || !title.trim()}
             >
-              {isSubmitting ? 'Creating...' : 'Create Dashboard'}
+              {isSubmitting ? t('common.states.creating') : t('menu_editor.create_dashboard_dialog.create_button.cta.default')}
             </Button>
           </DialogFooter>
         </form>
@@ -532,6 +543,7 @@ interface CreateCompositeReportModalProps {
 }
 
 export function CreateCompositeReportModal({ isOpen, onClose }: CreateCompositeReportModalProps) {
+  const { t } = useLocale();
   const [title, setTitle] = useState('');
   const [parentSectionId, setParentSectionId] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -600,17 +612,17 @@ export function CreateCompositeReportModal({ isOpen, onClose }: CreateCompositeR
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Create New Report</DialogTitle>
+          <DialogTitle>{t('menu_editor.create_report_dialog.title')}</DialogTitle>
           <DialogDescription>
-            Create a new report with table, chart, and map visualizations. You can choose which section it belongs to or leave it in the root.
+            {t('menu_editor.create_report_dialog.paragraph.instruction')}
           </DialogDescription>
         </DialogHeader>
-        
+
         <form onSubmit={handleSubmit}>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="composite-report-title" className="text-right">
-                Title
+                {t('menu_editor.create_report_dialog.title_input.label')}
               </Label>
               <Input
                 id="composite-report-title"
@@ -618,22 +630,22 @@ export function CreateCompositeReportModal({ isOpen, onClose }: CreateCompositeR
                 onChange={(e) => setTitle(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="col-span-3"
-                placeholder="Enter report title (optional)..."
+                placeholder={t('menu_editor.create_report_dialog.title_input.placeholder.instruction')}
                 maxLength={120}
                 autoFocus
               />
             </div>
-            
+
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="composite-parent-section" className="text-right">
-                Section
+                {t('menu_editor.create_report_dialog.section_input.label')}
               </Label>
               <Select value={parentSectionId || 'root'} onValueChange={(value) => setParentSectionId(value === 'root' ? null : value)}>
                 <SelectTrigger className="col-span-3">
-                  <SelectValue placeholder="Select section (optional)" />
+                  <SelectValue placeholder={t('menu_editor.create_report_dialog.section_input.placeholder.instruction')} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="root">Root (no section)</SelectItem>
+                  <SelectItem value="root">{t('menu_editor.create_report_dialog.section_input.root_option.menu_item')}</SelectItem>
                   {(menuTree?.sections || []).map((section) => (
                     <SelectItem key={section.id} value={section.id}>
                       {section.name}
@@ -643,13 +655,13 @@ export function CreateCompositeReportModal({ isOpen, onClose }: CreateCompositeR
               </Select>
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button type="submit">
-              Continue
+              {t('menu_editor.create_report_dialog.continue_button.cta')}
             </Button>
           </DialogFooter>
         </form>

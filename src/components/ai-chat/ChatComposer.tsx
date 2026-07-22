@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 /**
  * Mirrors MAX_MESSAGE_LENGTH exported from backend/src/routes/agent.ts — the
@@ -20,6 +21,7 @@ interface ChatComposerProps {
 }
 
 export function ChatComposer({ value, onChange, onSend, disabled }: ChatComposerProps) {
+  const { t } = useLocale();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Re-focus when a turn completes (disabled flips back to false) so the user
@@ -67,12 +69,12 @@ export function ChatComposer({ value, onChange, onSend, disabled }: ChatComposer
         disabled={disabled}
         maxLength={MAX_MESSAGE_LENGTH}
         rows={2}
-        placeholder="Describe the dashboard you want..."
-        aria-label="Message to the AI assistant"
+        placeholder={t('ai_chat.composer.message_input.placeholder.instruction')}
+        aria-label={t('ai_chat.composer.message_input.label')}
         className="min-h-[56px] resize-none"
       />
       <Button type="submit" disabled={disabled || value.trim() === ''}>
-        Send
+        {t('ai_chat.composer.send_button.cta')}
       </Button>
     </form>
   );

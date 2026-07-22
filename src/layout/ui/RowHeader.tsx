@@ -12,6 +12,7 @@ import { useDraggable } from '@dnd-kit/core';
 import type { Panel } from '@/types/dashboard-types';
 import { isRowPanel } from '../geometry/rows';
 import { cmdToggleRowCollapsed, cmdPackRow, cmdDeleteRow, cmdRenameRow } from '../state/commands';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RowHeaderProps {
   row: Panel;
@@ -45,6 +46,7 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
     disabled: !enableDrag,
   });
 
+  const { t } = useLocale();
   const [showMenu, setShowMenu] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showRenameDialog, setShowRenameDialog] = useState(false);
@@ -207,8 +209,8 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
             isEditingLayout ? 'opacity-50 cursor-not-allowed' : ''
           }`}
           style={{ pointerEvents: 'auto' }}
-          aria-label={isCollapsed ? 'Expand row' : 'Collapse row'}
-          title={isEditingLayout ? 'Rows are expanded in edit mode' : (isCollapsed ? 'Expand row to show panels' : 'Collapse row to hide panels')}
+          aria-label={isCollapsed ? t('report_view.row_header.expand_button.label') : t('report_view.row_header.collapse_button.label')}
+          title={isEditingLayout ? t('report_view.row_header.collapse_button.tooltip.disabled') : (isCollapsed ? t('report_view.row_header.expand_button.tooltip') : t('report_view.row_header.collapse_button.tooltip.default'))}
         >
           {isCollapsed ? (
             <ChevronRight className="h-4 w-4 text-[var(--text-secondary)]" />
@@ -233,7 +235,7 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
                   e.stopPropagation();
                 }}
                 style={{ pointerEvents: 'auto' }}
-                title="More options"
+                title={t('report_view.row_header.menu_button.tooltip')}
               >
                 <MoreVertical className="h-4 w-4" />
               </button>
@@ -253,12 +255,12 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
                       e.stopPropagation();
                       handleOpenRenameDialog();
                     }}
-                    title="Rename this row"
+                    title={t('report_view.row_header.rename_option.tooltip')}
                   >
                     <Pencil className="h-4 w-4 text-[var(--text-secondary)] mt-0.5 flex-shrink-0" />
                     <div className="flex flex-col">
-                      <span>Rename</span>
-                      <span className="text-xs text-[var(--text-muted)] mt-0.5">Change row title</span>
+                      <span>{t('common.actions.rename.cta')}</span>
+                      <span className="text-xs text-[var(--text-muted)] mt-0.5">{t('report_view.row_header.rename_option.sublabel')}</span>
                     </div>
                   </button>
                   <button
@@ -267,12 +269,12 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
                       e.stopPropagation();
                       handlePackRow();
                     }}
-                    title="Pack panels in this row by removing gaps"
+                    title={t('report_view.row_header.pack_option.tooltip')}
                   >
                     <Package className="h-4 w-4 text-[var(--text-secondary)] mt-0.5 flex-shrink-0" />
                     <div className="flex flex-col">
-                      <span>Pack Row</span>
-                      <span className="text-xs text-[var(--text-muted)] mt-0.5">Remove gaps</span>
+                      <span>{t('report_view.row_header.pack_option.menu_item')}</span>
+                      <span className="text-xs text-[var(--text-muted)] mt-0.5">{t('report_view.row_header.pack_option.sublabel')}</span>
                     </div>
                   </button>
                   <div className="border-t border-[var(--border)] my-1" />
@@ -284,10 +286,10 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
                       setShowDeleteDialog(true);
                       setShowMenu(false);
                     }}
-                    title="Delete this row"
+                    title={t('report_view.row_header.delete_option.tooltip')}
                   >
                     <Trash2 className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                    <span>Delete Row</span>
+                    <span>{t('report_view.row_header.delete_option.menu_item')}</span>
                   </button>
                 </div>,
                 document.body
@@ -306,9 +308,9 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
       }}>
         <DialogContent className="z-[100]">
           <DialogHeader>
-            <DialogTitle>Rename Row</DialogTitle>
+            <DialogTitle>{t('report_view.rename_row_dialog.title')}</DialogTitle>
             <DialogDescription>
-              Enter a new name for this row
+              {t('report_view.rename_row_dialog.paragraph.instruction')}
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
@@ -323,7 +325,7 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
                   setRenameValue(row.title || '');
                 }
               }}
-              placeholder="Row title"
+              placeholder={t('report_view.rename_row_dialog.title_input.placeholder')}
               autoFocus
             />
           </div>
@@ -335,13 +337,13 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
                 setRenameValue(row.title || '');
               }}
             >
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button
               variant="primary"
               onClick={handleRenameRow}
             >
-              Rename
+              {t('common.actions.rename.cta')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -354,17 +356,12 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
       }}>
         <DialogContent className="z-[100]">
           <DialogHeader>
-            <DialogTitle>Delete Row</DialogTitle>
+            <DialogTitle>{t('report_view.delete_row_dialog.title')}</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete the row &quot;{row.title}&quot;?
-              {isCollapsed && row.panels && row.panels.length > 0 && (
+              {t('report_view.delete_row_dialog.paragraph.confirmation', { title: row.title ?? '' })}
+              {((isCollapsed && row.panels && row.panels.length > 0) || !isCollapsed) && (
                 <span className="block mt-2 text-[var(--warning)]">
-                  This row contains {row.panels.length} panel{row.panels.length !== 1 ? 's' : ''} that will be moved to the top level.
-                </span>
-              )}
-              {!isCollapsed && (
-                <span className="block mt-2 text-[var(--warning)]">
-                  This row contains panels that will be moved to the top level.
+                  {t('report_view.delete_row_dialog.paragraph.warning')}
                 </span>
               )}
             </DialogDescription>
@@ -374,14 +371,14 @@ export const RowHeader: React.FC<RowHeaderProps> = ({
               variant="secondary"
               onClick={() => setShowDeleteDialog(false)}
             >
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button
               variant="primary"
               onClick={handleDeleteRow}
               className="bg-[var(--danger)] hover:opacity-90"
             >
-              Delete
+              {t('common.actions.delete.cta.default')}
             </Button>
           </DialogFooter>
         </DialogContent>

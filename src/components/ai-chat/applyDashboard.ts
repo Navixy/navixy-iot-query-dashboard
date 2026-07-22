@@ -9,6 +9,10 @@
  * is the single rule every failure path here serves. (DO-313)
  */
 import { toast } from 'sonner';
+// Resolved through the service translator, not a hook: this is a plain async module
+// called from a component handler, and its own test calls it directly — threading `t`
+// through the argument object would change that signature for no benefit.
+import { getServiceTranslator } from '@/i18n/serviceTranslator';
 import { apiService } from '@/services/api';
 import type { AgentChatResult } from '@/types/agent';
 
@@ -138,6 +142,7 @@ export interface ApplyArgs {
 export async function applyDashboard({
   result, createReportMutation, navigate, onSettled,
 }: ApplyArgs): Promise<void> {
+  const t = getServiceTranslator();
   // getSections() — the legacy shape — rather than the v1 menu tree: it is
   // demo-branched, and Apply must work in demo mode.
   //
@@ -146,7 +151,9 @@ export async function applyDashboard({
   // colliding one. See the createSection failure below.
   const sections = await apiService.getSections();
   if (sections.error) {
-    toast.error(`Could not read the menu: ${sections.error.message}`);
+    toast.error(t('ai_chat.apply.menu_read_error.paragraph.failure', {
+      detail: sections.error.message,
+    }));
     onSettled();
     return;
   }
@@ -189,8 +196,10 @@ export async function applyDashboard({
       // and in demo mode by a store whose ownership moved to another tab, and
       // "restore it from the menu editor" is actively wrong advice for both. Do NOT
       // retry blindly.
-      toast.error(`Could not create the "${SECTION_NAME}" section: ${created.error.message}. ` +
-                  'If you deleted it earlier, restore it from the menu editor and try again.');
+      toast.error(t('ai_chat.apply.section_create_error.paragraph.failure', {
+        section: SECTION_NAME,
+        detail: created.error.message,
+      }));
       onSettled();
       return;
     }
@@ -199,7 +208,9 @@ export async function applyDashboard({
       // A 200 carrying no id. Nothing to file the report under, and `section_id: null`
       // would silently put it at the top level of the menu instead — a dashboard the
       // user then cannot find where they were told to look.
-      toast.error(`Could not create the "${SECTION_NAME}" section: the server returned no id.`);
+      toast.error(t('ai_chat.apply.section_no_id_error.paragraph.failure', {
+        section: SECTION_NAME,
+      }));
       onSettled();
       return;
     }
@@ -266,8 +277,10 @@ export async function applyDashboard({
   // honest: the work is done, so the useful thing to hand the user is where it landed,
   // not a button whose only effect would be to duplicate it.
   const savedButNotOpened = () => toast.error(
-    `"${result.title}" was created, but could not be opened. ` +
-    `Find it in the sidebar under "${SECTION_NAME}".`,
+    t('ai_chat.apply.saved_not_opened_error.paragraph.failure', {
+      title: result.title,
+      section: SECTION_NAME,
+    }),
   );
 
   const reportId = (report as { id?: string } | null | undefined)?.id;

@@ -34,10 +34,11 @@ import { toast } from 'sonner';
 import { toErrorMeta } from '@/utils/errors';
 import { apiService } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
-import type { 
-  CompositeReport, 
-  CompositeReportConfig, 
-  ColumnDetectionResult 
+import { useLocale } from '@/i18n/LocaleProvider';
+import type {
+  CompositeReport,
+  CompositeReportConfig,
+  ColumnDetectionResult
 } from '@/types/dashboard-types';
 
 const DEFAULT_CONFIG: CompositeReportConfig = {
@@ -65,6 +66,7 @@ function normalizeCompositeConfig(config?: Partial<CompositeReportConfig> | null
 }
 
 export default function CompositeReportEditor() {
+  const { t } = useLocale();
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -147,7 +149,7 @@ export default function CompositeReportEditor() {
         // Show a recoverable inline error with Retry instead of a toast +
         // forced redirect home — a transient settings-DB blip (DO-287) should
         // not eject the user from the editor and lose their context.
-        setLoadError(error.message || 'Failed to load report');
+        setLoadError(error.message || t('composite_report.error_state.load_failure.paragraph.failure'));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -157,7 +159,7 @@ export default function CompositeReportEditor() {
     return () => {
       cancelled = true;
     };
-  }, [id, reloadNonce]);
+  }, [id, reloadNonce, t]);
 
   // Track changes
   useEffect(() => {
@@ -172,7 +174,7 @@ export default function CompositeReportEditor() {
   // Detect columns from SQL query
   const detectColumns = useCallback(async () => {
     if (!sqlQuery.trim()) {
-      toast.error('Please enter a SQL query first');
+      toast.error(t('composite_report.query_editor.detect_toast.empty_query.paragraph.failure'));
       return;
     }
 
@@ -263,24 +265,24 @@ export default function CompositeReportEditor() {
         }));
       }
 
-      toast.success(`Detected ${cols.length} columns`);
+      toast.success(t('composite_report.query_editor.detect_toast.paragraph.success', { count: cols.length }));
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Failed to detect columns: ${error.message}`);
+      toast.error(t('composite_report.query_editor.detect_toast.paragraph.failure'), { description: error.message });
     } finally {
       setDetecting(false);
     }
-  }, [sqlQuery, config]);
+  }, [sqlQuery, config, t]);
 
   // Save report
   const handleSave = async () => {
     if (!title.trim()) {
-      toast.error('Please enter a title');
+      toast.error(t('composite_report.report_editor.validation.title.paragraph.failure'));
       return;
     }
 
     if (!sqlQuery.trim()) {
-      toast.error('Please enter a SQL query');
+      toast.error(t('composite_report.report_editor.validation.query.paragraph.failure'));
       return;
     }
 
@@ -322,14 +324,18 @@ export default function CompositeReportEditor() {
       // Invalidate menu tree cache and wait for refetch before navigating
       await queryClient.invalidateQueries({ queryKey: ['menu'] });
 
-      toast.success(isNew ? 'Report created' : 'Report updated');
+      toast.success(
+        isNew
+          ? t('composite_report.report_editor.save_toast.created.paragraph.success')
+          : t('composite_report.report_editor.save_toast.updated.paragraph.success'),
+      );
       setHasChanges(false);
 
       // Navigate to view page
       navigate(`/app/composite-report/${response.data.id}`);
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
-      toast.error(`Failed to save: ${error.message}`);
+      toast.error(t('composite_report.report_editor.save_toast.paragraph.failure'), { description: error.message });
     } finally {
       setSaving(false);
     }
@@ -379,11 +385,11 @@ export default function CompositeReportEditor() {
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={() => setReloadNonce((n) => n + 1)}>
               <RefreshCw className="mr-2 h-4 w-4" />
-              Retry
+              {t('common.actions.retry.cta')}
             </Button>
             <Button variant="outline" onClick={() => navigate('/app')}>
               <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Home
+              {t('composite_report.error_state.home_button.cta')}
             </Button>
           </div>
         </div>
@@ -400,14 +406,16 @@ export default function CompositeReportEditor() {
           <div className="flex items-center gap-4">
             <Button variant="ghost" size="sm" onClick={() => navigate(-1)}>
               <ArrowLeft className="h-4 w-4 mr-1" />
-              Back
+              {t('composite_report.report_editor.back_button.cta')}
             </Button>
             <div>
               <h1 className="text-2xl font-bold">
-                {isNew ? 'New Report' : 'Edit Report'}
+                {isNew
+                  ? t('composite_report.report_editor.header.title.new')
+                  : t('composite_report.report_editor.header.title.edit')}
               </h1>
               <p className="text-muted-foreground text-sm mt-1">
-                Create a report with table, chart, and map visualizations from a SQL query
+                {t('composite_report.report_editor.header.subtitle')}
               </p>
             </div>
           </div>
@@ -418,7 +426,7 @@ export default function CompositeReportEditor() {
             ) : (
               <Save className="h-4 w-4 mr-2" />
             )}
-            Save
+            {t('common.actions.save.cta.default')}
           </Button>
         </div>
       </header>
@@ -428,24 +436,24 @@ export default function CompositeReportEditor() {
         {/* Basic Info */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-lg">Basic Information</CardTitle>
+            <CardTitle className="text-lg">{t('composite_report.basic_info_form.header.title')}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="title">Title *</Label>
+                <Label htmlFor="title">{t('composite_report.basic_info_form.title_input.label')} *</Label>
                 <Input
                   id="title"
-                  placeholder="My Report"
+                  placeholder={t('composite_report.basic_info_form.title_input.placeholder.instruction')}
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="description">Description</Label>
+                <Label htmlFor="description">{t('composite_report.basic_info_form.description_input.label')}</Label>
                 <Input
                   id="description"
-                  placeholder="Optional description"
+                  placeholder={t('composite_report.basic_info_form.description_input.placeholder.instruction')}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                 />
@@ -459,11 +467,11 @@ export default function CompositeReportEditor() {
           <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="query" className="gap-2">
               <Play className="h-4 w-4" />
-              SQL Query
+              {t('composite_report.report_editor.query_tab.menu_item')}
             </TabsTrigger>
             <TabsTrigger value="config" className="gap-2">
               <Settings className="h-4 w-4" />
-              Components
+              {t('composite_report.report_editor.config_tab.menu_item')}
             </TabsTrigger>
           </TabsList>
 
@@ -472,7 +480,7 @@ export default function CompositeReportEditor() {
             <Card>
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg">SQL Query</CardTitle>
+                  <CardTitle className="text-lg">{t('composite_report.query_editor.header.title')}</CardTitle>
                   <Button
                     variant="outline"
                     size="sm"
@@ -484,11 +492,11 @@ export default function CompositeReportEditor() {
                     ) : (
                       <Wand2 className="h-4 w-4 mr-2" />
                     )}
-                    Detect Columns
+                    {t('composite_report.query_editor.detect_button.cta')}
                   </Button>
                 </div>
                 <CardDescription>
-                  Enter the SQL query that will power this report
+                  {t('composite_report.query_editor.header.subtitle')}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -502,7 +510,7 @@ export default function CompositeReportEditor() {
                 {/* Detected Columns */}
                 {columns && (
                   <div className="space-y-2">
-                    <Label className="text-sm text-muted-foreground">Detected Columns</Label>
+                    <Label className="text-sm text-muted-foreground">{t('composite_report.query_editor.detected_columns.label')}</Label>
                     <div className="flex flex-wrap gap-2">
                       {columns.columns.map((col) => (
                         <Badge key={col.name} variant="secondary">
@@ -514,7 +522,7 @@ export default function CompositeReportEditor() {
 
                     {(columns.suggestions.gpsPairs && columns.suggestions.gpsPairs.length > 0 ? columns.suggestions.gpsPairs : columns.suggestions.gps ? [columns.suggestions.gps] : []).map((pair, idx) => (
                       <div key={idx} className="text-sm text-green-600 dark:text-green-400 mt-1">
-                        GPS columns detected: {pair.latColumn}, {pair.lonColumn}
+                        {t('composite_report.query_editor.gps_detected.label', { lat: pair.latColumn, lon: pair.lonColumn })}
                       </div>
                     ))}
                   </div>
@@ -531,7 +539,7 @@ export default function CompositeReportEditor() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <TableIcon className="h-5 w-5 text-muted-foreground" />
-                    <CardTitle className="text-lg">Table</CardTitle>
+                    <CardTitle className="text-lg">{t('composite_report.table_config_form.header.title')}</CardTitle>
                   </div>
                   <Switch
                     checked={config.table.enabled}
@@ -543,7 +551,7 @@ export default function CompositeReportEditor() {
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 md:grid-cols-3">
                     <div className="space-y-2">
-                      <Label>Page Size</Label>
+                      <Label>{t('composite_report.table_config_form.page_size_input.label')}</Label>
                       <Select
                         value={String(config.table.pageSize)}
                         onValueChange={(v) => updateConfig('table', { pageSize: parseInt(v) })}
@@ -552,15 +560,15 @@ export default function CompositeReportEditor() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="25">25 rows</SelectItem>
-                          <SelectItem value="50">50 rows</SelectItem>
-                          <SelectItem value="100">100 rows</SelectItem>
-                          <SelectItem value="200">200 rows</SelectItem>
+                          <SelectItem value="25">{t('common.pagination.rows.label', { count: 25 })}</SelectItem>
+                          <SelectItem value="50">{t('common.pagination.rows.label', { count: 50 })}</SelectItem>
+                          <SelectItem value="100">{t('common.pagination.rows.label', { count: 100 })}</SelectItem>
+                          <SelectItem value="200">{t('common.pagination.rows.label', { count: 200 })}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
                     <div className="space-y-2">
-                      <Label>Max Rows</Label>
+                      <Label>{t('composite_report.table_config_form.max_rows_input.label')}</Label>
                       <Select
                         value={String(config.table.maxRows || 10000)}
                         onValueChange={(v) => updateConfig('table', { maxRows: parseInt(v) })}
@@ -583,7 +591,7 @@ export default function CompositeReportEditor() {
                         checked={config.table.showTotals || false}
                         onCheckedChange={(checked) => updateConfig('table', { showTotals: checked })}
                       />
-                      <Label htmlFor="showTotals">Show Totals Row</Label>
+                      <Label htmlFor="showTotals">{t('composite_report.table_config_form.show_totals_toggle.label')}</Label>
                     </div>
                   </div>
                 </CardContent>
@@ -596,7 +604,7 @@ export default function CompositeReportEditor() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <LineChart className="h-5 w-5 text-muted-foreground" />
-                    <CardTitle className="text-lg">Chart</CardTitle>
+                    <CardTitle className="text-lg">{t('composite_report.chart_config_form.header.title')}</CardTitle>
                   </div>
                   <Switch
                     checked={config.chart.enabled}
@@ -608,7 +616,7 @@ export default function CompositeReportEditor() {
                 <CardContent className="space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
-                      <Label>Chart Type</Label>
+                      <Label>{t('composite_report.chart_config_form.type_input.label')}</Label>
                       <Select
                         value={config.chart.type}
                         onValueChange={(v: 'timeseries' | 'bar') => updateConfig('chart', { type: v })}
@@ -617,20 +625,20 @@ export default function CompositeReportEditor() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="timeseries">Time Series (Line)</SelectItem>
-                          <SelectItem value="bar">Bar Chart</SelectItem>
+                          <SelectItem value="timeseries">{t('composite_report.chart_config_form.type_input.timeseries_option.menu_item')}</SelectItem>
+                          <SelectItem value="bar">{t('composite_report.chart_config_form.type_input.bar_option.menu_item')}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
                     <div className="space-y-2">
-                      <Label>X-Axis Column</Label>
+                      <Label>{t('composite_report.chart_config_form.x_axis_input.label')}</Label>
                       <Select
                         value={config.chart.xColumn || ''}
                         onValueChange={(v) => updateConfig('chart', { xColumn: v })}
                         disabled={!columns}
                       >
                         <SelectTrigger>
-                          <SelectValue placeholder={columns ? 'Select column' : 'Detect columns first'} />
+                          <SelectValue placeholder={columns ? t('composite_report.chart_config_form.x_axis_input.placeholder.instruction') : t('composite_report.chart_config_form.x_axis_input.placeholder.disabled')} />
                         </SelectTrigger>
                         <SelectContent>
                           {columns?.columns.map((col) => (
@@ -644,7 +652,7 @@ export default function CompositeReportEditor() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label>Y-Axis Columns (select one or more)</Label>
+                    <Label>{t('composite_report.chart_config_form.y_axis_input.label')}</Label>
                     {columns ? (
                       <div className="flex flex-wrap gap-2">
                         {columns.columns
@@ -666,7 +674,7 @@ export default function CompositeReportEditor() {
                       </div>
                     ) : (
                       <p className="text-sm text-muted-foreground">
-                        Click "Detect Columns" in the SQL Query tab first
+                        {t('composite_report.chart_config_form.y_axis_input.paragraph.empty')}
                       </p>
                     )}
                   </div>
@@ -680,7 +688,7 @@ export default function CompositeReportEditor() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Map className="h-5 w-5 text-muted-foreground" />
-                    <CardTitle className="text-lg">Map</CardTitle>
+                    <CardTitle className="text-lg">{t('composite_report.map_config_form.header.title')}</CardTitle>
                   </div>
                   <Switch
                     checked={config.map.enabled}
@@ -688,7 +696,7 @@ export default function CompositeReportEditor() {
                   />
                 </div>
                 <CardDescription>
-                  Display data points on an interactive map (requires GPS coordinates)
+                  {t('composite_report.map_config_form.header.subtitle')}
                 </CardDescription>
               </CardHeader>
               {config.map.enabled && (
@@ -699,20 +707,20 @@ export default function CompositeReportEditor() {
                       checked={config.map.autoDetect}
                       onCheckedChange={(checked) => updateConfig('map', { autoDetect: checked })}
                     />
-                    <Label htmlFor="autoDetect">Auto-detect GPS columns</Label>
+                    <Label htmlFor="autoDetect">{t('composite_report.map_config_form.auto_detect_toggle.label')}</Label>
                   </div>
 
                   {!config.map.autoDetect && (
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="space-y-2">
-                        <Label>Latitude Column</Label>
+                        <Label>{t('composite_report.map_config_form.lat_input.label')}</Label>
                         <Select
                           value={config.map.latColumn || ''}
                           onValueChange={(v) => updateConfig('map', { latColumn: v })}
                           disabled={!columns}
                         >
                           <SelectTrigger>
-                            <SelectValue placeholder="Select column" />
+                            <SelectValue placeholder={t('composite_report.map_config_form.lat_input.placeholder.instruction')} />
                           </SelectTrigger>
                           <SelectContent>
                             {columns?.columns.map((col) => (
@@ -724,14 +732,14 @@ export default function CompositeReportEditor() {
                         </Select>
                       </div>
                       <div className="space-y-2">
-                        <Label>Longitude Column</Label>
+                        <Label>{t('composite_report.map_config_form.lon_input.label')}</Label>
                         <Select
                           value={config.map.lonColumn || ''}
                           onValueChange={(v) => updateConfig('map', { lonColumn: v })}
                           disabled={!columns}
                         >
                           <SelectTrigger>
-                            <SelectValue placeholder="Select column" />
+                            <SelectValue placeholder={t('composite_report.map_config_form.lon_input.placeholder.instruction')} />
                           </SelectTrigger>
                           <SelectContent>
                             {columns?.columns.map((col) => (
@@ -747,7 +755,7 @@ export default function CompositeReportEditor() {
 
                   {columns?.suggestions.gps && config.map.autoDetect && (
                     <div className="text-sm text-green-600 dark:text-green-400">
-                      Will use auto-detected columns: {columns.suggestions.gps.latColumn}, {columns.suggestions.gps.lonColumn}
+                      {t('composite_report.map_config_form.auto_detected.label', { lat: columns.suggestions.gps.latColumn, lon: columns.suggestions.gps.lonColumn })}
                     </div>
                   )}
                 </CardContent>

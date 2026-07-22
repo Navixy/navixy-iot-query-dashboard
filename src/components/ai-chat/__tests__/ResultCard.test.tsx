@@ -155,17 +155,17 @@ describe('ResultCard', () => {
   it('shows the dashboard title and its panel count', () => {
     mount();
     expect(screen.getByText('Driver Mileage — Last 30 Days')).toBeTruthy();
-    expect(screen.getByText('2 panels')).toBeTruthy();
+    expect(screen.getByText('Panels: 2')).toBeTruthy();
   });
 
-  it('says "1 panel" for a single-panel dashboard', () => {
+  it('reads the same way for a single-panel dashboard', () => {
     authState.current.user = { id: 'u1', email: 'u@example.com', role: 'editor' };
     render(createElement(MemoryRouter, null, createElement(TooltipProvider, null,
       createElement(ResultCard, {
         result: { title: 'One', report_schema: { panels: [{ id: 1 }] } },
         canApply: true, isPending: false,
       }))));
-    expect(screen.getByText('1 panel')).toBeTruthy();
+    expect(screen.getByText('Panels: 1')).toBeTruthy();
   });
 
   it('lets an editor apply once the preview has run', () => {
@@ -190,7 +190,7 @@ describe('ResultCard', () => {
     // wrapper span — focus it the way a keyboard user reaches it.
     fireEvent.focus(applyButton().parentElement as HTMLElement);
     await waitFor(() => {
-      expect(screen.getAllByText('Ask an editor to create this dashboard').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Create this dashboard with the Editor role').length).toBeGreaterThan(0);
     });
   });
 
@@ -202,7 +202,7 @@ describe('ResultCard', () => {
 
     fireEvent.focus(applyButton().parentElement as HTMLElement);
     await waitFor(() => {
-      expect(screen.getAllByText('Ask an editor to create this dashboard').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Create this dashboard with the Editor role').length).toBeGreaterThan(0);
     });
   });
 
@@ -214,7 +214,7 @@ describe('ResultCard', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(screen.queryByRole('tooltip')).toBeNull();
-    expect(screen.queryByText('Ask an editor to create this dashboard')).toBeNull();
+    expect(screen.queryByText('Create this dashboard with the Editor role')).toBeNull();
     expect(screen.queryByText('Wait for the current reply to finish')).toBeNull();
   });
 

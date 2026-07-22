@@ -15,6 +15,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface DemoBannerProps {
   /** Optional callback when banner is dismissed */
@@ -23,6 +24,7 @@ interface DemoBannerProps {
 
 export function DemoBanner({ onDismiss }: DemoBannerProps) {
   const { demoMode, clearDemoData, signOut } = useAuth();
+  const { t } = useLocale();
   const [isDismissed, setIsDismissed] = useState(false);
   const [showClearDialog, setShowClearDialog] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
@@ -62,10 +64,10 @@ export function DemoBanner({ onDismiss }: DemoBannerProps) {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
             <FlaskConical className="h-4 w-4" />
-            <span className="font-semibold text-sm">Demo Mode</span>
+            <span className="font-semibold text-sm">{t('common.demo_mode.title.default')}</span>
           </div>
           <span className="text-xs text-white/90 hidden sm:inline">
-            Changes are stored locally in your browser. No modifications will be saved to the database.
+            {t('app_shell.demo_banner.paragraph')}
           </span>
         </div>
         
@@ -77,7 +79,7 @@ export function DemoBanner({ onDismiss }: DemoBannerProps) {
             className="h-7 text-white hover:bg-white/20 hover:text-white text-xs gap-1"
           >
             <Trash2 className="h-3 w-3" />
-            <span className="hidden sm:inline">Clear & Exit</span>
+            <span className="hidden sm:inline">{t('app_shell.demo_banner.clear_button.cta')}</span>
           </Button>
           <Button
             variant="ghost"
@@ -93,20 +95,21 @@ export function DemoBanner({ onDismiss }: DemoBannerProps) {
       <AlertDialog open={showClearDialog} onOpenChange={setShowClearDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Exit Demo Mode?</AlertDialogTitle>
+            <AlertDialogTitle>{t('app_shell.exit_demo_dialog.title.question')}</AlertDialogTitle>
             <AlertDialogDescription>
-              This will clear all demo data stored in your browser and sign you out. 
-              Any changes you made in demo mode will be permanently deleted.
+              {t('app_shell.exit_demo_dialog.paragraph.warning')}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isClearing}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={isClearing}>{t('common.actions.cancel.cta')}</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleClearData}
               disabled={isClearing}
               className="bg-red-500 hover:bg-red-600"
             >
-              {isClearing ? 'Clearing...' : 'Clear Data & Exit'}
+              {isClearing
+                ? t('app_shell.exit_demo_dialog.confirm_button.cta.loading')
+                : t('app_shell.exit_demo_dialog.confirm_button.cta.default')}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -120,6 +123,7 @@ export function DemoBanner({ onDismiss }: DemoBannerProps) {
  */
 export function DemoBadge() {
   const { demoMode } = useAuth();
+  const { t } = useLocale();
 
   if (!demoMode) {
     return null;
@@ -128,7 +132,7 @@ export function DemoBadge() {
   return (
     <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-600 dark:text-amber-400">
       <FlaskConical className="h-3 w-3" />
-      <span className="text-xs font-medium">Demo</span>
+      <span className="text-xs font-medium">{t('common.demo_mode.title.compact')}</span>
     </div>
   );
 }

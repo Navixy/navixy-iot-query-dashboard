@@ -14,9 +14,29 @@ import { toErrorMeta } from '@/utils/errors';
 import { apiService, type DateFormat, type TimeFormat } from '@/services/api';
 import { detectInitialTimeFormat } from '@/utils/datetime';
 import { useDatetimePrefs } from '@/contexts/DatetimePrefsContext';
+import { useAppLocale } from '@/i18n/AppLocaleProvider';
+import { useLocale } from '@/i18n/LocaleProvider';
+import { APP_LOCALES, type AppLocale } from '@/i18n/appLocale';
 import { Loader2, Settings as SettingsIcon, User, Plus, Trash2, Edit2, Save, X, Variable, FlaskConical, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+
+/**
+ * Autonym for a locale (each language named in itself: English, Русский,
+ * Español), so the switcher stays readable whatever language is active.
+ */
+function localeDisplayName(locale: AppLocale): string {
+  const tag = locale.replace(/_/g, '-');
+  try {
+    const name = new Intl.DisplayNames([tag], { type: 'language' }).of(tag);
+    if (name && name !== tag) {
+      return name.charAt(0).toLocaleUpperCase(tag) + name.slice(1);
+    }
+  } catch {
+    // Unsupported tag in this browser; fall back to the raw code below.
+  }
+  return locale;
+}
 
 interface GlobalVariable {
   id: string;
@@ -28,6 +48,8 @@ interface GlobalVariable {
 const Settings = () => {
   const { user, loading, demoMode, reseedDemoData } = useAuth();
   const { prefs, setPrefs: setDatetimePrefs } = useDatetimePrefs();
+  const { locale, setLocale } = useAppLocale();
+  const { t } = useLocale();
   const navigate = useNavigate();
   
   // Global Variables state
@@ -92,13 +114,13 @@ const Settings = () => {
       const response = await apiService.getGlobalVariables();
       if (response.error) {
         console.error('Error fetching global variables:', response.error);
-        toast.error('Failed to load global variables');
+        toast.error(t('settings.global_variables_table.paragraph.failure'));
       } else {
         setGlobalVariables((response.data || []) as GlobalVariable[]);
       }
     } catch (error) {
       console.error('Error fetching global variables:', error);
-      toast.error('Failed to load global variables');
+      toast.error(t('settings.global_variables_table.paragraph.failure'));
     } finally {
       setLoadingVariables(false);
     }
@@ -140,40 +162,40 @@ const Settings = () => {
 
       const response = await apiService.updateGlobalVariable(id, updateData);
       if (response.error) {
-        toast.error(response.error.message || 'Failed to update variable');
+        toast.error(t('settings.global_variables_table.save_button.paragraph.failure'), { description: response.error.message });
       } else {
-        toast.success('Variable updated successfully');
+        toast.success(t('settings.global_variables_table.save_button.paragraph.success'));
         await fetchGlobalVariables();
         handleCancelEdit();
       }
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error updating variable:', error);
-      toast.error(error.message || 'Failed to update variable');
+      toast.error(t('settings.global_variables_table.save_button.paragraph.failure'), { description: error.message });
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this variable?')) return;
+    if (!confirm(t('settings.global_variables_table.delete_button.paragraph.confirmation'))) return;
 
     try {
       const response = await apiService.deleteGlobalVariable(id);
       if (response.error) {
-        toast.error(response.error.message || 'Failed to delete variable');
+        toast.error(t('settings.global_variables_table.delete_button.paragraph.failure'), { description: response.error.message });
       } else {
-        toast.success('Variable deleted successfully');
+        toast.success(t('settings.global_variables_table.delete_button.paragraph.success'));
         await fetchGlobalVariables();
       }
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error deleting variable:', error);
-      toast.error(error.message || 'Failed to delete variable');
+      toast.error(t('settings.global_variables_table.delete_button.paragraph.failure'), { description: error.message });
     }
   };
 
   const handleCreateVariable = async () => {
     if (!newVariable.label.trim()) {
-      toast.error('Label is required');
+      toast.error(t('common.validation.label_required'));
       return;
     }
 
@@ -185,9 +207,9 @@ const Settings = () => {
       });
 
       if (response.error) {
-        toast.error(response.error.message || 'Failed to create variable');
+        toast.error(t('settings.variable_form.create_button.paragraph.failure'), { description: response.error.message });
       } else {
-        toast.success('Variable created successfully');
+        toast.success(t('settings.variable_form.create_button.paragraph.success'));
         setNewVariable({ label: '', description: '', value: '' });
         setShowNewVariable(false);
         await fetchGlobalVariables();
@@ -195,7 +217,7 @@ const Settings = () => {
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error creating variable:', error);
-      toast.error(error.message || 'Failed to create variable');
+      toast.error(t('settings.variable_form.create_button.paragraph.failure'), { description: error.message });
     }
   };
 
@@ -208,7 +230,7 @@ const Settings = () => {
         timeFormat: userTimeFormat,
       });
       if (response.error) {
-        toast.error(response.error.message || 'Failed to save preferences');
+        toast.error(t('settings.preferences_form.save_button.paragraph.failure'), { description: response.error.message });
       } else {
         // PUT returns the saved preferences via RETURNING; trust them as the
         // source of truth and skip the otherwise redundant GET.
@@ -223,12 +245,12 @@ const Settings = () => {
           dateFormat: savedDateFormat,
           timeFormat: savedTimeFormat,
         });
-        toast.success('Preferences saved successfully');
+        toast.success(t('settings.preferences_form.save_button.paragraph.success'));
       }
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error saving preferences:', error);
-      toast.error(error.message || 'Failed to save preferences');
+      toast.error(t('settings.preferences_form.save_button.paragraph.failure'), { description: error.message });
     } finally {
       setSavingPreferences(false);
     }
@@ -236,7 +258,7 @@ const Settings = () => {
 
   // Demo mode handlers
   const handleResetDemoData = async () => {
-    if (!confirm('This will discard all your local changes and reload the original report templates from the database. Are you sure?')) {
+    if (!confirm(t('settings.demo_banner.reset_button.paragraph.confirmation'))) {
       return;
     }
 
@@ -244,9 +266,9 @@ const Settings = () => {
     try {
       const { error } = await reseedDemoData();
       if (error) {
-        toast.error(error.message || 'Failed to reset demo data');
+        toast.error(t('settings.demo_banner.reset_button.paragraph.failure'), { description: error.message });
       } else {
-        toast.success('Demo data has been reset to original templates');
+        toast.success(t('settings.demo_banner.reset_button.paragraph.success'));
         // A full reload is intentional here: reseedDemoData() has rebuilt IndexedDB
         // from scratch, so remounting the whole app against the fresh data is the
         // point — not the DO-300 navigation flash. Opt out of the location guard.
@@ -256,7 +278,7 @@ const Settings = () => {
     } catch (rawErr: unknown) {
       const error = toErrorMeta(rawErr);
       console.error('Error resetting demo data:', error);
-      toast.error(error.message || 'Failed to reset demo data');
+      toast.error(t('settings.demo_banner.reset_button.paragraph.failure'), { description: error.message });
     } finally {
       setResettingDemo(false);
     }
@@ -278,9 +300,9 @@ const Settings = () => {
       <div className="container max-w-4xl py-8">
         <div className="space-y-6">
           <div>
-            <h1 className="text-3xl font-bold text-foreground">Settings</h1>
+            <h1 className="text-3xl font-bold text-foreground">{t('settings.header.title')}</h1>
             <p className="text-muted-foreground mt-2">
-              Configure application settings and preferences
+              {t('settings.header.subtitle')}
             </p>
           </div>
 
@@ -288,12 +310,12 @@ const Settings = () => {
             <TabsList className={`grid w-full ${showConfigurationTab ? 'grid-cols-2' : 'grid-cols-1'}`}>
               <TabsTrigger value="preferences" className="flex items-center gap-2">
                 <User className="h-4 w-4" />
-                Preferences
+                {t('settings.tabs_toolbar.preferences_option.menu_item')}
               </TabsTrigger>
               {showConfigurationTab && (
                 <TabsTrigger value="configuration" className="flex items-center gap-2">
                   <SettingsIcon className="h-4 w-4" />
-                  Configuration
+                  {t('settings.tabs_toolbar.configuration_option.menu_item')}
                 </TabsTrigger>
               )}
             </TabsList>
@@ -304,16 +326,40 @@ const Settings = () => {
                   <div className="space-y-2">
                     <h2 className="text-lg font-semibold text-text-primary flex items-center gap-2">
                       <User className="h-5 w-5" />
-                      User Preferences
+                      {t('settings.preferences_form.title')}
                     </h2>
                     <p className="text-sm text-text-muted">
-                      Configure your personal preferences and display settings
+                      {t('settings.preferences_form.subtitle')}
                     </p>
                   </div>
 
                   <div className="space-y-4">
                     <div className="space-y-2">
-                      <Label htmlFor="timezone" className="text-sm font-medium">Timezone</Label>
+                      <Label htmlFor="language" className="text-sm font-medium">
+                        {t('settings.preferences_form.language_input.label')}
+                      </Label>
+                      <Select
+                        value={locale}
+                        onValueChange={(value) => setLocale(value as AppLocale)}
+                      >
+                        <SelectTrigger id="language">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {APP_LOCALES.map((appLocale) => (
+                            <SelectItem key={appLocale} value={appLocale}>
+                              {localeDisplayName(appLocale)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        {t('settings.preferences_form.language_input.input_hint')}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="timezone" className="text-sm font-medium">{t('settings.preferences_form.timezone_input.label')}</Label>
                       <TimezoneCombobox
                         value={userTimezone}
                         onValueChange={setUserTimezone}
@@ -321,44 +367,44 @@ const Settings = () => {
                         browserTimezone={browserTimezone}
                       />
                       <p className="text-xs text-muted-foreground">
-                        All date and time values in reports will be displayed in your selected timezone
+                        {t('settings.preferences_form.timezone_input.input_hint')}
                       </p>
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="dateFormat" className="text-sm font-medium">Date format</Label>
+                      <Label htmlFor="dateFormat" className="text-sm font-medium">{t('settings.preferences_form.date_format_input.label')}</Label>
                       <Select
                         value={userDateFormat}
                         onValueChange={(value) => setUserDateFormat(value as DateFormat)}
                         disabled={savingPreferences}
                       >
                         <SelectTrigger id="dateFormat">
-                          <SelectValue placeholder="Select date format" />
+                          <SelectValue placeholder={t('settings.preferences_form.date_format_input.placeholder.instruction')} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="dd/mm/yyyy">01/12/2021 (DD/MM/YYYY)</SelectItem>
-                          <SelectItem value="dd.mm.yyyy">01.12.2021 (DD.MM.YYYY)</SelectItem>
-                          <SelectItem value="mm-dd-yyyy">12-01-2021 (MM-DD-YYYY)</SelectItem>
-                          <SelectItem value="yyyy-mm-dd">2021-12-01 (YYYY-MM-DD)</SelectItem>
-                          <SelectItem value="dd-mmm-yyyy">1 Dec 2021 (DD MMM YYYY)</SelectItem>
-                          <SelectItem value="dd-mmmm-yyyy">1 December 2021 (DD MMMM YYYY)</SelectItem>
+                          <SelectItem value="dd/mm/yyyy">{t('settings.preferences_form.date_format_input.dd_mm_yyyy_option.menu_item')}</SelectItem>
+                          <SelectItem value="dd.mm.yyyy">{t('settings.preferences_form.date_format_input.dd_mm_yyyy_dots_option.menu_item')}</SelectItem>
+                          <SelectItem value="mm-dd-yyyy">{t('settings.preferences_form.date_format_input.mm_dd_yyyy_option.menu_item')}</SelectItem>
+                          <SelectItem value="yyyy-mm-dd">{t('settings.preferences_form.date_format_input.yyyy_mm_dd_option.menu_item')}</SelectItem>
+                          <SelectItem value="dd-mmm-yyyy">{t('settings.preferences_form.date_format_input.dd_mmm_yyyy_option.menu_item')}</SelectItem>
+                          <SelectItem value="dd-mmmm-yyyy">{t('settings.preferences_form.date_format_input.dd_mmmm_yyyy_option.menu_item')}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="timeFormat" className="text-sm font-medium">Time format</Label>
+                      <Label htmlFor="timeFormat" className="text-sm font-medium">{t('settings.preferences_form.time_format_input.label')}</Label>
                       <Select
                         value={userTimeFormat}
                         onValueChange={(value) => setUserTimeFormat(value as TimeFormat)}
                         disabled={savingPreferences}
                       >
                         <SelectTrigger id="timeFormat">
-                          <SelectValue placeholder="Select time format" />
+                          <SelectValue placeholder={t('settings.preferences_form.time_format_input.placeholder.instruction')} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="h12">12:13 PM (12-hour clock)</SelectItem>
-                          <SelectItem value="h24">12:13 (24-hour clock)</SelectItem>
+                          <SelectItem value="h12">{t('settings.preferences_form.time_format_input.h12_option.menu_item')}</SelectItem>
+                          <SelectItem value="h24">{t('settings.preferences_form.time_format_input.h24_option.menu_item')}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -373,10 +419,10 @@ const Settings = () => {
                       {savingPreferences ? (
                         <>
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Saving...
+                          {t('common.actions.save.cta.loading')}
                         </>
                       ) : (
-                        'Save Preferences'
+                        t('settings.preferences_form.save_button.cta.default')
                       )}
                     </Button>
                   </div>
@@ -390,10 +436,10 @@ const Settings = () => {
                     <div className="space-y-2">
                       <h2 className="text-lg font-semibold text-text-primary flex items-center gap-2">
                         <FlaskConical className="h-5 w-5 text-amber-500" />
-                        Demo Mode
+                        {t('common.demo_mode.title.default')}
                       </h2>
                       <p className="text-sm text-text-muted">
-                        You are currently in Demo Mode. All changes are stored locally in your browser and will not affect the original database.
+                        {t('settings.demo_banner.paragraph')}
                       </p>
                     </div>
 
@@ -402,10 +448,10 @@ const Settings = () => {
                       <AlertDescription>
                         <div className="space-y-2">
                           <p className="text-sm text-amber-900 dark:text-amber-100">
-                            <strong>Demo Mode Active:</strong> Your changes are saved locally and persist across browser sessions.
+                            <strong>{t('settings.demo_alert.label')}:</strong> {t('settings.demo_alert.paragraph.default')}
                           </p>
                           <p className="text-xs text-amber-700 dark:text-amber-300">
-                            To discard all local changes and restore the original templates from the database, click the button below.
+                            {t('settings.demo_alert.paragraph.instruction')}
                           </p>
                         </div>
                       </AlertDescription>
@@ -413,9 +459,9 @@ const Settings = () => {
 
                     <div className="flex items-center justify-between pt-4 border-t">
                       <div className="space-y-1">
-                        <p className="text-sm font-medium text-text-primary">Reset Demo Data</p>
+                        <p className="text-sm font-medium text-text-primary">{t('settings.demo_banner.reset_button.label')}</p>
                         <p className="text-xs text-text-muted">
-                          Discard all local changes and reload original templates
+                          {t('settings.demo_banner.reset_button.sublabel')}
                         </p>
                       </div>
                       <Button 
@@ -428,12 +474,12 @@ const Settings = () => {
                         {resettingDemo ? (
                           <>
                             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            Resetting...
+                            {t('settings.demo_banner.reset_button.cta.loading')}
                           </>
                         ) : (
                           <>
                             <RefreshCw className="mr-2 h-4 w-4" />
-                            Reset to Original
+                            {t('settings.demo_banner.reset_button.cta.default')}
                           </>
                         )}
                       </Button>
@@ -450,10 +496,10 @@ const Settings = () => {
                     <div className="space-y-2">
                       <h2 className="text-lg font-semibold text-text-primary flex items-center gap-2">
                         <Variable className="h-5 w-5" />
-                        Global Variables
+                        {t('settings.global_variables_table.title')}
                       </h2>
                       <p className="text-sm text-text-muted">
-                        Define global variables that can be used in SQL queries using <code className="text-xs bg-muted px-1 py-0.5 rounded">${'{variable_name}'}</code> syntax.
+                        {t('settings.global_variables_table.subtitle.instruction')} <code className="text-xs bg-muted px-1 py-0.5 rounded">${'{variable_name}'}</code>
                       </p>
                     </div>
 
@@ -467,17 +513,17 @@ const Settings = () => {
                           <Table>
                             <TableHeader>
                               <TableRow>
-                                <TableHead className="w-[200px]">Label</TableHead>
-                                <TableHead className="w-[250px]">Description</TableHead>
-                                <TableHead>Value</TableHead>
-                                <TableHead className="w-[100px]">Actions</TableHead>
+                                <TableHead className="w-[200px]">{t('settings.global_variables_table.label_column.column_header')}</TableHead>
+                                <TableHead className="w-[250px]">{t('settings.global_variables_table.description_column.column_header')}</TableHead>
+                                <TableHead>{t('settings.global_variables_table.value_column.column_header')}</TableHead>
+                                <TableHead className="w-[100px]">{t('settings.global_variables_table.actions_column.column_header')}</TableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
                               {globalVariables.length === 0 ? (
                                 <TableRow>
                                   <TableCell colSpan={4} className="text-center text-muted-foreground py-8">
-                                    No global variables defined
+                                    {t('settings.global_variables_table.paragraph.empty')}
                                   </TableCell>
                                 </TableRow>
                               ) : (
@@ -502,7 +548,7 @@ const Settings = () => {
                                               })
                                             }
                                             className="h-8 text-sm"
-                                            placeholder="Variable name"
+                                            placeholder={t('settings.global_variables_table.label_input.placeholder')}
                                           />
                                         ) : (
                                           <code className="text-xs bg-muted px-2 py-1 rounded font-mono">
@@ -521,7 +567,7 @@ const Settings = () => {
                                               })
                                             }
                                             className="h-8 text-sm"
-                                            placeholder="Description (optional)"
+                                            placeholder={t('settings.global_variables_table.description_input.placeholder')}
                                           />
                                         ) : (
                                           <span className="text-sm text-muted-foreground">
@@ -540,7 +586,7 @@ const Settings = () => {
                                               })
                                             }
                                             className="h-8 text-sm"
-                                            placeholder="Value (optional)"
+                                            placeholder={t('settings.global_variables_table.value_input.placeholder')}
                                           />
                                         ) : (
                                           <span className="text-sm font-mono">
@@ -556,7 +602,7 @@ const Settings = () => {
                                               variant="default"
                                               onClick={() => handleSaveEdit(variable.id)}
                                               className="h-8 px-2"
-                                              title="Save changes"
+                                              title={t('common.actions.save_changes.cta')}
                                             >
                                               <Save className="h-4 w-4" />
                                             </Button>
@@ -565,7 +611,7 @@ const Settings = () => {
                                               variant="outline"
                                               onClick={handleCancelEdit}
                                               className="h-8 px-2"
-                                              title="Cancel"
+                                              title={t('settings.global_variables_table.cancel_button.tooltip')}
                                             >
                                               <X className="h-4 w-4" />
                                             </Button>
@@ -577,7 +623,7 @@ const Settings = () => {
                                               variant="outline"
                                               onClick={() => handleStartEdit(variable)}
                                               className="h-8 px-2"
-                                              title="Edit variable"
+                                              title={t('settings.global_variables_table.edit_button.tooltip')}
                                             >
                                               <Edit2 className="h-4 w-4" />
                                             </Button>
@@ -586,7 +632,7 @@ const Settings = () => {
                                               variant="outline"
                                               onClick={() => handleDelete(variable.id)}
                                               className="h-8 px-2 text-destructive hover:text-destructive border-destructive/50 hover:bg-destructive/10"
-                                              title="Delete variable"
+                                              title={t('settings.global_variables_table.delete_button.tooltip')}
                                             >
                                               <Trash2 className="h-4 w-4" />
                                             </Button>
@@ -604,7 +650,7 @@ const Settings = () => {
                         {showNewVariable ? (
                           <div className="border rounded-lg p-4 space-y-3">
                             <div className="flex items-center justify-between">
-                              <h3 className="text-sm font-medium">Add New Variable</h3>
+                              <h3 className="text-sm font-medium">{t('settings.variable_form.title')}</h3>
                               <Button
                                 size="sm"
                                 variant="ghost"
@@ -619,7 +665,7 @@ const Settings = () => {
                             </div>
                             <div className="grid grid-cols-3 gap-3">
                               <div className="space-y-1">
-                                <Label className="text-xs">Label *</Label>
+                                <Label className="text-xs">{t('settings.variable_form.label_input.label')} *</Label>
                                 <Input
                                   value={newVariable.label}
                                   onChange={(e) => setNewVariable({ ...newVariable, label: e.target.value })}
@@ -628,27 +674,27 @@ const Settings = () => {
                                 />
                               </div>
                               <div className="space-y-1">
-                                <Label className="text-xs">Description</Label>
+                                <Label className="text-xs">{t('settings.variable_form.description_input.label')}</Label>
                                 <Input
                                   value={newVariable.description}
                                   onChange={(e) => setNewVariable({ ...newVariable, description: e.target.value })}
-                                  placeholder="Optional description"
+                                  placeholder={t('settings.global_variables_table.description_input.placeholder')}
                                   className="h-8 text-sm"
                                 />
                               </div>
                               <div className="space-y-1">
-                                <Label className="text-xs">Value</Label>
+                                <Label className="text-xs">{t('settings.variable_form.value_input.label')}</Label>
                                 <Input
                                   value={newVariable.value}
                                   onChange={(e) => setNewVariable({ ...newVariable, value: e.target.value })}
-                                  placeholder="Optional value"
+                                  placeholder={t('settings.global_variables_table.value_input.placeholder')}
                                   className="h-8 text-sm"
                                 />
                               </div>
                             </div>
                             <div className="flex justify-end">
                               <Button size="sm" onClick={handleCreateVariable}>
-                                Create Variable
+                                {t('settings.variable_form.create_button.cta')}
                               </Button>
                             </div>
                           </div>
@@ -661,7 +707,7 @@ const Settings = () => {
                               className="flex items-center gap-2"
                             >
                               <Plus className="h-4 w-4" />
-                              Add Variable
+                              {t('settings.global_variables_table.add_button.cta')}
                             </Button>
                           </div>
                         )}

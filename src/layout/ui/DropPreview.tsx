@@ -4,6 +4,7 @@
 
 import React from 'react';
 import { gridToPixels, GRID_UNIT_HEIGHT } from '../geometry/grid';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface DropPreviewProps {
   gridPos: { x: number; y: number; w: number; h: number };
@@ -18,6 +19,7 @@ export const DropPreview: React.FC<DropPreviewProps> = ({
   isOverRow = false,
   isOverCanvasZone = false,
 }) => {
+  const { t } = useLocale();
   const panelPos = gridToPixels(gridPos.x, gridPos.y, containerWidth, GRID_UNIT_HEIGHT);
   const panelWidth = (gridPos.w / 24) * containerWidth;
   const panelHeight = gridPos.h * GRID_UNIT_HEIGHT;
@@ -34,7 +36,9 @@ export const DropPreview: React.FC<DropPreviewProps> = ({
   const bgColor = isOverRow ? 'bg-gray-500/10' : isOverCanvasZone ? 'bg-green-500/10' : 'bg-blue-500/10';
   const textColor = isOverRow ? 'text-gray-600' : isOverCanvasZone ? 'text-green-600' : 'text-blue-600';
   const badgeBg = isOverRow ? 'bg-gray-600' : isOverCanvasZone ? 'bg-green-600' : 'bg-blue-600';
-  const label = isOverRow ? 'Drop in row' : isOverCanvasZone ? 'Drop on canvas' : 'Drop on canvas';
+  const label = isOverRow
+    ? t('report_view.canvas.drop_in_row.label')
+    : t('report_view.canvas.drop_on_canvas.label');
 
   return (
     <div

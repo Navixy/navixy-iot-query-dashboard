@@ -13,6 +13,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Icon } from '@/components/ui/icon';
 import { useSqlExecution } from '@/hooks/use-sql-execution';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface TabResults {
   columns: string[];
@@ -42,16 +43,17 @@ interface QueryTab {
 }
 
 const SqlEditor = () => {
+  const { t } = useLocale();
   const { user, loading } = useAuth();
   const navigate = useNavigate();
-  
+
   // Use the shared SQL execution hook - this ensures consistent behavior
   const { executing, results, error, executeQuery } = useSqlExecution();
-  
+
   const [tabs, setTabs] = useState<QueryTab[]>([
     {
       id: '1',
-      name: 'Query 1',
+      name: t('sql_editor.query_tabs.tab_default_name.label', { number: 1 }),
       sql: `SELECT * 
 FROM raw_telematics_data.tracking_data_core 
 LIMIT 10;`,
@@ -75,7 +77,7 @@ LIMIT 10;`,
   // Redirect if not admin or editor
   if (!loading && (!user || !['admin', 'editor'].includes(user?.role || ''))) {
     navigate('/app');
-    toast.error('Access denied. Admin or Editor role required.');
+    toast.error(t('sql_editor.access_denied_toast.paragraph.failure'));
     return null;
   }
 
@@ -83,7 +85,7 @@ LIMIT 10;`,
     const newId = String(Date.now());
     const newTab: QueryTab = {
       id: newId,
-      name: `Query ${tabs.length + 1}`,
+      name: t('sql_editor.query_tabs.tab_default_name.label', { number: tabs.length + 1 }),
       sql: `SELECT * 
 FROM raw_telematics_data.tracking_data_core 
 LIMIT 10;`,
@@ -102,7 +104,7 @@ LIMIT 10;`,
 
   const closeTab = (tabId: string) => {
     if (tabs.length === 1) {
-      toast.error('Cannot close the last tab');
+      toast.error(t('sql_editor.query_tabs.close_toast.paragraph.failure'));
       return;
     }
     const newTabs = tabs.filter((t) => t.id !== tabId);
@@ -137,7 +139,7 @@ LIMIT 10;`,
   const handleExecuteQuery = async (tabId: string) => {
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab || !tab.sql.trim()) {
-      toast.error('Please enter a SQL query');
+      toast.error(t('sql_editor.execute_toast.empty_query.paragraph.failure'));
       return;
     }
 
@@ -198,16 +200,17 @@ LIMIT 10;`,
             : t
         )
       );
-      toast.success('Query executed successfully');
+      toast.success(t('sql_editor.execute_toast.paragraph.success'));
     } else {
       // Error case - error is already set in the hook state
+      const fallbackError = t('common.errors.query_failed');
       setTabs(
         tabs.map((t) =>
           t.id === tabId
             ? {
                 ...t,
                 executing: false,
-                error: error || 'Failed to execute query',
+                error: error || fallbackError,
                 executionTime: null,
                 fetchTime: null,
                 executedAt: new Date(),
@@ -255,7 +258,7 @@ LIMIT 10;`,
   const exportToCSV = (tabId: string) => {
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab || !tab.results || !tab.results.rows || tab.results.rows.length === 0) {
-      toast.error('No data to export');
+      toast.error(t('common.no_data.export.paragraph.empty'));
       return;
     }
 
@@ -290,8 +293,8 @@ LIMIT 10;`,
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
-    toast.success('CSV exported successfully');
+
+    toast.success(t('sql_editor.export_toast.paragraph.success'));
   };
 
   if (loading) {
@@ -311,9 +314,9 @@ LIMIT 10;`,
           <div className="flex items-center gap-3">
             <Database className="h-7 w-7 text-primary" />
             <div>
-              <h1 className="text-2xl font-bold text-foreground">SQL Editor</h1>
+              <h1 className="text-2xl font-bold text-foreground">{t('sql_editor.header.title')}</h1>
               <p className="text-sm text-muted-foreground">
-                You can safely explore your data with SELECT queries — your data remains protected from accidental changes
+                {t('sql_editor.header.subtitle')}
               </p>
             </div>
           </div>
@@ -371,7 +374,7 @@ LIMIT 10;`,
                   <button
                     onClick={addNewTab}
                     className="h-8 w-8 p-0 ml-1 flex items-center justify-center hover:bg-muted rounded"
-                    title="Add new tab"
+                    title={t('sql_editor.query_tabs.add_button.tooltip')}
                   >
                     <Icon icon={Plus} size={4} />
                   </button>
@@ -390,20 +393,24 @@ LIMIT 10;`,
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
                       <div className="flex items-center gap-3">
                         {tab.executionTime !== null && (
-                          <span>Query time: {tab.executionTime.toFixed(2)}ms</span>
+                          <span>{t('common.execution.query_time.label', { value: tab.executionTime.toFixed(2) })}</span>
                         )}
                         {tab.fetchTime !== null && (
-                          <span>Fetch time: {tab.fetchTime.toFixed(2)}ms</span>
+                          <span>{t('sql_editor.execution_meta.fetch_time.label', { value: tab.fetchTime.toFixed(2) })}</span>
                         )}
                         {tab.results && (
                           <span>
                             {tab.pagination
-                              ? `Showing ${((tab.pagination.page - 1) * tab.pagination.pageSize) + 1}-${Math.min(tab.pagination.page * tab.pagination.pageSize, tab.pagination.total)} of ${tab.pagination.total} row${tab.pagination.total !== 1 ? 's' : ''}`
-                              : `${tab.rowCount} row${tab.rowCount !== 1 ? 's' : ''} returned`}
+                              ? t('common.pagination.range.label', {
+                                  start: ((tab.pagination.page - 1) * tab.pagination.pageSize) + 1,
+                                  end: Math.min(tab.pagination.page * tab.pagination.pageSize, tab.pagination.total),
+                                  total: tab.pagination.total,
+                                })
+                              : t('common.pagination.rows_returned.label', { count: tab.rowCount })}
                           </span>
                         )}
                         {tab.executedAt && (
-                          <span>Executed: {tab.executedAt.toLocaleTimeString()}</span>
+                          <span>{t('sql_editor.execution_meta.executed_at.label', { time: tab.executedAt.toLocaleTimeString() })}</span>
                         )}
                       </div>
                     </div>
@@ -418,12 +425,12 @@ LIMIT 10;`,
                       {(executingTabId === tab.id || tab.executing) ? (
                         <>
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Executing...
+                          {t('sql_editor.execute_button.cta.loading')}
                         </>
                       ) : (
                         <>
                           <Play className="mr-2 h-4 w-4" />
-                          Execute Query
+                          {t('sql_editor.execute_button.cta.default')}
                         </>
                       )}
                     </Button>
@@ -434,7 +441,7 @@ LIMIT 10;`,
                         onClick={() => exportToCSV(tab.id)}
                       >
                         <Download className="mr-2 h-4 w-4" />
-                        Export CSV
+                        {t('sql_editor.export_button.cta')}
                       </Button>
                     )}
                   </div>
@@ -442,7 +449,7 @@ LIMIT 10;`,
                   {tab.error && (
                     <Alert variant="destructive">
                       <AlertDescription className="font-mono text-sm whitespace-pre-wrap">
-                        <strong>Error:</strong> {tab.error}
+                        <strong>{t('sql_editor.error_alert.label')}</strong> {tab.error}
                       </AlertDescription>
                     </Alert>
                   )}
@@ -474,7 +481,7 @@ LIMIT 10;`,
                           />
                         ) : (
                           <div className="text-center py-6 text-muted-foreground">
-                            No results returned
+                            {t('sql_editor.results.paragraph.empty')}
                           </div>
                         )}
                       </div>

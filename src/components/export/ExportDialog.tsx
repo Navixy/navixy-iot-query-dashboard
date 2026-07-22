@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/select';
 import { FileSpreadsheet, FileText, Loader2 } from 'lucide-react';
 import type { ExcelHeaderConfig } from '@/types/dashboard-types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export interface ExportDialogProps {
   open: boolean;
@@ -52,6 +53,7 @@ export function ExportDialog({
   onExport,
   exporting = false,
 }: ExportDialogProps) {
+  const { t } = useLocale();
   const [headerEnabled, setHeaderEnabled] = useState(savedConfig?.enabled ?? false);
   const [headerTitle, setHeaderTitle] = useState(savedConfig?.title ?? defaultTitle);
   const [headerDescription, setHeaderDescription] = useState(
@@ -100,17 +102,17 @@ export function ExportDialog({
             ) : (
               <FileText className="h-5 w-5" />
             )}
-            Export {isXlsx ? 'Excel' : 'CSV'}
+            {t('report_view.export_dialog.header.title', { format: isXlsx ? 'Excel' : 'CSV' })}
           </DialogTitle>
           <DialogDescription>
-            Configure export options before downloading.
+            {t('report_view.export_dialog.header.subtitle')}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
           <div className="flex items-center justify-between">
             <Label htmlFor="header-toggle" className="text-sm font-medium">
-              Add report header
+              {t('report_view.export_dialog.header_toggle.label')}
             </Label>
             <Switch
               id="header-toggle"
@@ -122,7 +124,7 @@ export function ExportDialog({
 
           {!isXlsx && headerEnabled && (
             <p className="text-xs text-muted-foreground">
-              Report headers are only available for Excel (.xlsx) exports.
+              {t('report_view.export_dialog.csv_notice.paragraph')}
             </p>
           )}
 
@@ -130,32 +132,32 @@ export function ExportDialog({
             <div className="space-y-3 rounded-md border p-3">
               <div className="space-y-1.5">
                 <Label htmlFor="header-title" className="text-sm">
-                  Title
+                  {t('report_view.export_dialog.title_input.label')}
                 </Label>
                 <Input
                   id="header-title"
                   value={headerTitle}
                   onChange={(e) => setHeaderTitle(e.target.value)}
-                  placeholder="Report title..."
+                  placeholder={t('report_view.export_dialog.title_input.placeholder.instruction')}
                 />
               </div>
 
               <div className="space-y-1.5">
                 <Label htmlFor="header-description" className="text-sm">
-                  Description
+                  {t('report_view.export_dialog.description_input.label')}
                 </Label>
                 <Textarea
                   id="header-description"
                   value={headerDescription}
                   onChange={(e) => setHeaderDescription(e.target.value)}
-                  placeholder="Report description..."
+                  placeholder={t('report_view.export_dialog.description_input.placeholder.instruction')}
                   rows={2}
                 />
               </div>
 
               <div className="space-y-1.5">
                 <Label htmlFor="header-column" className="text-sm">
-                  Start column
+                  {t('report_view.export_dialog.start_column_input.label')}
                 </Label>
                 <Select value={headerColumn} onValueChange={setHeaderColumn}>
                   <SelectTrigger id="header-column" className="w-20">
@@ -183,7 +185,7 @@ export function ExportDialog({
                   htmlFor="save-default"
                   className="text-xs text-muted-foreground cursor-pointer"
                 >
-                  Save as default for this report
+                  {t('report_view.export_dialog.save_default_toggle.label')}
                 </Label>
               </div>
             </div>
@@ -192,7 +194,7 @@ export function ExportDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={exporting}>
-            Cancel
+            {t('common.actions.cancel.cta')}
           </Button>
           <Button onClick={handleExport} disabled={exporting}>
             {exporting ? (
@@ -202,7 +204,9 @@ export function ExportDialog({
             ) : (
               <FileText className="h-4 w-4 mr-2" />
             )}
-            {exporting ? 'Exporting...' : `Export ${isXlsx ? '.xlsx' : '.csv'}`}
+            {exporting
+              ? t('common.states.exporting')
+              : t('report_view.export_dialog.export_button.cta.default', { extension: isXlsx ? '.xlsx' : '.csv' })}
           </Button>
         </DialogFooter>
       </DialogContent>

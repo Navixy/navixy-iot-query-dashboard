@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { CHAT_SUGGESTIONS } from './suggestions';
 
 interface EmptyStateProps {
@@ -11,19 +12,21 @@ interface EmptyStateProps {
 }
 
 export function EmptyState({ onPick, historyFailed }: EmptyStateProps) {
+  const { t } = useLocale();
+
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
       <div className="space-y-2">
         <h1 className="text-2xl font-semibold text-foreground">
-          What do you want to monitor?
+          {t('ai_chat.empty_state.header.title.question')}
         </h1>
         <p className="mx-auto max-w-md text-sm text-muted-foreground">
-          Describe the dashboard you need in plain language. The assistant may
-          ask a few questions, then builds a dashboard you can preview against
-          your own data.
+          {t('ai_chat.empty_state.header.subtitle.instruction')}
         </p>
       </div>
       <div className="flex max-w-xl flex-wrap items-center justify-center gap-2">
+        {/* Intentionally un-keyed — the chip text becomes the prompt sent to the
+            agent, and an ASCII-only test guards that. See suggestions.ts. */}
         {CHAT_SUGGESTIONS.map((suggestion) => (
           <Button
             key={suggestion}
@@ -38,8 +41,7 @@ export function EmptyState({ onPick, historyFailed }: EmptyStateProps) {
       </div>
       {historyFailed && (
         <p className="text-xs text-muted-foreground">
-          Your chat history could not be loaded. You can still send a message —
-          it starts a fresh conversation.
+          {t('ai_chat.empty_state.history_error.paragraph.failure')}
         </p>
       )}
     </div>

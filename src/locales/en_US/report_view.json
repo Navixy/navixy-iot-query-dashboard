@@ -1,0 +1,1344 @@
+{
+  "edit_toolbar": {
+    "edit_button": {
+      "tooltip": "Enter edit mode"
+    },
+    "exit_edit_button": {
+      "tooltip": "Exit edit mode"
+    },
+    "undo_button": {
+      "label": "Undo",
+      "tooltip": "Undo: {value}"
+    },
+    "redo_button": {
+      "label": "Redo",
+      "tooltip": "Redo: {value}"
+    },
+    "new_row_button": {
+      "tooltip": "New row"
+    },
+    "new_panel_button": {
+      "tooltip": "New panel"
+    },
+    "chart_library_button": {
+      "tooltip": "Chart library"
+    },
+    "filters_button": {
+      "tooltip": "Dashboard filters"
+    },
+    "tidy_up_button": {
+      "tooltip": "Tidy up layout",
+      "paragraph": {
+        "success": "Layout tidied up"
+      },
+      "subtitle": {
+        "success": "Empty spaces removed and panels repositioned."
+      }
+    },
+    "full_schema_button": {
+      "tooltip": "Full schema"
+    },
+    "delete_button": {
+      "tooltip": "Delete dashboard"
+    }
+  },
+  "row_header": {
+    "expand_button": {
+      "label": "Expand row",
+      "tooltip": "Expand row to show panels"
+    },
+    "collapse_button": {
+      "label": "Collapse row",
+      "tooltip": {
+        "default": "Collapse row to hide panels",
+        "disabled": "Rows are expanded in edit mode"
+      }
+    },
+    "menu_button": {
+      "tooltip": "More options"
+    },
+    "rename_option": {
+      "sublabel": "Change row title",
+      "tooltip": "Rename this row"
+    },
+    "pack_option": {
+      "menu_item": "Pack row",
+      "sublabel": "Remove gaps",
+      "tooltip": "Pack panels in this row by removing gaps"
+    },
+    "delete_option": {
+      "menu_item": "Delete row",
+      "tooltip": "Delete this row"
+    }
+  },
+  "rename_row_dialog": {
+    "title": "Rename row",
+    "paragraph": {
+      "instruction": "Enter a new name for this row"
+    },
+    "title_input": {
+      "placeholder": "Row title"
+    }
+  },
+  "delete_row_dialog": {
+    "title": "Delete row",
+    "paragraph": {
+      "confirmation": "Are you sure you want to delete the row \"{title}\"?",
+      "warning": "The panels in this row will be moved to the top level."
+    }
+  },
+  "add_panel_dialog": {
+    "title": "Add panel",
+    "paragraph": {
+      "instruction": "Choose a panel type and size to add to your dashboard."
+    },
+    "type_input": {
+      "label": "Panel type"
+    },
+    "stat_option": {
+      "menu_item": "Stat",
+      "sublabel": "Display a single metric value"
+    },
+    "barchart_option": {
+      "menu_item": "Bar chart",
+      "sublabel": "Display data as bars"
+    },
+    "piechart_option": {
+      "menu_item": "Pie chart",
+      "sublabel": "Display data as a pie chart"
+    },
+    "table_option": {
+      "menu_item": "Table",
+      "sublabel": "Display data in a table format"
+    },
+    "text_option": {
+      "menu_item": "Text",
+      "sublabel": "Display markdown or plain text"
+    },
+    "geomap_option": {
+      "menu_item": "Map",
+      "sublabel": "Display GPS coordinates on a map"
+    },
+    "size_input": {
+      "label": "Size preset",
+      "small_option": {
+        "menu_item": {
+          "default": "Small ({width}×{height})",
+          "disabled": "Small ({width}×{height}) — too small for this type"
+        }
+      },
+      "medium_option": {
+        "menu_item": {
+          "default": "Medium ({width}×{height})",
+          "disabled": "Medium ({width}×{height}) — too small for this type"
+        }
+      },
+      "large_option": {
+        "menu_item": {
+          "default": "Large ({width}×{height})",
+          "disabled": "Large ({width}×{height}) — too small for this type"
+        }
+      }
+    },
+    "add_button": {
+      "cta": "Add panel"
+    }
+  },
+  "panel_toolbar": {
+    "edit_button": {
+      "tooltip": "Edit panel"
+    },
+    "duplicate_button": {
+      "tooltip": "Duplicate panel"
+    },
+    "delete_button": {
+      "tooltip": "Delete panel"
+    }
+  },
+  "canvas": {
+    "drop_in_row": {
+      "label": "Release to place in this row"
+    },
+    "drop_on_canvas": {
+      "label": "Release to place here"
+    },
+    "drop_above_rows": {
+      "label": "Drop here to place above all rows"
+    },
+    "drop_below_rows": {
+      "label": "Drop here to place below all rows"
+    },
+    "drop_add_to_row": {
+      "label": "Drop here to add to this row"
+    },
+    "drop_in_section": {
+      "label": "Drop here to place inside this row"
+    },
+    "row_drop_area": {
+      "label": "Drop zone: add a panel to this row"
+    },
+    "dragging": {
+      "label": "Dragging…"
+    },
+    "resize_handle": {
+      "tooltip": "Drag to resize row height"
+    },
+    "save_toast": {
+      "paragraph": {
+        "failure": "Failed to save the panel layout"
+      }
+    }
+  },
+  "header": {
+    "title": {
+      "empty": "Untitled dashboard"
+    },
+    "title_input": {
+      "placeholder": "Dashboard title"
+    },
+    "save_button": {
+      "paragraph": {
+        "success": "Dashboard page header updated",
+        "failure": "Failed to update the dashboard page header"
+      }
+    },
+    "view_mode": {
+      "label": "View mode"
+    }
+  },
+  "breadcrumb": {
+    "section_input": {
+      "placeholder": "Section name"
+    },
+    "report_input": {
+      "placeholder": "Dashboard name"
+    },
+    "section_toast": {
+      "paragraph": {
+        "success": "Section updated",
+        "failure": "Failed to update the section"
+      }
+    },
+    "report_toast": {
+      "paragraph": {
+        "success": "Dashboard updated",
+        "failure": "Failed to update the dashboard"
+      }
+    }
+  },
+  "full_schema_dialog": {
+    "title": "Edit dashboard schema",
+    "subtitle": "Modify the complete JSON schema for this dashboard",
+    "import_button": {
+      "cta": "Import",
+      "paragraph": {
+        "success": "Schema imported",
+        "failure": "Failed to import the schema. The file isn't valid JSON."
+      }
+    },
+    "export_button": {
+      "cta": "Export",
+      "paragraph": {
+        "success": "Schema exported"
+      }
+    },
+    "save_button": {
+      "paragraph": {
+        "success": "Dashboard schema updated",
+        "failure": "Failed to save the dashboard schema"
+      }
+    }
+  },
+  "delete_report_dialog": {
+    "name_fallback": {
+      "label": "This dashboard"
+    }
+  },
+  "empty_state": {
+    "header": {
+      "title": {
+        "instruction": "Get started"
+      }
+    },
+    "paragraph": {
+      "instruction": "This dashboard is empty. Start by creating a blank dashboard or uploading a schema file."
+    },
+    "blank_button": {
+      "cta": {
+        "default": "Start with a blank dashboard"
+      },
+      "paragraph": {
+        "success": "Blank dashboard created. You can now add panels.",
+        "failure": "Failed to create a blank dashboard"
+      }
+    },
+    "upload_button": {
+      "cta": {
+        "default": "Upload schema file",
+        "loading": "Processing…"
+      },
+      "paragraph": {
+        "success": "Schema uploaded and saved",
+        "failure": "Failed to upload the schema"
+      }
+    }
+  },
+  "error_state": {
+    "header": {
+      "title": "Dashboard error"
+    }
+  },
+  "panel_editor": {
+    "save_button": {
+      "paragraph": {
+        "success": "Panel updated",
+        "failure": "Failed to save the panel"
+      }
+    },
+    "header": {
+      "title": "Edit panel: {title}",
+      "subtitle": "Modify panel properties and SQL query for this visualization."
+    },
+    "properties_tab": {
+      "menu_item": "Panel properties"
+    },
+    "sql_tab": {
+      "menu_item": "SQL query"
+    },
+    "content_tab": {
+      "menu_item": "Content"
+    },
+    "filters_tab": {
+      "menu_item": "Filters",
+      "intro": {
+        "paragraph": "Bind a dashboard filter to a column in this panel's result. When a viewer changes the filter, this panel re-queries and shows only the matching rows (date range or the selected values). Your SQL isn't modified, as the filter is applied by wrapping the query at runtime."
+      },
+      "tip": {
+        "paragraph": {
+          "instruction": "Tip: run \"Test query\" in the \"SQL query\" tab to pick from the detected columns. You can also enter column names manually."
+        }
+      }
+    },
+    "visualization_tab": {
+      "menu_item": "Visualization settings"
+    },
+    "title_input": {
+      "label": "Panel title",
+      "placeholder": {
+        "instruction": "Enter panel title"
+      }
+    },
+    "type_input": {
+      "label": "Panel type",
+      "kpi_option": {
+        "menu_item": "KPI"
+      },
+      "table_option": {
+        "menu_item": "Table"
+      },
+      "barchart_option": {
+        "menu_item": "Bar chart"
+      },
+      "piechart_option": {
+        "menu_item": "Pie chart"
+      },
+      "linechart_option": {
+        "menu_item": "Line chart"
+      },
+      "timeseries_option": {
+        "menu_item": "Time series"
+      },
+      "geomap_option": {
+        "menu_item": "Map"
+      },
+      "text_option": {
+        "menu_item": "Text"
+      }
+    },
+    "description_input": {
+      "label": "Description",
+      "placeholder": {
+        "instruction": "Enter panel description (optional)"
+      }
+    },
+    "content_mode_input": {
+      "label": "Content mode",
+      "markdown_option": {
+        "menu_item": "Markdown",
+        "input_hint": {
+          "instruction": "Use Markdown syntax for formatting (e.g., **bold**, *italic*, `code`)"
+        }
+      },
+      "html_option": {
+        "menu_item": "HTML",
+        "input_hint": {
+          "instruction": "Use HTML tags for formatting"
+        }
+      },
+      "text_option": {
+        "menu_item": "Plain text",
+        "input_hint": {
+          "instruction": "Plain text with no formatting"
+        }
+      }
+    },
+    "content_input": {
+      "label": "Content"
+    },
+    "sql_input": {
+      "label": "SQL query"
+    },
+    "filter_binding": {
+      "apply_toggle": {
+        "label": "Apply \"{name}\""
+      },
+      "column_input": {
+        "label": "Filter column",
+        "placeholder": {
+          "instruction": "Select a column"
+        }
+      },
+      "column_manual_input": {
+        "placeholder": {
+          "instruction": "e.g. event_time/status"
+        }
+      },
+      "no_column": {
+        "paragraph": {
+          "instruction": "Pick a column to activate this filter."
+        }
+      },
+      "unknown_column": {
+        "paragraph": {
+          "warning": "\"{column}\" isn't one of this query's result columns ({columns}). The filter matches on output columns, so it won't apply. Add it to the SELECT output or pick a listed column."
+        }
+      },
+      "duplicate_column": {
+        "paragraph": {
+          "warning": "\"{column}\" is returned by this query more than once. Create an alias for one of them in your SQL, or the filter will fail with an \"ambiguous column\" error."
+        }
+      },
+      "non_date_column": {
+        "paragraph": {
+          "warning": "\"{column}\" is {type}, not a date/timestamp. A date range won't match formatted text values. Choose a real-time column or reference {from} / {to} inside the SQL."
+        }
+      }
+    },
+    "validation": {
+      "title_required": {
+        "failure": "Panel title is required"
+      },
+      "type_required": {
+        "failure": "Panel type is required"
+      }
+    },
+    "save_error_toast": {
+      "paragraph": {
+        "failure": "Failed to save panel"
+      }
+    },
+    "incomplete_filter_toast": {
+      "title": "Filter needs a column",
+      "paragraph": {
+        "instruction": "{filters}: pick a column in the \"Filters\" tab or uncheck the filter."
+      }
+    },
+    "missing_param": {
+      "error": "{list}: no value available. Give it a default in the panel's params, add a matching dashboard filter or variable, or remove it."
+    },
+    "missing_param_toast": {
+      "title": "Missing parameter value",
+      "paragraph": {
+        "failure": "{list}: no value available"
+      }
+    },
+    "test_query_toast": {
+      "paragraph": {
+        "success": "Query executed successfully"
+      }
+    }
+  },
+  "new_row_editor": {
+    "header": {
+      "title": "Add new row: {type}",
+      "subtitle": "Configure the new row. Fill in the required fields and customize as needed."
+    },
+    "row_type": {
+      "tiles": {
+        "label": "Tiles"
+      },
+      "table": {
+        "label": "Table"
+      },
+      "charts": {
+        "label": "Charts"
+      },
+      "annotation": {
+        "label": "Annotation"
+      }
+    },
+    "title_input": {
+      "label": "Row title (optional)",
+      "placeholder": {
+        "instruction": "Enter row title"
+      }
+    },
+    "element_label_input": {
+      "label": "Element label",
+      "placeholder": {
+        "instruction": "Enter element label"
+      }
+    },
+    "annotation_text_input": {
+      "label": "Annotation text",
+      "placeholder": {
+        "instruction": "Enter your annotation text…"
+      }
+    },
+    "markdown_toggle": {
+      "label": "Enable Markdown formatting"
+    },
+    "chart_type_input": {
+      "label": "Chart type",
+      "bar_option": {
+        "menu_item": "Bar chart"
+      },
+      "pie_option": {
+        "menu_item": "Pie chart"
+      }
+    },
+    "category_field_input": {
+      "label": "Category field",
+      "placeholder": {
+        "instruction": "e.g., category, name, type"
+      }
+    },
+    "value_field_input": {
+      "label": "Value field",
+      "placeholder": {
+        "instruction": "e.g., count, amount, value"
+      }
+    },
+    "sql_input": {
+      "label": "SQL query"
+    },
+    "create_button": {
+      "cta": {
+        "default": "Create row"
+      }
+    },
+    "validation": {
+      "sql_required": {
+        "failure": "SQL query is required"
+      },
+      "chart_fields_required": {
+        "failure": "Category field and value field are required for charts"
+      }
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "Row added successfully",
+        "failure": "Failed to create row"
+      }
+    }
+  },
+  "variables_manager": {
+    "header": {
+      "title": "Dashboard filters",
+      "subtitle": "Add filters for this dashboard's panels. A date filter picks a time range. A value filter picks from a column's distinct values."
+    },
+    "empty_state": {
+      "paragraph": {
+        "empty": "No filters yet. Add a date or value filter for viewers to use."
+      }
+    },
+    "label_input": {
+      "label": "Label",
+      "placeholder": {
+        "date": {
+          "instruction": "Reporting period"
+        },
+        "value": {
+          "instruction": "Status"
+        }
+      }
+    },
+    "name_input": {
+      "label": "Variable name",
+      "placeholder": {
+        "date": {
+          "instruction": "period"
+        },
+        "value": {
+          "instruction": "status"
+        }
+      },
+      "error": {
+        "name_required": "Name is required.",
+        "invalid_name": " The name must use letters, digits and underscores and start with a letter and not  \"__\".",
+        "filter_name_taken": "Another filter already uses this name.",
+        "template_name_taken": "A dashboard template variable named \"{name}\" already exists (not shown here). Choose a different name.",
+        "binding_taken": "This binds {binding}, which is already used by \"{owner}\". Choose a different name."
+      },
+      "bind_hint": {
+        "auto": {
+          "paragraph": "Binds {bind}. Applied automatically to panels: {panels}."
+        },
+        "manual": {
+          "paragraph": "Binds {bind}. Apply it to panels in each panel's \"Filters\" tab."
+        },
+        "auto_count": {
+          "paragraph": "Binds {bind}. Applied automatically to panels with this column ({count})."
+        }
+      }
+    },
+    "column_input": {
+      "label": "Column",
+      "placeholder": {
+        "instruction": "Pick a column",
+        "loading": {
+          "instruction": "Detecting columns…"
+        }
+      },
+      "error": {
+        "column_required": "Pick a column"
+      },
+      "no_columns": {
+        "paragraph": {
+          "empty": "No columns detected from the panels."
+        }
+      },
+      "panels_failed": {
+        "paragraph": {
+          "single": {
+            "warning": "Panel \"{panel}\" didn't respond. Its columns aren't listed. Close and reopen this dialog to retry."
+          },
+          "multiple": {
+            "warning": "Some panels didn't respond ({count}). Their columns aren't listed. Close and reopen this dialog to retry."
+          }
+        }
+      },
+      "input_hint": {
+        "instruction": "Viewers pick from this column's distinct values (loaded when the dashboard opens).",
+        "loading": {
+          "instruction": "Running panel queries to detect available columns…"
+        }
+      }
+    },
+    "default_range_input": {
+      "label": "Default range",
+      "custom_option": {
+        "menu_item": "Custom (keep current)"
+      }
+    },
+    "filter_list": {
+      "column_source": {
+        "label": "column \"{column}\""
+      },
+      "values_source": {
+        "label": "values"
+      },
+      "range_source": {
+        "label": "range"
+      },
+      "panels_count": {
+        "label": "Panels: {count}"
+      }
+    },
+    "editor_form": {
+      "edit_date": {
+        "title": "Edit date filter"
+      },
+      "edit_value": {
+        "title": "Edit value filter"
+      },
+      "new_date": {
+        "title": "New date filter"
+      },
+      "new_value": {
+        "title": "New value filter"
+      },
+      "update_button": {
+        "cta": "Update filter"
+      },
+      "add_button": {
+        "cta": "Add filter"
+      }
+    },
+    "add_date_filter_button": {
+      "cta": "Add date filter"
+    },
+    "add_value_filter_button": {
+      "cta": "Add value filter"
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "Dashboard filters updated.",
+        "failure": "Failed to save dashboard filters"
+      }
+    }
+  },
+  "element_editor": {
+    "header": {
+      "title": "Edit: {label}",
+      "subtitle": "Modify the SQL query and parameters for this element"
+    },
+    "sql_tab": {
+      "menu_item": "SQL query"
+    },
+    "params_tab": {
+      "menu_item": "Parameters"
+    },
+    "sql_input": {
+      "label": "SQL query"
+    },
+    "params_input": {
+      "label": "Query parameters (JSON)"
+    },
+    "delete_button": {
+      "cta": "Delete element"
+    },
+    "delete_dialog": {
+      "title": "Delete element",
+      "paragraph": {
+        "confirmation": "Delete this element? This action can't be undone."
+      },
+      "element_name": {
+        "label": "Element:"
+      },
+      "confirm_button": {
+        "cta": {
+          "default": "Delete element"
+        }
+      }
+    },
+    "save_params_error_toast": {
+      "paragraph": {
+        "failure": "Invalid JSON in parameters"
+      }
+    },
+    "test_params_error_toast": {
+      "title": "Invalid parameters",
+      "paragraph": {
+        "failure": "{error}. Proceeding with empty parameters."
+      }
+    },
+    "delete_toast": {
+      "paragraph": {
+        "success": "Element deleted successfully",
+        "failure": "Failed to delete element"
+      }
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "Element updated successfully",
+        "failure": "Failed to save element"
+      }
+    }
+  },
+  "annotation_editor": {
+    "header": {
+      "title": "Edit annotation",
+      "subtitle": "Modify the annotation content and formatting options"
+    },
+    "section_name_input": {
+      "label": "Section name (optional)",
+      "placeholder": {
+        "instruction": "Enter section name…"
+      }
+    },
+    "content_input": {
+      "label": "Content",
+      "placeholder": {
+        "instruction": "Enter your annotation content…"
+      },
+      "input_hint": {
+        "instruction": "Markdown formatting is enabled. Use **bold**, *italic*, `code`, etc."
+      }
+    },
+    "markdown_toggle": {
+      "label": "Markdown"
+    },
+    "preview": {
+      "label": "Preview"
+    },
+    "delete_button": {
+      "cta": "Delete annotation"
+    },
+    "delete_dialog": {
+      "title": "Delete annotation",
+      "paragraph": {
+        "confirmation": "Delete this annotation? This action can't be undone."
+      },
+      "annotation_name": {
+        "label": "Annotation:"
+      },
+      "untitled": {
+        "label": "Untitled annotation"
+      },
+      "confirm_button": {
+        "cta": {
+          "default": "Delete annotation"
+        }
+      }
+    },
+    "save_toast": {
+      "paragraph": {
+        "success": "Annotation updated successfully",
+        "failure": "Failed to save annotation"
+      }
+    },
+    "delete_toast": {
+      "paragraph": {
+        "success": "Annotation deleted successfully",
+        "failure": "Failed to delete annotation"
+      }
+    }
+  },
+  "export_dialog": {
+    "header": {
+      "title": "Export {format}",
+      "subtitle": "Configure export options before downloading."
+    },
+    "header_toggle": {
+      "label": "Add header"
+    },
+    "csv_notice": {
+      "paragraph": "Headers are only available for Excel (.xlsx) exports."
+    },
+    "title_input": {
+      "label": "Title",
+      "placeholder": {
+        "instruction": "Title"
+      }
+    },
+    "description_input": {
+      "label": "Description",
+      "placeholder": {
+        "instruction": "Description"
+      }
+    },
+    "start_column_input": {
+      "label": "Start column"
+    },
+    "save_default_toggle": {
+      "label": "Save as default for this item"
+    },
+    "export_button": {
+      "cta": {
+        "default": "Export as {extension}"
+      }
+    }
+  },
+  "filter_control": {
+    "trigger_button": {
+      "label": {
+        "failure": "Failed to load",
+        "empty": "All"
+      },
+      "summary": {
+        "label": "Selected: {count}"
+      }
+    },
+    "search_input": {
+      "placeholder": {
+        "instruction": "Search…"
+      }
+    },
+    "select_all_button": {
+      "cta": "Select all"
+    },
+    "clear_button": {
+      "cta": "Clear"
+    },
+    "values_list": {
+      "paragraph": {
+        "loading": "Loading values…",
+        "empty": "No values"
+      },
+      "load_error": {
+        "paragraph": {
+          "failure": "Failed to load values."
+        }
+      },
+      "search_empty": {
+        "paragraph": {
+          "empty": "No match"
+        }
+      }
+    }
+  },
+  "panel_viewer": {
+    "no_sql": {
+      "paragraph": {
+        "empty": "No SQL configured",
+        "instruction": "Add SQL query to display data"
+      }
+    },
+    "unsupported_type": {
+      "paragraph": "Unsupported panel type: {type}"
+    },
+    "map_icon": {
+      "label": "Map"
+    }
+  },
+  "pie_chart": {
+    "other_slice": {
+      "label": "Other"
+    },
+    "total": {
+      "label": "Total"
+    }
+  },
+  "line_chart": {
+    "paragraph": {
+      "empty": "No data series found"
+    }
+  },
+  "bar_chart": {
+    "paragraph": {
+      "empty": "No data series found"
+    }
+  },
+  "map_panel": {
+    "no_coordinates": {
+      "paragraph": {
+        "empty": "No GPS coordinates detected",
+        "instruction": "Query should include lat/lon or latitude/longitude columns"
+      }
+    },
+    "invalid_coordinates": {
+      "paragraph": {
+        "empty": "No valid coordinates found",
+        "instruction": "Check that lat/lon values are valid numbers"
+      }
+    },
+    "show_all_button": {
+      "tooltip": "Fit map to show all locations"
+    },
+    "latitude": {
+      "label": "Lat:"
+    },
+    "longitude": {
+      "label": "Lon:"
+    },
+    "attribution_link": {
+      "tooltip": "Powered by Navixy"
+    },
+    "location_count": {
+      "label": "Locations: {count}"
+    },
+    "empty_state": {
+      "paragraph": {
+        "empty": "No GPS data available",
+        "instruction": "The query result doesn't contain valid GPS coordinates"
+      }
+    }
+  },
+  "export_menu": {
+    "excel_option": {
+      "menu_item": "Export Excel"
+    },
+    "csv_option": {
+      "menu_item": "Export CSV"
+    },
+    "paragraph": {
+      "success": "{format} exported",
+      "failure": "Failed to export the data"
+    },
+    "header_settings_toast": {
+      "paragraph": {
+        "success": "Export header settings saved",
+        "failure": "Failed to save export header settings"
+      }
+    }
+  },
+  "text_panel": {
+    "paragraph": {
+      "empty": "No content provided"
+    },
+    "error": "Failed to render {mode}: {detail}"
+  },
+  "chart_library": {
+    "header": {
+      "title": "Chart library"
+    },
+    "close_button": {
+      "label": "Close chart library"
+    },
+    "paragraph": {
+      "empty": "No charts available"
+    },
+    "error": "Failed to load the chart library"
+  },
+  "table_panel": {
+    "rows_per_page": {
+      "label": "Rows per page:"
+    },
+    "all_option": {
+      "menu_item": "All"
+    },
+    "page_summary": {
+      "label": "Page {page} of {pages}"
+    }
+  },
+  "row_title": {
+    "save_toast": {
+      "paragraph": {
+        "success": "Row title updated successfully",
+        "failure": "Failed to update row title"
+      }
+    }
+  },
+  "schema_download": {
+    "example_toast": {
+      "paragraph": {
+        "success": "Example schema downloaded and saved successfully"
+      }
+    },
+    "custom_toast": {
+      "paragraph": {
+        "success": "Dashboard downloaded and saved successfully",
+        "failure": "Failed to download schema"
+      }
+    }
+  },
+  "pdf_export": {
+    "export_button": {
+      "cta": {
+        "default": "Export as PDF"
+      },
+      "tooltip": {
+        "default": "Export the dashboard as a PDF",
+        "loading": "Waiting for the dashboard to finish loading"
+      }
+    },
+    "unavailable_toast": {
+      "title": "Export unavailable",
+      "paragraph": {
+        "instruction": "The dashboard is still loading. Please try again in a moment."
+      }
+    },
+    "success_toast": {
+      "title": "PDF exported",
+      "paragraph": {
+        "success": "Your dashboard was downloaded as a PDF."
+      }
+    },
+    "failure_toast": {
+      "title": "Export failed",
+      "paragraph": {
+        "failure": "Failed to generate the PDF."
+      }
+    },
+    "partial_data_note": {
+      "paragraph": "Partial data shown. Export Excel or CSV for all rows."
+    }
+  },
+  "visualization_settings": {
+    "table_display": {
+      "header": {
+        "title": "Table display options"
+      },
+      "show_header_toggle": {
+        "label": "Show header",
+        "sublabel": "Display column headers"
+      },
+      "sortable_toggle": {
+        "label": "Sortable columns",
+        "sublabel": "Enable column sorting"
+      },
+      "show_pagination_toggle": {
+        "label": "Show pagination",
+        "sublabel": "Display pagination controls"
+      },
+      "show_totals_toggle": {
+        "label": "Show totals row",
+        "sublabel": "Display totals row at the bottom or top"
+      }
+    },
+    "table_config": {
+      "header": {
+        "title": "Table configuration"
+      },
+      "page_size_input": {
+        "label": "Rows per page",
+        "input_hint": {
+          "instruction": "Number of rows displayed per page (default: 25)"
+        }
+      },
+      "column_width_input": {
+        "label": "Column width strategy",
+        "auto_option": { "menu_item": "Auto" },
+        "equal_option": { "menu_item": "Equal" },
+        "fit_option": { "menu_item": "Fit content" },
+        "input_hint": {
+          "instruction": "How column widths are determined (default: auto)"
+        }
+      },
+      "row_highlighting_input": {
+        "label": "Row highlighting",
+        "none_option": { "menu_item": "None" },
+        "alternating_option": { "menu_item": "Alternating rows" },
+        "hover_option": { "menu_item": "On hover" },
+        "both_option": { "menu_item": "Both" },
+        "input_hint": {
+          "instruction": "Row highlighting mode (default: none)"
+        }
+      },
+      "totals_row_input": {
+        "label": "Totals row position",
+        "top_option": { "menu_item": "Top" },
+        "bottom_option": { "menu_item": "Bottom" },
+        "input_hint": {
+          "instruction": "Position of the totals row (default: bottom)"
+        }
+      }
+    },
+    "bar_display": {
+      "header": {
+        "title": "Bar chart display options"
+      },
+      "orientation_input": {
+        "label": "Orientation",
+        "vertical_value": {
+          "label": "Vertical"
+        },
+        "input_hint": {
+          "instruction": "Bar direction (currently fixed to vertical)"
+        }
+      },
+      "stacking_input": {
+        "label": "Stacking mode",
+        "none_option": { "menu_item": "None" },
+        "stacked_option": { "menu_item": "Stacked" },
+        "percent_option": { "menu_item": "Percent" },
+        "input_hint": {
+          "instruction": "Stacking mode for grouped bars (default: none)"
+        }
+      },
+      "show_values_toggle": {
+        "label": "Show values",
+        "sublabel": "Display value labels on bars"
+      },
+      "sort_order_input": {
+        "label": "Sort order",
+        "none_option": { "menu_item": "None" },
+        "asc_option": { "menu_item": "Ascending" },
+        "desc_option": { "menu_item": "Descending" },
+        "input_hint": {
+          "instruction": "Sort bars by value (default: none)"
+        }
+      },
+      "bar_spacing_input": {
+        "label": "Bar spacing",
+        "input_hint": {
+          "instruction": "Spacing between bars (0-1, default: 0.2)"
+        }
+      }
+    },
+    "series_column_input": {
+      "label": "Series column",
+      "auto_option": {
+        "menu_item": "Auto (detect from data)"
+      },
+      "none_option": {
+        "menu_item": "None — one series per value column"
+      },
+      "unresolved_option": {
+        "menu_item": {
+          "index": "Column index {value}",
+          "index_missing": "Column index {value} (not in this query)",
+          "name_missing": "{value} (not in this query)"
+        }
+      },
+      "column_option": {
+        "menu_item": {
+          "named": "{name} (index {index})",
+          "unnamed": "Column (index {index})"
+        }
+      },
+      "input_hint": {
+        "instruction": "Which column splits the result into series. Set it when a numeric grouping key (a device id) is read as a second metric, or vice versa."
+      },
+      "placeholder": {
+        "instruction": "e.g. device_id, or a column index"
+      },
+      "no_columns_hint": {
+        "instruction": "Run \"Test query\" on the \"SQL\" tab to pick from this query's columns instead."
+      }
+    },
+    "line_display": {
+      "header": {
+        "title": "Line chart display options"
+      },
+      "line_style_input": {
+        "label": "Line style",
+        "solid_option": { "menu_item": "Solid" },
+        "dashed_option": { "menu_item": "Dashed" },
+        "dotted_option": { "menu_item": "Dotted" },
+        "input_hint": {
+          "instruction": "Line style (default: solid)"
+        }
+      },
+      "line_width_input": {
+        "label": "Line width",
+        "input_hint": {
+          "instruction": "Line thickness in pixels (default: 2)"
+        }
+      },
+      "show_points_input": {
+        "label": "Show points",
+        "always_option": { "menu_item": "Always" },
+        "auto_option": { "menu_item": "Auto" },
+        "never_option": { "menu_item": "Never" },
+        "input_hint": {
+          "instruction": "When to show data points (default: auto — shows when ≤50 points)"
+        }
+      },
+      "point_size_input": {
+        "label": "Point size",
+        "input_hint": {
+          "instruction": "Size of data points in pixels (default: 5)"
+        }
+      },
+      "interpolation_input": {
+        "label": "Interpolation",
+        "linear_option": { "menu_item": "Linear" },
+        "step_option": { "menu_item": "Step" },
+        "smooth_option": { "menu_item": "Smooth" },
+        "input_hint": {
+          "instruction": "Line interpolation method (default: linear)"
+        }
+      },
+      "fill_area_input": {
+        "label": "Fill area",
+        "none_option": { "menu_item": "None" },
+        "below_option": { "menu_item": "Below" },
+        "above_option": { "menu_item": "Above" },
+        "input_hint": {
+          "instruction": "Fill area under/over line (default: none)"
+        }
+      },
+      "show_grid_toggle": {
+        "label": "Show grid",
+        "sublabel": "Show grid lines"
+      }
+    },
+    "color_legend": {
+      "header": {
+        "title": "Color and legend"
+      },
+      "color_palette_input": {
+        "label": "Color palette",
+        "classic_option": { "menu_item": "Classic" },
+        "modern_option": { "menu_item": "Modern" },
+        "pastel_option": { "menu_item": "Pastel" },
+        "vibrant_option": { "menu_item": "Vibrant" },
+        "input_hint": {
+          "instruction": "Color scheme (default: classic)"
+        }
+      },
+      "show_legend_toggle": {
+        "label": "Show legend",
+        "sublabel": "Show legend when series column present"
+      },
+      "legend_position_input": {
+        "label": "Legend position",
+        "top_option": { "menu_item": "Top" },
+        "bottom_option": { "menu_item": "Bottom" },
+        "left_option": { "menu_item": "Left" },
+        "right_option": { "menu_item": "Right" },
+        "input_hint": {
+          "instruction": "Legend placement (default: bottom)"
+        }
+      }
+    },
+    "unsupported": {
+      "paragraph": "Visualization settings for {type} panels aren't available yet."
+    }
+  },
+  "parameter_bar": {
+    "header": {
+      "title": "Parameters"
+    },
+    "reset_button": {
+      "cta": "Reset to defaults"
+    },
+    "time_range": {
+      "label": "Time range"
+    },
+    "from_param_fallback": {
+      "label": "From"
+    },
+    "to_param_fallback": {
+      "label": "To"
+    },
+    "boolean_input": {
+      "true_option": { "menu_item": "True" },
+      "false_option": { "menu_item": "False" }
+    },
+    "apply_button": {
+      "cta": {
+        "default": "Update",
+        "pending": "Apply"
+      }
+    }
+  },
+  "date_range_filter": {
+    "trigger": {
+      "placeholder": {
+        "instruction": "Pick a date range"
+      }
+    },
+    "quick_ranges": {
+      "label": "Quick ranges"
+    },
+    "from_input": {
+      "label": "From"
+    },
+    "to_input": {
+      "label": "To"
+    }
+  },
+  "dataset_requirements": {
+    "header": {
+      "title": "Dataset requirements"
+    },
+    "stat": {
+      "paragraph": {
+        "instruction": "Expected dataset: 1 column (numeric value). The query should return a single row with a single numeric value (e.g., `SELECT COUNT(*) FROM table`)."
+      }
+    },
+    "table": {
+      "paragraph": {
+        "instruction": "Expected dataset: Any number of columns. The query can return any structure. All columns will be displayed as table columns."
+      }
+    },
+    "barchart": {
+      "paragraph": {
+        "instruction": "Expected dataset: 2 columns minimum.\n• Column 1: Category (x-axis labels)\n• Column 2: Value (bar heights)\n\nOptional: 3+ columns for multiple series/grouped bars\n• Column 1: Category\n• Column 2: Value\n• Column 3: Series name (for grouping/stacking)\n\nExample: `SELECT category, COUNT(*) AS value FROM table GROUP BY category`"
+      }
+    },
+    "piechart": {
+      "paragraph": {
+        "instruction": "Expected dataset: 2 columns.\n• Column 1: Category/Label (slice names)\n• Column 2: Value (slice sizes)\n\nExample: `SELECT category, SUM(amount) AS value FROM table GROUP BY category`"
+      }
+    },
+    "geomap": {
+      "paragraph": {
+        "instruction": "Expected dataset: 2 columns minimum.\n• Column 1: Latitude (named lat, latitude, or similar)\n• Column 2: Longitude (named lon, lng, longitude, or similar)\n\nOptional: Additional columns for marker popups\n\nExample: `SELECT lat, lon, name, timestamp FROM locations`"
+      }
+    },
+    "linechart": {
+      "paragraph": {
+        "instruction": "Expected dataset: 2 columns minimum.\n• Column 1: Timestamp (x-axis, time series)\n• Column 2: Value (y-axis, numeric)\n\nOptional: 3+ columns for multiple series\n• Column 1: Timestamp\n• Column 2: Value\n• Column 3: Series name\n\nExample: `SELECT timestamp, AVG(value) AS avg_value FROM table GROUP BY timestamp ORDER BY timestamp`"
+      }
+    },
+    "default": {
+      "paragraph": {
+        "instruction": "Expected dataset: Any structure. This panel type doesn't require a specific column structure."
+      }
+    }
+  }
+}

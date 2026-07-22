@@ -21,6 +21,7 @@ import { useSqlExecution } from '@/hooks/use-sql-execution';
 import { extractParameterNames, filterUsedParameters } from '@/utils/sqlParameterExtractor';
 import { filterClausePreview, filterAppliesToPanel, resolveDefaultPanelParams, rawTypeToNavixy } from '@/utils/filterVariables';
 import { getErrorMessage } from '@/utils/errors';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { readPanelDraft, panelDraftHasUnsavedChanges } from './panelDraft';
 
 /**
@@ -61,6 +62,7 @@ interface PanelEditorProps {
 }
 
 export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], dashboard = null }: PanelEditorProps) {
+  const { t } = useLocale();
   // The panel as loaded, in the editor's draft shape. Recomputed only when the
   // panel prop changes, so it holds still while the user edits and can serve as
   // the pristine baseline the Save button compares the live draft against.
@@ -124,12 +126,12 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
   const handleSave = () => {
     // Validate required fields
     if (!title.trim()) {
-      toast.error('Panel Title is required');
+      toast.error(t('report_view.panel_editor.validation.title_required.failure'));
       return;
     }
 
     if (!panelType) {
-      toast.error('Panel Type is required');
+      toast.error(t('report_view.panel_editor.validation.type_required.failure'));
       return;
     }
 
@@ -155,7 +157,9 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
         onClose();
       } catch (err) {
         console.error('Error saving text panel:', err);
-        toast.error(err instanceof Error ? err.message : 'Failed to save panel');
+        toast.error(t('report_view.panel_editor.save_error_toast.paragraph.failure'), {
+          description: err instanceof Error ? err.message : undefined,
+        });
       } finally {
         setSaving(false);
       }
@@ -169,8 +173,10 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
       .filter(([variable, column]) => !column.trim() && localFilters.some((v) => v.name === variable))
       .map(([variable]) => localFilters.find((v) => v.name === variable)?.label || variable);
     if (incompleteFilters.length > 0) {
-      toast.error('Filter needs a column', {
-        description: `Pick a column for ${incompleteFilters.map((n) => `“${n}”`).join(', ')} on the Filters tab, or uncheck it.`,
+      toast.error(t('report_view.panel_editor.incomplete_filter_toast.title'), {
+        description: t('report_view.panel_editor.incomplete_filter_toast.paragraph.instruction', {
+          filters: incompleteFilters.map((n) => `"${n}"`).join(', '),
+        }),
       });
       return;
     }
@@ -238,7 +244,9 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
       onClose();
     } catch (err) {
       console.error('Error saving panel:', err);
-      toast.error(err instanceof Error ? err.message : 'Failed to save panel');
+      toast.error(t('report_view.panel_editor.save_error_toast.paragraph.failure'), {
+        description: err instanceof Error ? err.message : undefined,
+      });
     } finally {
       setSaving(false);
     }
@@ -261,10 +269,10 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
       const list = missing.map((m) => `\${${m}}`).join(', ');
       setTestResults(null);
       setTestError(
-        `No value available for ${list}. Give it a default in the panel's params, add a matching dashboard filter or variable, or remove it.`
+        t('report_view.panel_editor.missing_param.error', { list })
       );
-      toast.error('Missing parameter value', {
-        description: `No value available for ${list}`,
+      toast.error(t('report_view.panel_editor.missing_param_toast.title'), {
+        description: t('report_view.panel_editor.missing_param_toast.paragraph.failure', { list }),
       });
       return;
     }
@@ -296,19 +304,23 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
         if (executionResult.pagination) {
           setPagination(executionResult.pagination);
         }
-        toast.success('Query executed successfully');
+        toast.success(t('report_view.panel_editor.test_query_toast.paragraph.success'));
       } else {
         // Error case - use the hook's error state
         setTestResults(null);
-        setTestError(error || 'Failed to execute query');
+        setTestError(error || t('common.errors.query_failed'));
         if (error) {
-          toast.error(error);
+          toast.error(t('common.errors.query_failed'), {
+            description: error,
+          });
         }
       }
     } catch (err) {
       console.error('Unexpected error executing query:', err);
-      const errorMsg = getErrorMessage(err, 'Failed to execute query');
-      toast.error(errorMsg);
+      const errorMsg = getErrorMessage(err, t('common.errors.query_failed'));
+      toast.error(t('common.errors.query_failed'), {
+        description: getErrorMessage(err),
+      });
       setTestResults(null);
       setTestError(errorMsg);
     }
@@ -418,20 +430,20 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
         <DialogHeader className="px-6 pt-6 pb-4 flex-shrink-0 border-b border-[var(--border)] bg-[var(--surface-1)] rounded-t-lg">
           <DialogTitle className="text-[var(--text-primary)] flex items-center gap-2">
             <Settings className="h-5 w-5" />
-            Edit Panel: {panel.title}
+            {t('report_view.panel_editor.header.title', { title: panel.title })}
           </DialogTitle>
           <DialogDescription className="text-[var(--text-secondary)]">
-            Modify panel properties and SQL query for this visualization
+            {t('report_view.panel_editor.header.subtitle')}
           </DialogDescription>
         </DialogHeader>
 
         <Tabs defaultValue="properties" className="flex-1 flex flex-col min-h-0 overflow-hidden">
           <TabsList className={`mx-6 grid w-[calc(100%-3rem)] flex-shrink-0 ${isTextPanel ? 'grid-cols-2' : nonTextTabCols}`}>
-            <TabsTrigger value="properties">Panel Properties</TabsTrigger>
-            {!isTextPanel && <TabsTrigger value="sql">SQL Query</TabsTrigger>}
-            {isTextPanel && <TabsTrigger value="content">Content</TabsTrigger>}
-            {showFiltersTab && <TabsTrigger value="filters">Filters</TabsTrigger>}
-            {!isTextPanel && <TabsTrigger value="visualization">Visualization Settings</TabsTrigger>}
+            <TabsTrigger value="properties">{t('report_view.panel_editor.properties_tab.menu_item')}</TabsTrigger>
+            {!isTextPanel && <TabsTrigger value="sql">{t('report_view.panel_editor.sql_tab.menu_item')}</TabsTrigger>}
+            {isTextPanel && <TabsTrigger value="content">{t('report_view.panel_editor.content_tab.menu_item')}</TabsTrigger>}
+            {showFiltersTab && <TabsTrigger value="filters">{t('report_view.panel_editor.filters_tab.menu_item')}</TabsTrigger>}
+            {!isTextPanel && <TabsTrigger value="visualization">{t('report_view.panel_editor.visualization_tab.menu_item')}</TabsTrigger>}
           </TabsList>
           
           {/* Panel Properties Tab */}
@@ -440,47 +452,47 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <Label htmlFor="title" className="text-sm font-medium">
-                    Panel Title <span className="text-destructive">*</span>
+                    {t('report_view.panel_editor.title_input.label')} <span className="text-destructive">*</span>
                   </Label>
                   <Input
                     id="title"
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     className="mt-1"
-                    placeholder="Enter panel title"
+                    placeholder={t('report_view.panel_editor.title_input.placeholder.instruction')}
                     required
                   />
                 </div>
                 <div>
                   <Label htmlFor="type" className="text-sm font-medium">
-                    Panel Type <span className="text-destructive">*</span>
+                    {t('report_view.panel_editor.type_input.label')} <span className="text-destructive">*</span>
                   </Label>
                   <Select value={panelType} onValueChange={(value) => setPanelType(value as PanelType)}>
                     <SelectTrigger className="mt-1">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="kpi">KPI</SelectItem>
-                      <SelectItem value="table">Table</SelectItem>
-                      <SelectItem value="barchart">Bar Chart</SelectItem>
-                      <SelectItem value="piechart">Pie Chart</SelectItem>
-                      <SelectItem value="linechart">Line Chart</SelectItem>
-                      <SelectItem value="timeseries">Time Series</SelectItem>
-                      <SelectItem value="geomap">Map</SelectItem>
-                      <SelectItem value="text">Text</SelectItem>
+                      <SelectItem value="kpi">{t('report_view.panel_editor.type_input.kpi_option.menu_item')}</SelectItem>
+                      <SelectItem value="table">{t('report_view.panel_editor.type_input.table_option.menu_item')}</SelectItem>
+                      <SelectItem value="barchart">{t('report_view.panel_editor.type_input.barchart_option.menu_item')}</SelectItem>
+                      <SelectItem value="piechart">{t('report_view.panel_editor.type_input.piechart_option.menu_item')}</SelectItem>
+                      <SelectItem value="linechart">{t('report_view.panel_editor.type_input.linechart_option.menu_item')}</SelectItem>
+                      <SelectItem value="timeseries">{t('report_view.panel_editor.type_input.timeseries_option.menu_item')}</SelectItem>
+                      <SelectItem value="geomap">{t('report_view.panel_editor.type_input.geomap_option.menu_item')}</SelectItem>
+                      <SelectItem value="text">{t('report_view.panel_editor.type_input.text_option.menu_item')}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
               
               <div>
-                <Label htmlFor="description" className="text-sm font-medium">Description</Label>
+                <Label htmlFor="description" className="text-sm font-medium">{t('report_view.panel_editor.description_input.label')}</Label>
                 <Textarea
                   id="description"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="mt-1"
-                  placeholder="Enter panel description (optional)"
+                  placeholder={t('report_view.panel_editor.description_input.placeholder.instruction')}
                   rows={3}
                 />
               </div>
@@ -491,30 +503,30 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
           <TabsContent value="content" className="flex-1 m-0 mt-4 px-6 data-[state=active]:flex flex-col min-h-0 overflow-hidden bg-[var(--surface-1)]">
             <div className="flex-1 flex flex-col min-h-0 gap-4">
               <div>
-                <Label className="text-sm font-medium mb-2 block">Content Mode</Label>
+                <Label className="text-sm font-medium mb-2 block">{t('report_view.panel_editor.content_mode_input.label')}</Label>
                 <RadioGroup value={textMode} onValueChange={(value) => setTextMode(value as 'markdown' | 'html' | 'text')}>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="markdown" id="mode-markdown" />
-                    <Label htmlFor="mode-markdown" className="cursor-pointer">Markdown</Label>
+                    <Label htmlFor="mode-markdown" className="cursor-pointer">{t('report_view.panel_editor.content_mode_input.markdown_option.menu_item')}</Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="html" id="mode-html" />
-                    <Label htmlFor="mode-html" className="cursor-pointer">HTML</Label>
+                    <Label htmlFor="mode-html" className="cursor-pointer">{t('report_view.panel_editor.content_mode_input.html_option.menu_item')}</Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="text" id="mode-text" />
-                    <Label htmlFor="mode-text" className="cursor-pointer">Plain Text</Label>
+                    <Label htmlFor="mode-text" className="cursor-pointer">{t('report_view.panel_editor.content_mode_input.text_option.menu_item')}</Label>
                   </div>
                 </RadioGroup>
                 <p className="text-xs text-muted-foreground mt-2">
-                  {textMode === 'markdown' && 'Use Markdown syntax for formatting (e.g., **bold**, *italic*, `code`)'}
-                  {textMode === 'html' && 'Use HTML tags for formatting'}
-                  {textMode === 'text' && 'Plain text with no formatting'}
+                  {textMode === 'markdown' && t('report_view.panel_editor.content_mode_input.markdown_option.input_hint.instruction')}
+                  {textMode === 'html' && t('report_view.panel_editor.content_mode_input.html_option.input_hint.instruction')}
+                  {textMode === 'text' && t('report_view.panel_editor.content_mode_input.text_option.input_hint.instruction')}
                 </p>
               </div>
               
               <div className="flex-1 flex flex-col min-h-0">
-                <Label className="text-sm font-medium mb-2">Content</Label>
+                <Label className="text-sm font-medium mb-2">{t('report_view.panel_editor.content_input.label')}</Label>
                 <div className="flex-1 border rounded-md overflow-hidden min-h-0">
                   <SqlEditor
                     value={textContent}
@@ -536,10 +548,10 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
               {/* SQL Editor - 50% */}
               <div className="flex-1 flex flex-col min-h-0 basis-0">
                 <div className="flex justify-between items-center mb-2 flex-shrink-0">
-                  <Label className="text-sm font-medium">SQL Query</Label>
+                  <Label className="text-sm font-medium">{t('report_view.panel_editor.sql_input.label')}</Label>
                   <Button onClick={handleTestQuery} disabled={executing || !sql.trim()} size="sm" variant="outline">
                     <Play className="h-3.5 w-3.5 mr-1.5" />
-                    {executing ? 'Testing...' : 'Test Query'}
+                    {executing ? t('common.states.testing') : t('common.actions.test_query.cta')}
                   </Button>
                 </div>
                 <div className="flex-1 border rounded-md overflow-hidden min-h-0">
@@ -561,12 +573,16 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                 )}
 
                 <div className="flex justify-between items-center mb-2 flex-shrink-0">
-                  <Label className="text-sm font-medium">Test Results</Label>
+                  <Label className="text-sm font-medium">{t('common.test_results.label')}</Label>
                   {testResults && (
                     <span className="text-xs text-muted-foreground">
                       {pagination
-                        ? `Showing ${((pagination.page - 1) * pagination.pageSize) + 1}-${Math.min(pagination.page * pagination.pageSize, pagination.total)} of ${pagination.total} row${pagination.total !== 1 ? 's' : ''}`
-                        : `${testResults.rowCount} row${testResults.rowCount !== 1 ? 's' : ''} returned`}
+                        ? t('common.pagination.range.label', {
+                            start: ((pagination.page - 1) * pagination.pageSize) + 1,
+                            end: Math.min(pagination.page * pagination.pageSize, pagination.total),
+                            total: pagination.total,
+                          })
+                        : t('common.pagination.rows_returned.label', { count: testResults.rowCount })}
                     </span>
                   )}
                 </div>
@@ -596,7 +612,7 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                     />
                   ) : (
                     <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-                      Click "Test Query" to see results
+                      {t('common.test_results.paragraph.empty')}
                     </div>
                   )}
                 </div>
@@ -610,17 +626,13 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
               <div className="space-y-4 py-2">
                 <Alert>
                   <AlertDescription className="text-xs">
-                    Bind a dashboard filter to a column in this panel's result. When a viewer changes the
-                    filter, this panel re-queries and shows only the matching rows (a date range, or the
-                    selected values). Your SQL is not modified — the filter is applied by wrapping the query
-                    at run time.
+                    {t('report_view.panel_editor.filters_tab.intro.paragraph')}
                   </AlertDescription>
                 </Alert>
 
                 {detectedColumns.length === 0 && (
                   <p className="text-xs text-muted-foreground">
-                    Tip: run <span className="font-medium">Test Query</span> on the SQL tab to pick from detected
-                    columns. You can also type a column name manually.
+                    {t('report_view.panel_editor.filters_tab.tip.paragraph.instruction')}
                   </p>
                 )}
 
@@ -636,17 +648,17 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                           onCheckedChange={(c) => setFilterEnabled(variable.name, c === true)}
                         />
                         <Label htmlFor={`filter-${variable.name}`} className="cursor-pointer font-medium">
-                          Apply “{variable.label || variable.name}”
+                          {t('report_view.panel_editor.filter_binding.apply_toggle.label', { name: variable.label || variable.name })}
                         </Label>
                       </div>
 
                       {enabled && (
                         <div className="pl-6 space-y-2">
-                          <Label className="text-xs">Filter column</Label>
+                          <Label className="text-xs">{t('report_view.panel_editor.filter_binding.column_input.label')}</Label>
                           {detectedColumns.length > 0 ? (
                             <Select value={column} onValueChange={(val) => setFilterColumn(variable.name, val)}>
                               <SelectTrigger className="h-9 w-72">
-                                <SelectValue placeholder="Select a column" />
+                                <SelectValue placeholder={t('report_view.panel_editor.filter_binding.column_input.placeholder.instruction')} />
                               </SelectTrigger>
                               <SelectContent>
                                 {sortedColumns.map((col) => (
@@ -663,7 +675,7 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                             <Input
                               value={column}
                               onChange={(e) => setFilterColumn(variable.name, e.target.value)}
-                              placeholder="e.g. event_time / status"
+                              placeholder={t('report_view.panel_editor.filter_binding.column_manual_input.placeholder.instruction')}
                               className="h-9 w-72 font-mono"
                             />
                           )}
@@ -672,20 +684,19 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                               WHERE {filterClausePreview(variable, column, rawTypeToNavixy(columnTypeOf(column)))}
                             </p>
                           ) : (
-                            <p className="text-xs text-amber-600">Pick a column to activate this filter.</p>
+                            <p className="text-xs text-amber-600">{t('report_view.panel_editor.filter_binding.no_column.paragraph.instruction')}</p>
                           )}
                           {column && detectedColumns.length > 0 && !detectedColumns.includes(column) && (
                             <p className="text-xs text-amber-600">
-                              “{column}” isn't one of this query's result columns
-                              {detectedColumns.length <= 8 ? ` (${detectedColumns.join(', ')})` : ''}. The
-                              filter matches on output columns, so it won't apply — add it to the SELECT
-                              output or pick a listed column.
+                              {t('report_view.panel_editor.filter_binding.unknown_column.paragraph.warning', {
+                                column,
+                                columns: detectedColumns.length <= 8 ? ` (${detectedColumns.join(', ')})` : '',
+                              })}
                             </p>
                           )}
                           {column && detectedColumns.filter((c) => c === column).length > 1 && (
                             <p className="text-xs text-amber-600">
-                              “{column}” is output more than once by this query. Alias one of them in your
-                              SQL, or the filter fails with an “ambiguous column” error.
+                              {t('report_view.panel_editor.filter_binding.duplicate_column.paragraph.warning', { column })}
                             </p>
                           )}
                           {column &&
@@ -693,9 +704,12 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                             columnTypeOf(column) &&
                             !/date|time/i.test(columnTypeOf(column)) && (
                               <p className="text-xs text-amber-600">
-                                “{column}” is {columnTypeOf(column)}, not a date/timestamp — a date range
-                                won't match formatted text values. Prefer a real time column, or reference{' '}
-                                {'${'}{variable.name}_from{'}'} / {'${'}{variable.name}_to{'}'} inside the SQL.
+                                {t('report_view.panel_editor.filter_binding.non_date_column.paragraph.warning', {
+                                  column,
+                                  type: columnTypeOf(column),
+                                  from: `\${${variable.name}_from}`,
+                                  to: `\${${variable.name}_to}`,
+                                })}
                               </p>
                             )}
                         </div>
@@ -723,11 +737,11 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
         <div className="flex justify-end gap-2 px-6 py-4 border-t border-[var(--border)] flex-shrink-0 bg-[var(--surface-1)] rounded-b-lg">
           <Button onClick={onClose} variant="ghost" size="sm">
             <X className="h-4 w-4 mr-2" />
-            Cancel
+            {t('common.actions.cancel.cta')}
           </Button>
           <Button onClick={handleSave} disabled={saving || !isDirty} size="sm">
             <Save className="h-4 w-4 mr-2" />
-            {saving ? 'Saving...' : 'Save Changes'}
+            {saving ? t('common.actions.save.cta.loading') : t('common.actions.save_changes.cta')}
           </Button>
         </div>
       </DialogContent>

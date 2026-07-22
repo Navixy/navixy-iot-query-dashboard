@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { DashboardRenderer } from '@/components/reports/DashboardRenderer';
 import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
 import { apiService } from '@/services/api';
@@ -105,6 +106,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
   applyAction?: ReactNode;
   onPreviewComplete?: (status: PanelLoadStatus, schema: unknown) => void;
 }) {
+  const { t } = useLocale();
   // null until the renderer reports — NOT {0,0,0,0}, which reads as "this dashboard
   // has no data panels" and would be the first thing every preview says.
   const [status, setStatus] = useState<PanelLoadStatus | null>(null);
@@ -193,7 +195,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
   // rest of the app relies on.
   useEffect(() => () => useEditorStore.getState().reset(), []);
 
-  const banner = describePanelStatus(status);
+  const banner = describePanelStatus(status, t);
 
   return (
     <>
@@ -209,7 +211,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
             which is not something a header can convey. The card the user came from
             already states the schema count. (!64 review round 4, finding 2) */}
         <DialogDescription className="text-left">
-          Previewed against your data. Nothing is saved until you apply.
+          {t('ai_chat.preview_dialog.header.subtitle')}
         </DialogDescription>
         {/* The banner lives in the HEADER, which is shrink-0 and therefore visible
             however far the grid below is scrolled. A failure the user does not notice
@@ -241,7 +243,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
                 text change is not reliably announced) and simply holds still while
                 busy. (!64 review round 4, finding 9) */}
             <span role="status" aria-live="polite" className="sr-only">
-              {banner.busy ? 'Loading panels…' : banner.text}
+              {banner.busy ? t('ai_chat.preview_dialog.status.paragraph.loading') : banner.text}
             </span>
           </div>
         )}
@@ -255,11 +257,10 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
             // truth — and unlock Apply on the strength of it.
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-destructive">
-                Your global variables could not be read, so this preview would not run
-                the way the saved dashboard will. Nothing has been executed.
+                {t('ai_chat.preview_dialog.globals_error.paragraph.failure')}
               </p>
               <Button variant="secondary" size="sm" onClick={() => setGlobalsAttempt((n) => n + 1)}>
-                Try again
+                {t('ai_chat.preview_dialog.globals_error.retry_button.cta')}
               </Button>
             </div>
           ) : (
@@ -281,7 +282,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
           )
         ) : (
           <p className="text-sm text-destructive">
-            This result could not be read as a dashboard. Ask the assistant to rebuild it.
+            {t('ai_chat.preview_dialog.unreadable_result.paragraph.failure')}
           </p>
         )}
       </div>
@@ -291,8 +292,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
             WHAT happened, this says why it matters. D17: results are cached for five
             minutes, but errors are never cached, so a failing preview always re-runs. */}
         <p className="text-left text-xs text-muted-foreground">
-          AI-generated SQL can reference columns that do not exist. Check that each panel
-          renders before applying. Data may be cached for up to 5 minutes.
+          {t('ai_chat.preview_dialog.footer_note.paragraph')}
         </p>
         {applyAction}
       </DialogFooter>

@@ -5,6 +5,7 @@ import { Switch } from '@/components/ui/switch';
 import { resolveSeriesColumnSetting, SERIES_COLUMN_INDEX } from '@/lib/chartSeries';
 import type { SeriesColumnSetting } from '@/lib/chartSeries';
 import type { PanelType, VisualizationConfig } from '@/types/dashboard-types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface VisualizationSettingsProps {
   panelType: PanelType;
@@ -51,6 +52,7 @@ interface SeriesColumnFieldProps {
  * being edited — for everything else.
  */
 function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps) {
+  const { t } = useLocale();
   // Columns 1 and 2 are the axis and the value, so only a third or later column
   // can group the result.
   const groupable = columns
@@ -76,8 +78,14 @@ function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps)
   /** How often `name` appears among the result's columns. */
   const occurrences = (name: string) => columns.filter((other) => other === name).length;
 
-  const labelFor = ({ name, index }: { name: string; index: number }) =>
-    name && occurrences(name) === 1 ? name : `${ name || 'column' } (index ${ index })`;
+  const labelFor = ({ name, index }: { name: string; index: number }) => {
+    if (name && occurrences(name) === 1) return name;
+    // Two whole keys rather than a keyed "column" spliced into a keyed sentence:
+    // one translated phrase is never inserted into another.
+    return name
+      ? t('report_view.visualization_settings.series_column_input.column_option.menu_item.named', { name, index })
+      : t('report_view.visualization_settings.series_column_input.column_option.menu_item.unnamed', { index });
+  };
 
   const pick = (option: string) => {
     if (option === AUTO_SERIES_COLUMN || option === NONE_SERIES_COLUMN) {
@@ -96,19 +104,30 @@ function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps)
   return (
     <div>
       <Label htmlFor="seriesColumn" className="text-sm font-medium">
-        Series Column
+        {t('report_view.visualization_settings.series_column_input.label')}
       </Label>
       <Select value={current} onValueChange={pick}>
         <SelectTrigger className="mt-1" id="seriesColumn">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={AUTO_SERIES_COLUMN}>Auto (detect from data)</SelectItem>
-          <SelectItem value={NONE_SERIES_COLUMN}>None — one series per value column</SelectItem>
+          <SelectItem value={AUTO_SERIES_COLUMN}>
+            {t('report_view.visualization_settings.series_column_input.auto_option.menu_item')}
+          </SelectItem>
+          <SelectItem value={NONE_SERIES_COLUMN}>
+            {t('report_view.visualization_settings.series_column_input.none_option.menu_item')}
+          </SelectItem>
           {unresolved && (
             <SelectItem value={UNRESOLVED_OPTION}>
-              {/^\d+$/.test(raw) ? `column index ${ raw }` : raw}
-              {columns.length > 0 ? ' (not in this query)' : ''}
+              {/* One whole sentence per case — the "(not in this query)" suffix is part
+                  of the keyed string, never concatenated onto a translated fragment. */}
+              {/^\d+$/.test(raw)
+                ? columns.length > 0
+                  ? t('report_view.visualization_settings.series_column_input.unresolved_option.menu_item.index_missing', { value: raw })
+                  : t('report_view.visualization_settings.series_column_input.unresolved_option.menu_item.index', { value: raw })
+                : columns.length > 0
+                  ? t('report_view.visualization_settings.series_column_input.unresolved_option.menu_item.name_missing', { value: raw })
+                  : raw}
             </SelectItem>
           )}
           {groupable.map((column) => (
@@ -119,8 +138,7 @@ function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps)
         </SelectContent>
       </Select>
       <p className="text-xs text-[var(--text-secondary)] mt-1">
-        Which column splits the result into series. Set it when a numeric grouping
-        key (a device id) is read as a second metric, or vice versa.
+        {t('report_view.visualization_settings.series_column_input.input_hint.instruction')}
       </p>
       {/* No result columns to list yet: name one, the way the filter tab does. */}
       {groupable.length === 0 && (
@@ -136,12 +154,14 @@ function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps)
               // Anything else is kept verbatim, so a name can contain spaces.
               return onChange(/^\d+$/.test(typed) ? Number(typed) : e.target.value);
             }}
-            placeholder="e.g. device_id, or a column index"
+            placeholder={t('report_view.visualization_settings.series_column_input.placeholder.instruction')}
             className="mt-2 h-9 font-mono"
           />
+          {/* The control name is quoted inside the keyed sentence rather than wrapped in
+              a <span> — the runtime has no rich-text interpolation, and a sentence split
+              around markup cannot be translated as one unit. */}
           <p className="text-xs text-[var(--text-secondary)] mt-1">
-            Run <span className="font-medium">Test Query</span> on the SQL tab to pick
-            from this query's columns instead.
+            {t('report_view.visualization_settings.series_column_input.no_columns_hint.instruction')}
           </p>
         </>
       )}
@@ -150,6 +170,7 @@ function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps)
 }
 
 export function VisualizationSettings({ panelType, visualization, onChange, columns = [] }: VisualizationSettingsProps) {
+  const { t } = useLocale();
   const settings = visualization || {};
 
   const updateSetting = <K extends keyof VisualizationConfig>(
@@ -169,15 +190,15 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
     return (
       <div className="space-y-6">
         <div className="space-y-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Table Display Options</h3>
-          
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t('report_view.visualization_settings.table_display.header.title')}</h3>
+
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showHeader" className="text-sm font-medium">
-                Show Header
+                {t('report_view.visualization_settings.table_display.show_header_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Display column headers
+                {t('report_view.visualization_settings.table_display.show_header_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -190,10 +211,10 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="sortable" className="text-sm font-medium">
-                Sortable Columns
+                {t('report_view.visualization_settings.table_display.sortable_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Enable column sorting
+                {t('report_view.visualization_settings.table_display.sortable_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -206,10 +227,10 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showPagination" className="text-sm font-medium">
-                Show Pagination
+                {t('report_view.visualization_settings.table_display.show_pagination_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Display pagination controls
+                {t('report_view.visualization_settings.table_display.show_pagination_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -222,10 +243,10 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showTotals" className="text-sm font-medium">
-                Show Totals Row
+                {t('report_view.visualization_settings.table_display.show_totals_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Display totals row at the bottom or top
+                {t('report_view.visualization_settings.table_display.show_totals_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -237,11 +258,11 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
         </div>
 
         <div className="space-y-4 border-t border-[var(--border)] pt-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Table Configuration</h3>
-          
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t('report_view.visualization_settings.table_config.header.title')}</h3>
+
           <div>
             <Label htmlFor="pageSize" className="text-sm font-medium">
-              Rows per Page
+              {t('report_view.visualization_settings.table_config.page_size_input.label')}
             </Label>
             <Input
               id="pageSize"
@@ -253,13 +274,13 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
               className="mt-1"
             />
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Number of rows displayed per page (default: 25)
+              {t('report_view.visualization_settings.table_config.page_size_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="columnWidth" className="text-sm font-medium">
-              Column Width Strategy
+              {t('report_view.visualization_settings.table_config.column_width_input.label')}
             </Label>
             <Select
               value={settings.columnWidth || 'auto'}
@@ -269,19 +290,19 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="auto">Auto</SelectItem>
-                <SelectItem value="equal">Equal</SelectItem>
-                <SelectItem value="fit">Fit Content</SelectItem>
+                <SelectItem value="auto">{t('report_view.visualization_settings.table_config.column_width_input.auto_option.menu_item')}</SelectItem>
+                <SelectItem value="equal">{t('report_view.visualization_settings.table_config.column_width_input.equal_option.menu_item')}</SelectItem>
+                <SelectItem value="fit">{t('report_view.visualization_settings.table_config.column_width_input.fit_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              How column widths are determined (default: auto)
+              {t('report_view.visualization_settings.table_config.column_width_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="rowHighlighting" className="text-sm font-medium">
-              Row Highlighting
+              {t('report_view.visualization_settings.table_config.row_highlighting_input.label')}
             </Label>
             <Select
               value={settings.rowHighlighting || 'none'}
@@ -291,21 +312,21 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                <SelectItem value="alternating">Alternating Rows</SelectItem>
-                <SelectItem value="hover">On Hover</SelectItem>
-                <SelectItem value="both">Both</SelectItem>
+                <SelectItem value="none">{t('report_view.visualization_settings.table_config.row_highlighting_input.none_option.menu_item')}</SelectItem>
+                <SelectItem value="alternating">{t('report_view.visualization_settings.table_config.row_highlighting_input.alternating_option.menu_item')}</SelectItem>
+                <SelectItem value="hover">{t('report_view.visualization_settings.table_config.row_highlighting_input.hover_option.menu_item')}</SelectItem>
+                <SelectItem value="both">{t('report_view.visualization_settings.table_config.row_highlighting_input.both_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Row highlighting mode (default: none)
+              {t('report_view.visualization_settings.table_config.row_highlighting_input.input_hint.instruction')}
             </p>
           </div>
 
           {settings.showTotals && (
             <div>
               <Label htmlFor="totalsRow" className="text-sm font-medium">
-                Totals Row Position
+                {t('report_view.visualization_settings.table_config.totals_row_input.label')}
               </Label>
               <Select
                 value={settings.totalsRow || 'bottom'}
@@ -315,12 +336,12 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="top">Top</SelectItem>
-                  <SelectItem value="bottom">Bottom</SelectItem>
+                  <SelectItem value="top">{t('report_view.visualization_settings.table_config.totals_row_input.top_option.menu_item')}</SelectItem>
+                  <SelectItem value="bottom">{t('report_view.visualization_settings.table_config.totals_row_input.bottom_option.menu_item')}</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-[var(--text-secondary)] mt-1">
-                Position of the totals row (default: bottom)
+                {t('report_view.visualization_settings.table_config.totals_row_input.input_hint.instruction')}
               </p>
             </div>
           )}
@@ -334,23 +355,23 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
     return (
       <div className="space-y-6">
         <div className="space-y-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Bar Chart Display Options</h3>
-          
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t('report_view.visualization_settings.bar_display.header.title')}</h3>
+
           <div>
             <Label htmlFor="orientation" className="text-sm font-medium">
-              Orientation
+              {t('report_view.visualization_settings.bar_display.orientation_input.label')}
             </Label>
-            {/* 
+            {/*
               NOTE: Orientation is hardcoded to 'vertical' for now.
               Horizontal bar charts have rendering issues with Recharts that need to be resolved.
               The renderer ignores the orientation setting and always renders vertical bars.
               See DashboardRenderer.tsx renderBarChartPanel for details.
             */}
             <div className="mt-1 px-3 py-2 bg-[var(--surface-2)] border border-[var(--border)] rounded-md text-sm text-[var(--text-secondary)]">
-              Vertical
+              {t('report_view.visualization_settings.bar_display.orientation_input.vertical_value.label')}
             </div>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Bar direction (currently fixed to vertical)
+              {t('report_view.visualization_settings.bar_display.orientation_input.input_hint.instruction')}
             </p>
           </div>
 
@@ -362,7 +383,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
 
           <div>
             <Label htmlFor="stacking" className="text-sm font-medium">
-              Stacking Mode
+              {t('report_view.visualization_settings.bar_display.stacking_input.label')}
             </Label>
             <Select
               value={settings.stacking || 'none'}
@@ -372,23 +393,23 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                <SelectItem value="stacked">Stacked</SelectItem>
-                <SelectItem value="percent">Percent</SelectItem>
+                <SelectItem value="none">{t('report_view.visualization_settings.bar_display.stacking_input.none_option.menu_item')}</SelectItem>
+                <SelectItem value="stacked">{t('report_view.visualization_settings.bar_display.stacking_input.stacked_option.menu_item')}</SelectItem>
+                <SelectItem value="percent">{t('report_view.visualization_settings.bar_display.stacking_input.percent_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Stacking mode for grouped bars (default: none)
+              {t('report_view.visualization_settings.bar_display.stacking_input.input_hint.instruction')}
             </p>
           </div>
 
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showValues" className="text-sm font-medium">
-                Show Values
+                {t('report_view.visualization_settings.bar_display.show_values_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Display value labels on bars
+                {t('report_view.visualization_settings.bar_display.show_values_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -400,7 +421,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
 
           <div>
             <Label htmlFor="sortOrder" className="text-sm font-medium">
-              Sort Order
+              {t('report_view.visualization_settings.bar_display.sort_order_input.label')}
             </Label>
             <Select
               value={settings.sortOrder || 'none'}
@@ -410,19 +431,19 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                <SelectItem value="asc">Ascending</SelectItem>
-                <SelectItem value="desc">Descending</SelectItem>
+                <SelectItem value="none">{t('report_view.visualization_settings.bar_display.sort_order_input.none_option.menu_item')}</SelectItem>
+                <SelectItem value="asc">{t('report_view.visualization_settings.bar_display.sort_order_input.asc_option.menu_item')}</SelectItem>
+                <SelectItem value="desc">{t('report_view.visualization_settings.bar_display.sort_order_input.desc_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Sort bars by value (default: none)
+              {t('report_view.visualization_settings.bar_display.sort_order_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="barSpacing" className="text-sm font-medium">
-              Bar Spacing
+              {t('report_view.visualization_settings.bar_display.bar_spacing_input.label')}
             </Label>
             <Input
               id="barSpacing"
@@ -435,17 +456,17 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
               className="mt-1"
             />
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Spacing between bars (0-1, default: 0.2)
+              {t('report_view.visualization_settings.bar_display.bar_spacing_input.input_hint.instruction')}
             </p>
           </div>
         </div>
 
         <div className="space-y-4 border-t border-[var(--border)] pt-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Color & Legend</h3>
-          
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t('report_view.visualization_settings.color_legend.header.title')}</h3>
+
           <div>
             <Label htmlFor="colorPalette" className="text-sm font-medium">
-              Color Palette
+              {t('report_view.visualization_settings.color_legend.color_palette_input.label')}
             </Label>
             <Select
               value={settings.colorPalette || 'classic'}
@@ -455,24 +476,24 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="classic">Classic</SelectItem>
-                <SelectItem value="modern">Modern</SelectItem>
-                <SelectItem value="pastel">Pastel</SelectItem>
-                <SelectItem value="vibrant">Vibrant</SelectItem>
+                <SelectItem value="classic">{t('report_view.visualization_settings.color_legend.color_palette_input.classic_option.menu_item')}</SelectItem>
+                <SelectItem value="modern">{t('report_view.visualization_settings.color_legend.color_palette_input.modern_option.menu_item')}</SelectItem>
+                <SelectItem value="pastel">{t('report_view.visualization_settings.color_legend.color_palette_input.pastel_option.menu_item')}</SelectItem>
+                <SelectItem value="vibrant">{t('report_view.visualization_settings.color_legend.color_palette_input.vibrant_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Color scheme (default: classic)
+              {t('report_view.visualization_settings.color_legend.color_palette_input.input_hint.instruction')}
             </p>
           </div>
 
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showLegend" className="text-sm font-medium">
-                Show Legend
+                {t('report_view.visualization_settings.color_legend.show_legend_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Show legend when series column present
+                {t('report_view.visualization_settings.color_legend.show_legend_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -485,7 +506,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
           {settings.showLegend !== false && (
             <div>
               <Label htmlFor="legendPosition" className="text-sm font-medium">
-                Legend Position
+                {t('report_view.visualization_settings.color_legend.legend_position_input.label')}
               </Label>
               <Select
                 value={settings.legendPosition || 'bottom'}
@@ -495,14 +516,14 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="top">Top</SelectItem>
-                  <SelectItem value="bottom">Bottom</SelectItem>
-                  <SelectItem value="left">Left</SelectItem>
-                  <SelectItem value="right">Right</SelectItem>
+                  <SelectItem value="top">{t('report_view.visualization_settings.color_legend.legend_position_input.top_option.menu_item')}</SelectItem>
+                  <SelectItem value="bottom">{t('report_view.visualization_settings.color_legend.legend_position_input.bottom_option.menu_item')}</SelectItem>
+                  <SelectItem value="left">{t('report_view.visualization_settings.color_legend.legend_position_input.left_option.menu_item')}</SelectItem>
+                  <SelectItem value="right">{t('report_view.visualization_settings.color_legend.legend_position_input.right_option.menu_item')}</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-[var(--text-secondary)] mt-1">
-                Legend placement (default: bottom)
+                {t('report_view.visualization_settings.color_legend.legend_position_input.input_hint.instruction')}
               </p>
             </div>
           )}
@@ -516,7 +537,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
     return (
       <div className="space-y-6">
         <div className="space-y-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Line Chart Display Options</h3>
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t('report_view.visualization_settings.line_display.header.title')}</h3>
 
           <SeriesColumnField
             value={settings.seriesColumn}
@@ -526,7 +547,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
 
           <div>
             <Label htmlFor="lineStyle" className="text-sm font-medium">
-              Line Style
+              {t('report_view.visualization_settings.line_display.line_style_input.label')}
             </Label>
             <Select
               value={settings.lineStyle || 'solid'}
@@ -536,19 +557,19 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="solid">Solid</SelectItem>
-                <SelectItem value="dashed">Dashed</SelectItem>
-                <SelectItem value="dotted">Dotted</SelectItem>
+                <SelectItem value="solid">{t('report_view.visualization_settings.line_display.line_style_input.solid_option.menu_item')}</SelectItem>
+                <SelectItem value="dashed">{t('report_view.visualization_settings.line_display.line_style_input.dashed_option.menu_item')}</SelectItem>
+                <SelectItem value="dotted">{t('report_view.visualization_settings.line_display.line_style_input.dotted_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Line style (default: solid)
+              {t('report_view.visualization_settings.line_display.line_style_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="lineWidth" className="text-sm font-medium">
-              Line Width
+              {t('report_view.visualization_settings.line_display.line_width_input.label')}
             </Label>
             <Input
               id="lineWidth"
@@ -561,13 +582,13 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
               className="mt-1"
             />
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Line thickness in pixels (default: 2)
+              {t('report_view.visualization_settings.line_display.line_width_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="showPoints" className="text-sm font-medium">
-              Show Points
+              {t('report_view.visualization_settings.line_display.show_points_input.label')}
             </Label>
             <Select
               value={settings.showPoints || 'auto'}
@@ -577,19 +598,19 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="always">Always</SelectItem>
-                <SelectItem value="auto">Auto</SelectItem>
-                <SelectItem value="never">Never</SelectItem>
+                <SelectItem value="always">{t('report_view.visualization_settings.line_display.show_points_input.always_option.menu_item')}</SelectItem>
+                <SelectItem value="auto">{t('report_view.visualization_settings.line_display.show_points_input.auto_option.menu_item')}</SelectItem>
+                <SelectItem value="never">{t('report_view.visualization_settings.line_display.show_points_input.never_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              When to show data points (default: auto - shows when ≤50 points)
+              {t('report_view.visualization_settings.line_display.show_points_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="pointSize" className="text-sm font-medium">
-              Point Size
+              {t('report_view.visualization_settings.line_display.point_size_input.label')}
             </Label>
             <Input
               id="pointSize"
@@ -602,13 +623,13 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
               className="mt-1"
             />
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Size of data points in pixels (default: 5)
+              {t('report_view.visualization_settings.line_display.point_size_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="interpolation" className="text-sm font-medium">
-              Interpolation
+              {t('report_view.visualization_settings.line_display.interpolation_input.label')}
             </Label>
             <Select
               value={settings.interpolation || 'linear'}
@@ -618,19 +639,19 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="linear">Linear</SelectItem>
-                <SelectItem value="step">Step</SelectItem>
-                <SelectItem value="smooth">Smooth</SelectItem>
+                <SelectItem value="linear">{t('report_view.visualization_settings.line_display.interpolation_input.linear_option.menu_item')}</SelectItem>
+                <SelectItem value="step">{t('report_view.visualization_settings.line_display.interpolation_input.step_option.menu_item')}</SelectItem>
+                <SelectItem value="smooth">{t('report_view.visualization_settings.line_display.interpolation_input.smooth_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Line interpolation method (default: linear)
+              {t('report_view.visualization_settings.line_display.interpolation_input.input_hint.instruction')}
             </p>
           </div>
 
           <div>
             <Label htmlFor="fillArea" className="text-sm font-medium">
-              Fill Area
+              {t('report_view.visualization_settings.line_display.fill_area_input.label')}
             </Label>
             <Select
               value={settings.fillArea || 'none'}
@@ -640,23 +661,23 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                <SelectItem value="below">Below</SelectItem>
-                <SelectItem value="above">Above</SelectItem>
+                <SelectItem value="none">{t('report_view.visualization_settings.line_display.fill_area_input.none_option.menu_item')}</SelectItem>
+                <SelectItem value="below">{t('report_view.visualization_settings.line_display.fill_area_input.below_option.menu_item')}</SelectItem>
+                <SelectItem value="above">{t('report_view.visualization_settings.line_display.fill_area_input.above_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Fill area under/over line (default: none)
+              {t('report_view.visualization_settings.line_display.fill_area_input.input_hint.instruction')}
             </p>
           </div>
 
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showGrid" className="text-sm font-medium">
-                Show Grid
+                {t('report_view.visualization_settings.line_display.show_grid_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Show grid lines
+                {t('report_view.visualization_settings.line_display.show_grid_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -668,11 +689,11 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
         </div>
 
         <div className="space-y-4 border-t border-[var(--border)] pt-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Color & Legend</h3>
-          
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t('report_view.visualization_settings.color_legend.header.title')}</h3>
+
           <div>
             <Label htmlFor="colorPalette" className="text-sm font-medium">
-              Color Palette
+              {t('report_view.visualization_settings.color_legend.color_palette_input.label')}
             </Label>
             <Select
               value={settings.colorPalette || 'classic'}
@@ -682,24 +703,24 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="classic">Classic</SelectItem>
-                <SelectItem value="modern">Modern</SelectItem>
-                <SelectItem value="pastel">Pastel</SelectItem>
-                <SelectItem value="vibrant">Vibrant</SelectItem>
+                <SelectItem value="classic">{t('report_view.visualization_settings.color_legend.color_palette_input.classic_option.menu_item')}</SelectItem>
+                <SelectItem value="modern">{t('report_view.visualization_settings.color_legend.color_palette_input.modern_option.menu_item')}</SelectItem>
+                <SelectItem value="pastel">{t('report_view.visualization_settings.color_legend.color_palette_input.pastel_option.menu_item')}</SelectItem>
+                <SelectItem value="vibrant">{t('report_view.visualization_settings.color_legend.color_palette_input.vibrant_option.menu_item')}</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-xs text-[var(--text-secondary)] mt-1">
-              Color scheme (default: classic)
+              {t('report_view.visualization_settings.color_legend.color_palette_input.input_hint.instruction')}
             </p>
           </div>
 
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="showLegend" className="text-sm font-medium">
-                Show Legend
+                {t('report_view.visualization_settings.color_legend.show_legend_toggle.label')}
               </Label>
               <p className="text-xs text-[var(--text-secondary)]">
-                Show legend when series column present
+                {t('report_view.visualization_settings.color_legend.show_legend_toggle.sublabel')}
               </p>
             </div>
             <Switch
@@ -712,7 +733,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
           {settings.showLegend !== false && (
             <div>
               <Label htmlFor="legendPosition" className="text-sm font-medium">
-                Legend Position
+                {t('report_view.visualization_settings.color_legend.legend_position_input.label')}
               </Label>
               <Select
                 value={settings.legendPosition || 'bottom'}
@@ -722,14 +743,14 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="top">Top</SelectItem>
-                  <SelectItem value="bottom">Bottom</SelectItem>
-                  <SelectItem value="left">Left</SelectItem>
-                  <SelectItem value="right">Right</SelectItem>
+                  <SelectItem value="top">{t('report_view.visualization_settings.color_legend.legend_position_input.top_option.menu_item')}</SelectItem>
+                  <SelectItem value="bottom">{t('report_view.visualization_settings.color_legend.legend_position_input.bottom_option.menu_item')}</SelectItem>
+                  <SelectItem value="left">{t('report_view.visualization_settings.color_legend.legend_position_input.left_option.menu_item')}</SelectItem>
+                  <SelectItem value="right">{t('report_view.visualization_settings.color_legend.legend_position_input.right_option.menu_item')}</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-[var(--text-secondary)] mt-1">
-                Legend placement (default: bottom)
+                {t('report_view.visualization_settings.color_legend.legend_position_input.input_hint.instruction')}
               </p>
             </div>
           )}
@@ -742,9 +763,8 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
   return (
     <div className="space-y-4">
       <p className="text-sm text-[var(--text-secondary)]">
-        Visualization settings for {panelType} panels are not yet implemented.
+        {t('report_view.visualization_settings.unsupported.paragraph', { type: panelType })}
       </p>
     </div>
   );
 }
-

@@ -13,11 +13,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SearchInput } from '@/components/ui/SearchInput';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export function AppHeader() {
   const { signOut, user } = useAuth();
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
+  const { t } = useLocale();
 
   return (
     <header data-app-header className="h-[var(--app-header-height)] bg-[var(--surface-1)] fixed top-0 left-0 right-0 z-50 border-b border-[var(--border)]" style={{ width: '100vw' }}>
@@ -25,7 +27,7 @@ export function AppHeader() {
         <div className="flex items-center gap-4">
           <SidebarTrigger className="hover:bg-surface-3 transition-colors relative z-[60]" />
           <div className="hidden md:block">
-            <h1 className="text-lg font-semibold text-text-primary">Navixy Reports</h1>
+            <h1 className="text-lg font-semibold text-text-primary">{t('common.branding.title')}</h1>
           </div>
         </div>
         
@@ -56,7 +58,7 @@ export function AppHeader() {
                 </div>
                 <div className="hidden sm:block text-left">
                   <div className="text-sm font-medium text-text-primary">{user?.email}</div>
-                  <div className="text-xs text-text-muted capitalize">{user?.role}</div>
+                  <div className="text-xs text-text-muted">{user?.role ? t(`common.roles.${user.role}`) : null}</div>
                 </div>
               </Button>
             </DropdownMenuTrigger>
@@ -64,19 +66,19 @@ export function AppHeader() {
               <DropdownMenuLabel>
                 <div className="flex flex-col space-y-1">
                   <span className="text-sm font-medium text-text-primary">{user?.email}</span>
-                  <span className="text-xs text-text-muted capitalize">{user?.role}</span>
+                  <span className="text-xs text-text-muted">{user?.role ? t(`common.roles.${user.role}`) : null}</span>
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               {user?.role === 'admin' && (
                 <DropdownMenuItem onClick={() => navigate('/app/settings')} className="cursor-pointer">
                   <Settings className="mr-2 h-4 w-4" />
-                  Settings
+                  {t('app_shell.header.settings_option.menu_item')}
                 </DropdownMenuItem>
               )}
               <DropdownMenuItem onClick={signOut} className="text-danger cursor-pointer">
                 <LogOut className="mr-2 h-4 w-4" />
-                Sign Out
+                {t('app_shell.header.sign_out_option.menu_item')}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

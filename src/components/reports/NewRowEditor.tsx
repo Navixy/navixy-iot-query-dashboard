@@ -10,6 +10,7 @@ import { Save, X } from 'lucide-react';
 import { SqlEditor } from './SqlEditor';
 import { toast } from 'sonner';
 import { getErrorMessage } from '@/utils/errors';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { Row, TilesRow, TableRow, AnnotationRow, ChartsRow, TileVisual, TableVisual, AnnotationVisual, BarVisual, PieVisual } from '@/types/report-schema';
 
 interface NewRowEditorProps {
@@ -22,6 +23,7 @@ interface NewRowEditorProps {
 const DEFAULT_SQL = 'SELECT 1 as value, \'Sample Data\' as label';
 
 export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorProps) {
+  const { t } = useLocale();
   const [title, setTitle] = useState('');
   const [label, setLabel] = useState('');
   const [sql, setSql] = useState(DEFAULT_SQL);
@@ -38,12 +40,12 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
 
   const handleSave = async () => {
     if (!label.trim()) {
-      toast.error('Label is required');
+      toast.error(t('common.validation.label_required'));
       return;
     }
 
     if (rowType !== 'annotation' && !sql.trim()) {
-      toast.error('SQL query is required');
+      toast.error(t('report_view.new_row_editor.validation.sql_required.failure'));
       return;
     }
 
@@ -96,7 +98,7 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
 
         case 'charts': {
           if (!categoryField.trim() || !valueField.trim()) {
-            toast.error('Category field and value field are required for charts');
+            toast.error(t('report_view.new_row_editor.validation.chart_fields_required.failure'));
             return;
           }
 
@@ -183,10 +185,12 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
       setCategoryField('');
       setValueField('');
 
-      toast.success('Row added successfully');
+      toast.success(t('report_view.new_row_editor.save_toast.paragraph.success'));
     } catch (error) {
       console.error('Error creating new row:', error);
-      toast.error(getErrorMessage(error, 'Failed to create row'));
+      toast.error(t('report_view.new_row_editor.save_toast.paragraph.failure'), {
+        description: getErrorMessage(error),
+      });
     } finally {
       setSaving(false);
     }
@@ -209,9 +213,9 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Add New {rowType.charAt(0).toUpperCase() + rowType.slice(1)} Row</DialogTitle>
+          <DialogTitle>{t('report_view.new_row_editor.header.title', { type: t(`report_view.new_row_editor.row_type.${rowType}.label`) })}</DialogTitle>
           <DialogDescription>
-            Configure your new {rowType} row. Fill in the required fields and customize as needed.
+            {t('report_view.new_row_editor.header.subtitle', { type: t(`report_view.new_row_editor.row_type.${rowType}.label`) })}
           </DialogDescription>
         </DialogHeader>
 
@@ -219,24 +223,24 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
           {/* Row Title and Subtitle */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="title">Row Title (Optional)</Label>
+              <Label htmlFor="title">{t('report_view.new_row_editor.title_input.label')}</Label>
               <Input
                 id="title"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Enter row title"
+                placeholder={t('report_view.new_row_editor.title_input.placeholder.instruction')}
               />
             </div>
           </div>
 
           {/* Element Label */}
           <div className="space-y-2">
-            <Label htmlFor="label">Element Label *</Label>
+            <Label htmlFor="label">{t('report_view.new_row_editor.element_label_input.label')} *</Label>
             <Input
               id="label"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
-              placeholder="Enter element label"
+              placeholder={t('report_view.new_row_editor.element_label_input.placeholder.instruction')}
               required
             />
           </div>
@@ -245,12 +249,12 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
           {rowType === 'annotation' ? (
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="annotation-text">Annotation Text *</Label>
+                <Label htmlFor="annotation-text">{t('report_view.new_row_editor.annotation_text_input.label')} *</Label>
                 <Textarea
                   id="annotation-text"
                   value={annotationText}
                   onChange={(e) => setAnnotationText(e.target.value)}
-                  placeholder="Enter your annotation text..."
+                  placeholder={t('report_view.new_row_editor.annotation_text_input.placeholder.instruction')}
                   rows={6}
                   required
                 />
@@ -263,49 +267,49 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
                   onChange={(e) => setIsMarkdown(e.target.checked)}
                   className="rounded"
                 />
-                <Label htmlFor="markdown">Enable Markdown formatting</Label>
+                <Label htmlFor="markdown">{t('report_view.new_row_editor.markdown_toggle.label')}</Label>
               </div>
             </div>
           ) : rowType === 'charts' ? (
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="chart-type">Chart Type</Label>
+                  <Label htmlFor="chart-type">{t('report_view.new_row_editor.chart_type_input.label')}</Label>
                   <Select value={chartType} onValueChange={(value: 'bar' | 'pie') => setChartType(value)}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="bar">Bar Chart</SelectItem>
-                      <SelectItem value="pie">Pie Chart</SelectItem>
+                      <SelectItem value="bar">{t('report_view.new_row_editor.chart_type_input.bar_option.menu_item')}</SelectItem>
+                      <SelectItem value="pie">{t('report_view.new_row_editor.chart_type_input.pie_option.menu_item')}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="category-field">Category Field *</Label>
+                  <Label htmlFor="category-field">{t('report_view.new_row_editor.category_field_input.label')} *</Label>
                   <Input
                     id="category-field"
                     value={categoryField}
                     onChange={(e) => setCategoryField(e.target.value)}
-                    placeholder="e.g., category, name, type"
+                    placeholder={t('report_view.new_row_editor.category_field_input.placeholder.instruction')}
                     required
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="value-field">Value Field *</Label>
+                  <Label htmlFor="value-field">{t('report_view.new_row_editor.value_field_input.label')} *</Label>
                   <Input
                     id="value-field"
                     value={valueField}
                     onChange={(e) => setValueField(e.target.value)}
-                    placeholder="e.g., count, amount, value"
+                    placeholder={t('report_view.new_row_editor.value_field_input.placeholder.instruction')}
                     required
                   />
                 </div>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="sql">SQL Query *</Label>
+                <Label htmlFor="sql">{t('report_view.new_row_editor.sql_input.label')} *</Label>
                 <div className="border rounded-md">
                   <SqlEditor
                     value={sql}
@@ -318,7 +322,7 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
             </div>
           ) : (
             <div className="space-y-2">
-              <Label htmlFor="sql">SQL Query *</Label>
+              <Label htmlFor="sql">{t('report_view.new_row_editor.sql_input.label')} *</Label>
               <div className="border rounded-md">
                 <SqlEditor
                   value={sql}
@@ -334,11 +338,11 @@ export function NewRowEditor({ open, onClose, rowType, onSave }: NewRowEditorPro
         <div className="flex justify-end gap-2 pt-4 border-t">
           <Button onClick={handleClose} variant="outline" disabled={saving}>
             <X className="h-4 w-4 mr-2" />
-            Cancel
+            {t('common.actions.cancel.cta')}
           </Button>
           <Button onClick={handleSave} disabled={saving}>
             <Save className="h-4 w-4 mr-2" />
-            {saving ? 'Creating...' : 'Create Row'}
+            {saving ? t('common.states.creating') : t('report_view.new_row_editor.create_button.cta.default')}
           </Button>
         </div>
       </DialogContent>

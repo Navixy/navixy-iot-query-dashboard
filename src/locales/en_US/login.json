@@ -1,0 +1,107 @@
+{
+  "header": {
+    "subtitle": "Design and view analytics reports"
+  },
+  "login_form": {
+    "email_input": {
+      "label": "Email",
+      "placeholder": "your@email.com"
+    },
+    "role_input": {
+      "label": "Role",
+      "placeholder": {
+        "instruction": "Select role"
+      }
+    },
+    "demo_toggle": {
+      "sublabel": "Load existing reports once, then store all changes locally in your browser. No modifications are saved to the user settings database."
+    },
+    "sign_in_button": {
+      "cta": {
+        "default": "Sign in",
+        "loading": "Signing in…"
+      },
+      "error": "Failed to sign in"
+    },
+    "demo_sign_in_button": {
+      "cta": {
+        "default": "Start demo mode",
+        "loading": "Starting demo mode…"
+      },
+      "error": "Failed to start demo mode",
+      "paragraph": {
+        "success": "Signed into demo mode. Changes will be stored locally."
+      }
+    }
+  },
+  "connection_form": {
+    "url_option": {
+      "label": "URL"
+    },
+    "parameters_option": {
+      "label": "Connection parameters"
+    },
+    "url_input": {
+      "label": "Connection URL"
+    },
+    "host_input": {
+      "label": "Host"
+    },
+    "port_input": {
+      "label": "Port"
+    },
+    "database_input": {
+      "label": "Database"
+    },
+    "user_input": {
+      "label": "User"
+    },
+    "password_input": {
+      "label": "Password"
+    },
+    "ssl_toggle": {
+      "label": "Use SSL"
+    },
+    "test_result": {
+      "paragraph": {
+        "success": "Database connection successful"
+      },
+      "error": {
+        "default": "Connection failed",
+        "failure": "Connection test failed: {value}"
+      }
+    }
+  },
+  "iot_db_form": {
+    "title": "IoT database connection",
+    "test_button": {
+      "cta": {
+        "default": "Test IoT connection"
+      }
+    },
+    "url_input": {
+      "error": {
+        "instruction": "Enter the IoT database connection URL"
+      }
+    },
+    "error": {
+      "instruction": "Enter the host, database, and user for the IoT database connection"
+    }
+  },
+  "user_db_form": {
+    "title": "User settings database connection",
+    "test_button": {
+      "cta": {
+        "default": "Test user settings connection"
+      }
+    },
+    "url_input": {
+      "error": {
+        "instruction": "Enter the user settings database connection URL"
+      }
+    },
+    "error": {
+      "instruction": "Enter the host, database, and user for the user settings database connection"
+    }
+  }
+}

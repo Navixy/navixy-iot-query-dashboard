@@ -6,6 +6,7 @@
 import React from 'react';
 import { useDroppable } from '@dnd-kit/core';
 import { Plus } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RowDropPocketProps {
   rowId: number;
@@ -22,6 +23,7 @@ export const RowDropPocket: React.FC<RowDropPocketProps> = ({
   headerHeight,
   containerWidth,
 }) => {
+  const { t } = useLocale();
   const { setNodeRef, isOver } = useDroppable({
     id: `row-pocket-${rowId}`,
     data: {
@@ -35,9 +37,9 @@ export const RowDropPocket: React.FC<RowDropPocketProps> = ({
     return null;
   }
 
-  const label = isCollapsed 
-    ? 'Drop to add to row' 
-    : 'Drop to place in this section';
+  const label = isCollapsed
+    ? t('report_view.canvas.drop_add_to_row.label')
+    : t('report_view.canvas.drop_in_section.label');
 
   // Calculate full width (24 columns) - respect panel spacing/gutters
   const fullWidth = containerWidth;
@@ -67,7 +69,7 @@ export const RowDropPocket: React.FC<RowDropPocketProps> = ({
           width: `${fullWidth}px`,
           zIndex: 5, // Lower than row header so it doesn't intercept drag
         }}
-        aria-label="Row drop area"
+        aria-label={t('report_view.canvas.row_drop_area.label')}
         role="region"
         data-state={isOver ? 'active' : 'idle'}
       >

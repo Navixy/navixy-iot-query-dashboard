@@ -11,51 +11,22 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { BarChart3, PieChart, Table, TrendingUp, Info, Circle } from 'lucide-react';
 import { SIZE_PRESETS, DEFAULT_SIZE_PRESET, resolvePresetSize, isPresetBelowMin, type SizePresetLabel } from './sizePresets';
 import type { PanelType } from '@/types/dashboard-types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export interface PanelTypeOption {
   type: PanelType;
-  label: string;
-  description: string;
   icon: React.ComponentType<{ className?: string }>;
 }
 
+// Display names and descriptions live in the locale file under
+// report_view.add_panel_dialog.<type>_option.{menu_item,sublabel}.
 const PANEL_TYPES: PanelTypeOption[] = [
-  {
-    type: 'stat',
-    label: 'Stat',
-    description: 'Display a single metric value',
-    icon: TrendingUp,
-  },
-  {
-    type: 'barchart',
-    label: 'Bar Chart',
-    description: 'Display data as bars',
-    icon: BarChart3,
-  },
-  {
-    type: 'piechart',
-    label: 'Pie Chart',
-    description: 'Display data as a pie chart',
-    icon: PieChart,
-  },
-  {
-    type: 'table',
-    label: 'Table',
-    description: 'Display data in a table format',
-    icon: Table,
-  },
-  {
-    type: 'text',
-    label: 'Text',
-    description: 'Display markdown or plain text',
-    icon: Info,
-  },
-  {
-    type: 'geomap',
-    label: 'Map',
-    description: 'Display GPS coordinates on a map',
-    icon: Circle,
-  },
+  { type: 'stat', icon: TrendingUp },
+  { type: 'barchart', icon: BarChart3 },
+  { type: 'piechart', icon: PieChart },
+  { type: 'table', icon: Table },
+  { type: 'text', icon: Info },
+  { type: 'geomap', icon: Circle },
 ];
 
 interface PanelGalleryProps {
@@ -69,6 +40,7 @@ export const PanelGallery: React.FC<PanelGalleryProps> = ({
   onClose,
   onSelect,
 }) => {
+  const { t } = useLocale();
   const [selectedType, setSelectedType] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState<SizePresetLabel>(DEFAULT_SIZE_PRESET);
 
@@ -105,16 +77,16 @@ export const PanelGallery: React.FC<PanelGalleryProps> = ({
     <Dialog open={open} onOpenChange={handleCancel}>
       <DialogContent className="max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Add Panel</DialogTitle>
+          <DialogTitle>{t('report_view.add_panel_dialog.title')}</DialogTitle>
           <DialogDescription>
-            Choose a panel type and size to add to your dashboard.
+            {t('report_view.add_panel_dialog.paragraph.instruction')}
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-6 py-4">
           {/* Panel Type Selection */}
           <div>
-            <Label className="text-sm font-semibold mb-3 block">Panel Type</Label>
+            <Label className="text-sm font-semibold mb-3 block">{t('report_view.add_panel_dialog.type_input.label')}</Label>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {PANEL_TYPES.map((panelType) => {
                 const IconComponent = panelType.icon;
@@ -136,9 +108,9 @@ export const PanelGallery: React.FC<PanelGalleryProps> = ({
                         <IconComponent className="h-5 w-5" />
                       </div>
                       <div className="flex-1">
-                        <h3 className="font-semibold mb-1">{panelType.label}</h3>
+                        <h3 className="font-semibold mb-1">{t(`report_view.add_panel_dialog.${panelType.type}_option.menu_item`)}</h3>
                         <p className="text-sm text-muted-foreground">
-                          {panelType.description}
+                          {t(`report_view.add_panel_dialog.${panelType.type}_option.sublabel`)}
                         </p>
                       </div>
                     </div>
@@ -150,7 +122,7 @@ export const PanelGallery: React.FC<PanelGalleryProps> = ({
 
           {/* Size Preset Selection */}
           <div>
-            <Label className="text-sm font-semibold mb-3 block">Size Preset</Label>
+            <Label className="text-sm font-semibold mb-3 block">{t('report_view.add_panel_dialog.size_input.label')}</Label>
             <Select value={selectedSize} onValueChange={(value) => setSelectedSize(value as typeof selectedSize)}>
               <SelectTrigger className="w-full">
                 <SelectValue />
@@ -164,8 +136,12 @@ export const PanelGallery: React.FC<PanelGalleryProps> = ({
                     isPresetBelowMin(selectedType, { w: preset.w, h: preset.h });
                   return (
                     <SelectItem key={preset.label} value={preset.label} disabled={belowMin}>
-                      {preset.label} ({preset.w}×{preset.h})
-                      {belowMin ? ' — too small for this type' : ''}
+                      {/* `label` is the internal preset id (also the Select value); the
+                          visible text comes from the locale file. */}
+                      {t(`report_view.add_panel_dialog.size_input.${preset.label.toLowerCase()}_option.menu_item.${belowMin ? 'disabled' : 'default'}`, {
+                        width: preset.w,
+                        height: preset.h,
+                      })}
                     </SelectItem>
                   );
                 })}
@@ -176,10 +152,10 @@ export const PanelGallery: React.FC<PanelGalleryProps> = ({
           {/* Action Buttons */}
           <div className="flex justify-end gap-2 pt-4 border-t">
             <Button variant="secondary" onClick={handleCancel}>
-              Cancel
+              {t('common.actions.cancel.cta')}
             </Button>
             <Button onClick={handleConfirm} disabled={!selectedType}>
-              Add Panel
+              {t('report_view.add_panel_dialog.add_button.cta')}
             </Button>
           </div>
         </div>

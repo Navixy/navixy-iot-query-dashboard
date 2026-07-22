@@ -137,7 +137,7 @@ describe('the sidebar Home affordance', () => {
 
     // Prove we really are in MenuEditor's error branch — otherwise this case
     // would pass just as well against a menu that rendered fine.
-    expect(screen.getByText(/failed to load menu/i)).toBeTruthy();
+    expect(screen.getByText(/failed to load the menu/i)).toBeTruthy();
 
     const home = screen.getByRole('link', { name: /home/i });
     expect(home.getAttribute('href')).toBe('/app');

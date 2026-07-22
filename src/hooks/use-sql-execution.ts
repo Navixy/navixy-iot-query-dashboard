@@ -3,6 +3,7 @@ import { apiService } from '@/services/api';
 import { toast } from 'sonner';
 import { filterUsedParameters } from '@/utils/sqlParameterExtractor';
 import { type ErrorWithMeta } from '@/utils/errors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export interface SqlExecutionResult {
   columns: string[];
@@ -33,6 +34,7 @@ export interface SqlExecutionOptions {
 }
 
 export function useSqlExecution() {
+  const { t } = useLocale();
   const [executing, setExecuting] = useState(false);
   const [results, setResults] = useState<SqlExecutionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +52,7 @@ export function useSqlExecution() {
 
     if (!sql.trim()) {
       if (showErrorToast) {
-        toast.error('Please enter a SQL query');
+        toast.error(t('sql_editor.execute_toast.empty_query.paragraph.failure'));
       }
       return null;
     }
@@ -82,7 +84,7 @@ export function useSqlExecution() {
       // Handle API errors
       if (response.error) {
         console.error('API error:', response.error);
-        const errorMsg = response.error.message || 'Failed to execute query';
+        const errorMsg = response.error.message || t('common.errors.query_failed');
         
         setError(errorMsg);
         if (showErrorToast) {
@@ -119,7 +121,7 @@ export function useSqlExecution() {
 
       setResults(transformedData);
       if (showSuccessToast) {
-        toast.success('Query executed successfully');
+        toast.success(t('sql_editor.execute_toast.paragraph.success'));
       }
       
       return transformedData;
@@ -133,7 +135,7 @@ export function useSqlExecution() {
         context: e.context,
       });
 
-      let errorMessage = 'Failed to execute query';
+      let errorMessage = t('common.errors.query_failed');
 
       // Try to extract meaningful error information
       if (e.message) {
