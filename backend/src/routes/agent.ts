@@ -41,11 +41,12 @@ const chatLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  // Key STRICTLY on userId. v7.5.1 validates custom key generators and warns
-  // ERR_ERL_KEY_GEN_IPV6 when one handles IPs without ipKeyGenerator() normalization;
-  // never touching req.ip sidesteps it entirely. authenticateToken runs at the mount
-  // point, so user is always present — 'anonymous' is unreachable and exists to satisfy
-  // the type.
+  // Key STRICTLY on userId, never req.ip. A key that is not an IP sidesteps the
+  // library's IP-address validation family entirely (verified against the pinned 7.5.1
+  // dist: it validates request-IP handling — ERR_ERL_INVALID_IP_ADDRESS and friends —
+  // and the keyGenerator-IPv6 check documented for newer releases does not exist in
+  // this version). authenticateToken runs at the mount point, so user is always
+  // present — 'anonymous' is unreachable and exists to satisfy the type.
   keyGenerator: (req) => (req as AuthenticatedRequest).user?.userId ?? 'anonymous',
   // Mirrors the global limiter's localhost-in-development exemption (index.ts:125-129).
   // Without it, local testing of the chat loop hits 20/min almost immediately.
