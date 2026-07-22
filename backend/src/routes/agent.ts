@@ -22,11 +22,18 @@ import { logger } from '../utils/logger.js';
 import { agentService } from '../services/agent/index.js';
 import { loadHistory, appendTurns } from '../services/agent/chatStore.js';
 import { validateDashboard } from '../services/agent/validateDashboard.js';
+import { envInt } from '../services/agent/artifactStore.js';
 import type { AgentTurn } from '../services/agent/types.js';
 
 const router = Router();
 
-const AGENT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS ?? 180_000);
+// envInt, not Number() (self-review of !61): Number('180s') is NaN and Number('') is 0,
+// and AbortSignal.timeout(NaN) throws a bare RangeError — no statusCode, so errorHandler
+// returns an opaque 500 on EVERY chat request, after the user turn is already persisted,
+// bypassing the in-band taxonomy this route exists to enforce; timeout(0) aborts on the
+// first tick. envInt falls back on anything that is not a positive finite number — the
+// same way bedrockAgent reads its own tuning knobs.
+const AGENT_TIMEOUT_MS = envInt(process.env.AGENT_TIMEOUT_MS, 180_000);
 export const MAX_MESSAGE_LENGTH = 4_000; // exported: the composer mirrors it (MR 5)
 
 const chatLimiter = rateLimit({
