@@ -201,6 +201,47 @@ describe('fetchArtifact — the freshness window narrows bearer replay (MR !57 r
       name: 'ArtifactExpired',
     });
   });
+
+  // MR !57 approval follow-up (a.vitshas, note 56426): an Invalid Date is still
+  // instanceof Date and yields ageMs = NaN, and `NaN > maxAgeMs` is false — the
+  // old gate passed it. A future LastModified yields a NEGATIVE age, which also
+  // passed. Both are fail-open paths in a guard whose whole point is failing
+  // closed on anomalous metadata.
+  it('rejects an Invalid Date LastModified — a NaN age fails closed, body torn down, never read', async () => {
+    const transform = jest.fn(async () => JSON.stringify({ title: 'T', panels: [] }));
+    const destroy = jest.fn();
+    stubS3({
+      Body: { transformToString: transform, destroy },
+      LastModified: new Date(NaN),
+    });
+    await expect(fetchArtifact(loc, new AbortController().signal)).rejects.toMatchObject({
+      name: 'ArtifactExpired',
+    });
+    expect(destroy).toHaveBeenCalled();
+    expect(transform).not.toHaveBeenCalled();
+  });
+
+  it('rejects a LastModified 10 minutes in the future — beyond any plausible clock skew', async () => {
+    const transform = jest.fn(async () => JSON.stringify({ title: 'T', panels: [] }));
+    const destroy = jest.fn();
+    stubS3({
+      Body: { transformToString: transform, destroy },
+      LastModified: new Date(Date.now() + 10 * 60_000),
+    });
+    await expect(fetchArtifact(loc, new AbortController().signal)).rejects.toMatchObject({
+      name: 'ArtifactExpired',
+    });
+    expect(destroy).toHaveBeenCalled();
+    expect(transform).not.toHaveBeenCalled();
+  });
+
+  it('accepts a LastModified a few seconds in the future — inside the clock-skew allowance', async () => {
+    stubS3({ LastModified: new Date(Date.now() + 5_000) });
+    await expect(fetchArtifact(loc, new AbortController().signal)).resolves.toEqual({
+      title: 'T',
+      panels: [],
+    });
+  });
 });
 
 describe('isArtifactKey', () => {

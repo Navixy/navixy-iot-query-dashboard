@@ -446,9 +446,11 @@ role only after every gate passes:
    refused before the network.
 2. Key shape — exactly `jobs/<uuid>/report_schema.json`, enforced at parse AND re-asserted at the
    fetch sink. Nothing outside the artifact namespace is fetchable.
-3. Freshness — the object's S3 `LastModified` (trusted metadata, not agent prose) must be within
-   `AGENT_ARTIFACT_MAX_AGE_MS` (default 15 minutes). The intended flow fetches exactly once,
-   seconds after the build; the route persists the schema and never re-fetches.
+3. Freshness — the object's S3 `LastModified` (trusted metadata, not agent prose) must be a
+   valid timestamp no older than `AGENT_ARTIFACT_MAX_AGE_MS` (default 15 minutes) and no further
+   ahead of the backend's clock than a small skew allowance (60 s). Missing, invalid or
+   substantially future values fail closed. The intended flow fetches exactly once, seconds
+   after the build; the route persists the schema and never re-fetches.
 
 ### The property that remains
 

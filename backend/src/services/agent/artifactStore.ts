@@ -39,6 +39,10 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
  *  re-fetches — so a tight window costs nothing in the intended flow while shrinking the
  *  replay window for an exfiltrated URL from "until lifecycle expiry" to minutes. */
 const DEFAULT_MAX_AGE_MS = 15 * 60 * 1000;
+/** How far ahead of our clock a LastModified may sit before the freshness gate rejects
+ *  it (MR !57 approval follow-up, note 56426). NTP-synced hosts drift far below a
+ *  minute; a deliberately small constant, not an env knob. */
+const CLOCK_SKEW_ALLOWANCE_MS = 60_000;
 
 /** PURE and TOTAL — never throws; returns null on anything it does not like.
  *  Accepts s3://<bucket>/jobs/<uuid>/report_schema.json ONLY. https:// S3 URLs are
@@ -140,19 +144,26 @@ export async function fetchArtifact(loc: S3Location, signal: AbortSignal): Promi
   // capability, and S3's LastModified — OUR trusted metadata, not the agent's prose — is
   // the one signal that distinguishes "built seconds ago in this turn" from a replayed
   // URL exfiltrated from another session. Stale means the ask-again sentence, which
-  // triggers a rebuild and a fresh artifact. Absent LastModified fails closed: S3 always
-  // sends it, so absence is anomalous. Checked before the body is consumed.
+  // triggers a rebuild and a fresh artifact. The gate fails CLOSED on every anomaly
+  // (MR !57 approval follow-up, note 56426): an absent LastModified (S3 always sends it)
+  // and an Invalid Date both yield a non-finite age — and a bare `>` comparison silently
+  // passes NaN — while a future timestamp yields a negative age that a bare `>` also
+  // passes. Only a finite age inside [-CLOCK_SKEW_ALLOWANCE_MS, maxAgeMs] gets through.
+  // Checked before the body is consumed.
   const maxAgeMs = envInt(process.env.AGENT_ARTIFACT_MAX_AGE_MS, DEFAULT_MAX_AGE_MS);
   const ageMs =
     res.LastModified instanceof Date
       ? Date.now() - res.LastModified.getTime()
-      : Number.POSITIVE_INFINITY;
-  if (ageMs > maxAgeMs) {
+      : Number.NaN;
+  if (!Number.isFinite(ageMs) || ageMs > maxAgeMs || ageMs < -CLOCK_SKEW_ALLOWANCE_MS) {
     (res.Body as unknown as { destroy?: (error?: Error) => void }).destroy?.();
-    throw namedError(
-      'ArtifactExpired',
-      `Artifact is stale: age ${Math.round(ageMs / 1000)}s exceeds ${Math.round(maxAgeMs / 1000)}s`,
-    );
+    const detail = !Number.isFinite(ageMs)
+      ? 'LastModified is missing or invalid'
+      : ageMs > maxAgeMs
+        ? `stale — age ${Math.round(ageMs / 1000)}s exceeds ${Math.round(maxAgeMs / 1000)}s`
+        : `LastModified is ${Math.round(-ageMs / 1000)}s in the future, beyond the ` +
+          `${Math.round(CLOCK_SKEW_ALLOWANCE_MS / 1000)}s clock-skew allowance`;
+    throw namedError('ArtifactExpired', `Artifact failed the freshness gate: ${detail}`);
   }
 
   const text = await res.Body.transformToString();
