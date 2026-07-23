@@ -46,7 +46,9 @@ export function MarkdownMessage({ text }: { text: string }) {
         switch (block.kind) {
           case 'ol':
             return (
-              <ol key={i} className="list-decimal space-y-1 pl-5">
+              // `start` numbers loose lists correctly: each blank-line-separated
+              // item is its own block and must not restart at "1." (review !62).
+              <ol key={i} start={block.start} className="list-decimal space-y-1 pl-5">
                 {block.items.map((item, j) => (
                   <li key={j}>
                     <Spans spans={item} />

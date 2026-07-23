@@ -28,11 +28,23 @@ export type MdSpan =
 
 export type MdBlock =
   | { kind: 'p'; spans: MdSpan[] }
-  | { kind: 'ol'; items: MdSpan[][] }
+  /** `start` is the ordinal of the block's FIRST item, for `<ol start>`. A
+   *  loose list (blank lines between numbered items) tokenizes as one ol
+   *  block per item; without `start`, every one of them would render as "1."
+   *  — and numbered interview questions are the agent's flagship output. */
+  | { kind: 'ol'; start: number; items: MdSpan[][] }
   | { kind: 'ul'; items: MdSpan[][] };
 
-const OL_ITEM_RE = /^\s*\d+\.\s+(.*)$/;
+const OL_ITEM_RE = /^\s*(\d+)\.\s+(.*)$/;
 const UL_ITEM_RE = /^\s*[-*]\s+(.*)$/;
+
+/** Ordinal for `<ol start>`: a sane positive integer, else 1. The regex only
+ *  admits digits, so this guards absurd lengths (e.g. a 30-digit "ordinal"
+ *  parsing to an unsafe float), not signs or garbage. */
+function parseOrdinal(digits: string): number {
+  const n = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(n) && n > 0 ? n : 1;
+}
 
 /** Tokenize one line's (or one joined paragraph's) inline content. */
 export function parseInline(text: string): MdSpan[] {
@@ -87,7 +99,10 @@ export function parseInline(text: string): MdSpan[] {
 export function parseMarkdown(text: string): MdBlock[] {
   const blocks: MdBlock[] = [];
   let paragraphLines: string[] = [];
-  let list: { kind: 'ol' | 'ul'; items: MdSpan[][] } | null = null;
+  let list:
+    | { kind: 'ol'; start: number; items: MdSpan[][] }
+    | { kind: 'ul'; items: MdSpan[][] }
+    | null = null;
 
   const flushParagraph = () => {
     if (paragraphLines.length > 0) {
@@ -110,14 +125,24 @@ export function parseMarkdown(text: string): MdBlock[] {
     const ul = ol ? null : UL_ITEM_RE.exec(line);
     if (ol || ul) {
       flushParagraph();
-      const kind = ol ? 'ol' : 'ul';
       // Both `-` and `*` markers coalesce into one list; an ol item after a
-      // ul (or vice versa) starts a new list block.
-      if (!list || list.kind !== kind) {
-        flushList();
-        list = { kind, items: [] };
+      // ul (or vice versa) starts a new list block. A contiguous ol keeps the
+      // first item's ordinal and numbers sequentially from there (the agent
+      // emits 1..n); a loose ol re-enters here per item, each block carrying
+      // its own ordinal.
+      if (ol) {
+        if (!list || list.kind !== 'ol') {
+          flushList();
+          list = { kind: 'ol', start: parseOrdinal(ol[1]), items: [] };
+        }
+        list.items.push(parseInline(ol[2]));
+      } else {
+        if (!list || list.kind !== 'ul') {
+          flushList();
+          list = { kind: 'ul', items: [] };
+        }
+        list.items.push(parseInline(ul![1]));
       }
-      list.items.push(parseInline((ol ?? ul)![1]));
       continue;
     }
     if (line.trim() === '') {
