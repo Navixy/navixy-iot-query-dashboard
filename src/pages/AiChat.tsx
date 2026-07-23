@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutationState } from '@tanstack/react-query';
+import { useMutationState, useQueryClient } from '@tanstack/react-query';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/contexts/AuthContext';
@@ -12,7 +12,7 @@ import {
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
 import { EmptyState } from '@/components/ai-chat/EmptyState';
-import type { AgentTurn, ChatBubble } from '@/types/agent';
+import type { AgentChatRequest, AgentTurn, ChatBubble } from '@/types/agent';
 
 /**
  * One renderer, two sources: rehydrated history turns and live turns both
@@ -46,6 +46,7 @@ const AiChat = () => {
 
   const sessionQuery = useAgentSession();
   const chat = useAgentChatMutation();
+  const queryClient = useQueryClient();
 
   // Pending state ACROSS remounts (review !62, major 1). chat.isPending is
   // per-observer: a page that unmounts mid-turn and remounts sees false while
@@ -97,6 +98,59 @@ const AiChat = () => {
 
   const [composerValue, setComposerValue] = useState('');
   const liveIdRef = useRef(0);
+  const nextLiveId = () => `live-${liveIdRef.current++}`;
+
+  // FAILED turns are read from the MUTATION CACHE, never from mutate-level
+  // onError (review !62 round 2, Important 4): mutate-level callbacks are
+  // observer-bound — navigate away mid-turn and they simply never run, so the
+  // failure used to vanish on the returning mount: the typing indicator
+  // stopped, with no error bubble and the draft gone. The cache entry outlives
+  // the page (until its gcTime, ~5 min), so whichever mount is live when the
+  // turn settles renders the failure and returns the draft.
+  const failedChatTurns = useMutationState({
+    filters: { mutationKey: chatMutationKey, status: 'error' },
+    select: (mutation) => ({
+      mutationId: mutation.mutationId,
+      message: (mutation.state.variables as AgentChatRequest | undefined)?.message ?? '',
+      errorMessage:
+        mutation.state.error instanceof Error ? mutation.state.error.message : '',
+    }),
+  });
+  const handledFailedTurnsRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (failedChatTurns.length === 0) return;
+    const mutationCache = queryClient.getMutationCache();
+    for (const failed of failedChatTurns) {
+      // The handled-set plus the removal below make this idempotent across
+      // StrictMode double-effects and re-renders.
+      if (handledFailedTurnsRef.current.has(failed.mutationId)) continue;
+      handledFailedTurnsRef.current.add(failed.mutationId);
+      // Give the user their message back: the send cleared the composer
+      // optimistically, and a 429/timeout/network drop must not destroy a
+      // possibly long, carefully-typed request (review !62). The guard keeps
+      // anything they typed since — e.g. a suggestion chip picked on the
+      // returning mount while the doomed turn was still in flight.
+      const draft = failed.message;
+      setComposerValue((current) => (current === '' ? draft : current));
+      // One renderer, two failure paths (2 of 2): transport failures render
+      // exactly like the in-band type:'error' handled in send's onSuccess.
+      // No toast — the error belongs in the transcript where the user looks.
+      setLiveBubbles((prev) => [
+        ...prev,
+        {
+          id: nextLiveId(),
+          role: 'assistant',
+          text: failed.errorMessage || 'The request failed. Please try again.',
+          isError: true,
+        },
+      ]);
+      // Handled — REMOVE it so a later mount does not surface it again.
+      const mutation = mutationCache
+        .getAll()
+        .find((m) => m.mutationId === failed.mutationId);
+      if (mutation) mutationCache.remove(mutation);
+    }
+  }, [failedChatTurns, queryClient]);
 
   // MR 6 reads this to decide whether to render the Apply button. Computed here
   // so there is exactly one definition of the rule (D15): Apply is admin/editor
@@ -107,16 +161,20 @@ const AiChat = () => {
   const send = () => {
     const message = composerValue.trim();
     if (message === '' || isChatPending) return;
-    const nextLiveId = () => `live-${liveIdRef.current++}`;
     setComposerValue('');
     setLiveBubbles((prev) => [...prev, { id: nextLiveId(), role: 'user', text: message }]);
     chat.mutate(
       { session_id: sessionIdRef.current, message },
       {
-        // These mutate-level callbacks update THIS mount's transcript and are
+        // This mutate-level callback updates THIS mount's transcript and is
         // skipped if the page unmounts mid-turn — liveBubbles die with the
         // mount anyway. The hook-level onSuccess still runs and preserves the
-        // turns in the query cache for the next mount.
+        // turns in the query cache for the next mount. There is deliberately
+        // NO mutate-level onError: failures are surfaced by the failed-turns
+        // effect above from the mutation cache, so a remount cannot lose the
+        // error or the draft (review !62 round 2, Important 4). A transport
+        // failure also carries no session_id to adopt — the ref keeps its
+        // last known value.
         onSuccess: (data) => {
           sessionIdRef.current = data.session_id;
           setLiveBubbles((prev) => [
@@ -128,30 +186,9 @@ const AiChat = () => {
               result: data.type === 'result' ? data.result : undefined,
               // One renderer, two failure paths (1 of 2): the server's in-band
               // type:'error' gets the same destructive bubble as a transport
-              // failure below. No toast — the error belongs in the transcript
-              // where the user is looking.
+              // failure. No toast — the error belongs in the transcript where
+              // the user is looking.
               isError: data.type === 'error' || undefined,
-            },
-          ]);
-        },
-        onError: (error) => {
-          // Give the user their message back: the send cleared the composer
-          // optimistically, and a 429/timeout/network drop must not destroy a
-          // possibly long, carefully-typed request (review !62). The composer
-          // was disabled for the whole flight, so it can only be empty here —
-          // the guard is belt and braces against a future edit.
-          setComposerValue((current) => (current === '' ? message : current));
-          // No session_id to adopt — a transport failure carries no response
-          // body. The ref keeps its last known value.
-          setLiveBubbles((prev) => [
-            ...prev,
-            {
-              id: nextLiveId(),
-              role: 'assistant',
-              text: error.message || 'The request failed. Please try again.',
-              // One renderer, two failure paths (2 of 2): transport failures
-              // render exactly like the in-band type:'error' above.
-              isError: true,
             },
           ]);
         },
