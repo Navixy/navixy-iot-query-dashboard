@@ -52,7 +52,7 @@ export function useAgentSession() {
 export function useAgentChatMutation() {
   const queryClient = useQueryClient();
 
-  return useMutation<AgentChatResponse, Error, AgentChatRequest>({
+  return useMutation<AgentChatResponse, Error, AgentChatRequest, { messagesAtSend: number | null }>({
     mutationFn: async (params) => {
       const response = await apiService.agentChat(params);
       // Throw on response.error so onError/onSuccess split cleanly: transport
@@ -70,6 +70,16 @@ export function useAgentChatMutation() {
     // agent's server-side conversation memory and double-appending the
     // transcript (R20).
     retry: false,
+    // Snapshot the transcript length at send time. The backend persists the
+    // user turn at POST receipt — BEFORE the agent call (routes/agent.ts) — so
+    // any session refetch that resolves while the turn is in flight already
+    // ends with that turn. onSuccess compares against this snapshot to decide
+    // between appending and reconciling (review !62, major 2).
+    onMutate: () => ({
+      messagesAtSend:
+        queryClient.getQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY)?.messages
+          .length ?? null,
+    }),
     // Cache-write placement option (b): write the new turns into the session
     // query's cache from the mutation's own onSuccess, not a shared
     // MutationCache handler. Hook-level callbacks belong to the mutation, not
@@ -77,24 +87,28 @@ export function useAgentChatMutation() {
     // which is what makes navigating away and back non-destructive (R26): the
     // next mount reads these turns from the cache instead of losing the
     // assistant turn the server produced while the page was gone.
-    onSuccess: (data, variables) => {
-      queryClient.setQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY, (prev) => {
-        // No cache entry (the session read failed or has not completed):
-        // leave the cache absent rather than synthesizing an entry — we would
-        // have to invent `persisted`, and the next mount's refetch gets the
-        // truth from the server anyway.
-        if (!prev) return undefined;
+    onSuccess: (data, variables, context) => {
+      const prev = queryClient.getQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY);
+      // Append ONLY when the cache is exactly as it was at send time. If it is
+      // absent (the session read failed or has not completed — synthesizing an
+      // entry would mean inventing `persisted`), or a mid-turn refetch landed
+      // (its payload already contains the user turn the server persisted at
+      // receipt, so a blind append would duplicate it), reconcile from the
+      // server instead of guessing at a merge.
+      if (prev && context && context.messagesAtSend === prev.messages.length) {
         const userTurn: AgentTurn = { role: 'user', content: variables.message };
         const assistantTurn: AgentTurn =
           data.type === 'result'
             ? { role: 'assistant', type: 'result', content: data.message, result: data.result }
             : { role: 'assistant', type: data.type, content: data.message, result: null };
-        return {
+        queryClient.setQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY, {
           ...prev,
           session_id: data.session_id,
           messages: [...prev.messages, userTurn, assistantTurn],
-        };
-      });
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: AGENT_SESSION_QUERY_KEY });
+      }
     },
   });
 }
