@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '@/contexts/AuthContext';
 import { apiService } from '@/services/api';
 import type {
   AgentChatRequest,
@@ -10,8 +11,15 @@ import type {
 /**
  * Query key for the agent session read (GET /api/agent/session). Shared between
  * the session query and the chat mutation's cache write below.
+ *
+ * SCOPED BY USER ID (review !62, major 3): the QueryClient is a module
+ * singleton that outlives sign-out, so an identity-free key would hand user
+ * A's cached transcript to user B signing in on the same tab. signOut also
+ * clears the whole query cache (AuthContext), but the scoped key keeps this
+ * correct even for identity switches that skip signOut.
  */
-export const AGENT_SESSION_QUERY_KEY = ['agent', 'session'] as const;
+export const agentSessionQueryKey = (userId: string | null | undefined) =>
+  ['agent', 'session', userId ?? 'anonymous'] as const;
 
 /**
  * Mutation key for chat turns. Exists so AiChat can derive pending state
@@ -28,8 +36,13 @@ export const AGENT_CHAT_MUTATION_KEY = ['agent', 'chat'] as const;
  * persistence flag and the rehydrated transcript (DO-313).
  */
 export function useAgentSession() {
+  const { user } = useAuth();
+
   return useQuery<AgentSessionResponse>({
-    queryKey: AGENT_SESSION_QUERY_KEY,
+    queryKey: agentSessionQueryKey(user?.id),
+    // Without a user there is no identity to scope by and no token worth
+    // spending a 401 on — the page redirects to /login anyway.
+    enabled: !!user,
     queryFn: async () => {
       const response = await apiService.getAgentSession();
       if (response.error) {
@@ -61,6 +74,10 @@ export function useAgentSession() {
  */
 export function useAgentChatMutation() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  // Captured at render, so the callbacks below write under the identity that
+  // sent the turn even if sign-out races the reply.
+  const sessionKey = agentSessionQueryKey(user?.id);
 
   return useMutation<AgentChatResponse, Error, AgentChatRequest, { messagesAtSend: number | null }>({
     mutationKey: AGENT_CHAT_MUTATION_KEY,
@@ -88,7 +105,7 @@ export function useAgentChatMutation() {
     // between appending and reconciling (review !62, major 2).
     onMutate: () => ({
       messagesAtSend:
-        queryClient.getQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY)?.messages
+        queryClient.getQueryData<AgentSessionResponse>(sessionKey)?.messages
           .length ?? null,
     }),
     // Cache-write placement option (b): write the new turns into the session
@@ -99,7 +116,7 @@ export function useAgentChatMutation() {
     // next mount reads these turns from the cache instead of losing the
     // assistant turn the server produced while the page was gone.
     onSuccess: (data, variables, context) => {
-      const prev = queryClient.getQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY);
+      const prev = queryClient.getQueryData<AgentSessionResponse>(sessionKey);
       // Append ONLY when the cache is exactly as it was at send time. If it is
       // absent (the session read failed or has not completed — synthesizing an
       // entry would mean inventing `persisted`), or a mid-turn refetch landed
@@ -112,13 +129,13 @@ export function useAgentChatMutation() {
           data.type === 'result'
             ? { role: 'assistant', type: 'result', content: data.message, result: data.result }
             : { role: 'assistant', type: data.type, content: data.message, result: null };
-        queryClient.setQueryData<AgentSessionResponse>(AGENT_SESSION_QUERY_KEY, {
+        queryClient.setQueryData<AgentSessionResponse>(sessionKey, {
           ...prev,
           session_id: data.session_id,
           messages: [...prev.messages, userTurn, assistantTurn],
         });
       } else {
-        void queryClient.invalidateQueries({ queryKey: AGENT_SESSION_QUERY_KEY });
+        void queryClient.invalidateQueries({ queryKey: sessionKey });
       }
     },
   });

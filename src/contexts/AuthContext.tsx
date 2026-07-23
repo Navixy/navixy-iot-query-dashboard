@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, ReactNode } from 'react
 import { useNavigate } from 'react-router-dom';
 import { demoStorageService } from '@/services/demoStorage';
 import { isDemoMode, setDemoMode, setDemoUserId } from '@/services/demoApi';
+import { queryClient } from '@/lib/queryClient';
 import type { ChartCatalog } from '@/types/chart-catalog';
 
 /**
@@ -483,6 +484,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear demo mode on sign out
     setDemoMode(false);
     setDemoModeState(false);
+
+    // The QueryClient is a module singleton that outlives this session. Cached
+    // server state is user-scoped (chat transcripts, reports, search) and must
+    // not survive into the next sign-in on the same tab (DO-313 review !62).
+    queryClient.clear();
 
     navigate('/login');
   };
