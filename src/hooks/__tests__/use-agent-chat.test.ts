@@ -37,13 +37,33 @@ beforeEach(() => {
   endAuthSession();
 });
 
+describe('createAgentChatContext — send-time occurrence baseline (review !62 round 4, Important 2)', () => {
+  it('records how many identical user turns already existed at send time', () => {
+    const epoch = beginAuthSession();
+    const client = new QueryClient();
+    client.setQueryData(
+      agentSessionQueryKey(epoch),
+      session([user('refresh'), assistant('done'), user('other')]),
+    );
+    expect(createAgentChatContext(client, 'refresh').priorSameContentUserTurns).toBe(1);
+    expect(createAgentChatContext(client, 'other').priorSameContentUserTurns).toBe(1);
+    expect(createAgentChatContext(client, 'brand new').priorSameContentUserTurns).toBe(0);
+  });
+
+  it('is 0 when the session read has not resolved (no snapshot to baseline against)', () => {
+    beginAuthSession();
+    const client = new QueryClient(); // no session cache
+    expect(createAgentChatContext(client, 'refresh').priorSameContentUserTurns).toBe(0);
+  });
+});
+
 describe('settleChatTurnIntoSessionCache — guarded write', () => {
   it('appends the turn pair and adopts the returned session_id when the cache is untouched since send', () => {
     const epoch = beginAuthSession();
     const client = new QueryClient();
     client.setQueryData(agentSessionQueryKey(epoch), session([user('hi'), assistant('hello')]));
 
-    const context = createAgentChatContext(client);
+    const context = createAgentChatContext(client, 'build a dashboard');
     settleChatTurnIntoSessionCache(client, context, 'build a dashboard', reply('Which range?', 'session-2'));
 
     const after = client.getQueryData<AgentSessionResponse>(agentSessionQueryKey(epoch));
@@ -59,7 +79,7 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
     const client = new QueryClient();
     const invalidate = vi.spyOn(client, 'invalidateQueries');
 
-    const context = createAgentChatContext(client); // no session cache yet
+    const context = createAgentChatContext(client, 'hello'); // no session cache yet
     settleChatTurnIntoSessionCache(client, context, 'hello', reply('hi'));
 
     expect(client.getQueryData(agentSessionQueryKey(epoch))).toBeUndefined();
@@ -70,9 +90,9 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
     // Sender A: turn goes out under epoch A with a 2-message transcript.
     beginAuthSession();
     const client = new QueryClient();
-    const epochAKey = agentSessionQueryKey(createAgentChatContext(client).authSessionAtSend);
+    const epochAKey = agentSessionQueryKey(createAgentChatContext(client, '').authSessionAtSend);
     client.setQueryData(epochAKey, session([user('secret A prompt'), assistant('A reply')]));
-    const contextA = createAgentChatContext(client);
+    const contextA = createAgentChatContext(client, 'secret A prompt 2');
 
     // A signs out mid-turn; B signs in and loads their OWN 2-message transcript
     // — the same length, which is what defeated a shape-based guard.
@@ -105,7 +125,7 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
       ),
     );
     client.setQueryData(key, capped);
-    const context = createAgentChatContext(client);
+    const context = createAgentChatContext(client, 'in-flight prompt');
 
     // Mid-turn, a mount refetch lands: the server persisted the user turn at
     // POST receipt, so the newest-100 window DROPPED turn-0 and gained the
@@ -129,7 +149,7 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
     const client = new QueryClient();
     const key = agentSessionQueryKey(epoch);
     client.setQueryData(key, session([user('hi'), assistant('hello')]));
-    const context = createAgentChatContext(client);
+    const context = createAgentChatContext(client, 'next');
 
     // A refetch that changes nothing: TanStack's structural sharing keeps the
     // ORIGINAL object when the incoming data is deep-equal, so the send-time
@@ -145,7 +165,7 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
 
   it('a turn sent with no auth session at all never touches any cache', () => {
     const client = new QueryClient(); // no beginAuthSession()
-    const context = createAgentChatContext(client);
+    const context = createAgentChatContext(client, 'hello');
     expect(context.authSessionAtSend).toBeNull();
 
     beginAuthSession(); // someone signs in before it settles

@@ -9,6 +9,7 @@ import {
   agentSessionQueryKey,
   useAgentChatMutation,
   useAgentSession,
+  type AgentChatMutationContext,
 } from '@/hooks/use-agent-chat';
 import { getAuthSessionId } from '@/lib/authSession';
 import { apiService } from '@/services/api';
@@ -136,6 +137,12 @@ const AiChat = () => {
       message: (mutation.state.variables as AgentChatRequest | undefined)?.message ?? '',
       errorMessage:
         mutation.state.error instanceof Error ? mutation.state.error.message : '',
+      // Send-time occurrence baseline (review !62 round 4, Important 2): how
+      // many identical user turns the client already knew about when this turn
+      // was sent, so the reconciler counts only a NEW occurrence as delivery.
+      priorSameContentUserTurns:
+        (mutation.state.context as AgentChatMutationContext | undefined)
+          ?.priorSameContentUserTurns ?? 0,
     }),
   });
   const handledFailedTurnsRef = useRef<Set<number>>(new Set());
@@ -171,7 +178,11 @@ const AiChat = () => {
         // almost certainly never processed, and 'lost' (retry-friendly) is
         // the right verdict.
         const delivery = authoritative
-          ? classifyTurnDelivery(authoritative.messages, failed.message)
+          ? classifyTurnDelivery(
+              authoritative.messages,
+              failed.message,
+              failed.priorSameContentUserTurns,
+            )
           : 'lost';
 
         if (!failureHandlingAliveRef.current) {
