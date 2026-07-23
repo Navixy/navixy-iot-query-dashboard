@@ -13,6 +13,12 @@ export interface AuthenticatedRequest extends Request {
     iotDbUrl: string;
     userDbUrl: string;
     session_id?: string;
+    /** True for demo-mode JWTs. Routes that WRITE to the tenant settings DB
+     *  must check it: demo mode promises "no modifications will be saved to
+     *  the database" (the frontend keeps demo CRUD in IndexedDB), and the
+     *  agent chat store honours that server-side by degrading to its
+     *  in-memory path (routes/agent.ts, DO-313 review !62). */
+    demo?: boolean;
   };
   settingsPool?: Pool;
 }
@@ -73,6 +79,7 @@ export const authenticateToken = async (
       iotDbUrl: decoded.iotDbUrl,
       userDbUrl: decoded.userDbUrl,
       ...(sessionId && { session_id: sessionId }),
+      ...(decoded.demo === true && { demo: true }),
     };
     
     // Attach the settings pool to the request for use in routes

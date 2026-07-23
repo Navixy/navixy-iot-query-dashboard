@@ -111,6 +111,16 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     userId: req.user.userId,
   };
 
+  // Demo sessions must never touch the tenant settings DB (D11 amendment,
+  // review !62 major 4): the demo banner promises "no modifications will be
+  // saved to the database", and the JWT's userDbUrl is the customer's REAL
+  // settings database — auth attaches a live pool for demo users too. Passing
+  // null routes the chat store to its per-process in-memory path, read and
+  // write, so demo transcripts never create rows (and never read the real
+  // user's persisted history). GET /session then reports persisted:false,
+  // which is truthful for demo.
+  const pool = req.user.demo ? null : (req.settingsPool ?? null);
+
   // --- session resolution. THE SERVER IS AUTHORITATIVE (D13). An unknown, expired or
   // foreign id silently yields a fresh session. NEVER 400, NEVER 404 — that is what makes
   // the in-memory fallback survivable across restarts and replicas (worst case: an empty
@@ -123,13 +133,11 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   //
   // NOTE: this is the CHAT session. It is unrelated to req.user.session_id
   // (middleware/auth.ts:15), which is the AUTH session. Do not conflate them.
-  const { sessionId, history } = await loadHistory(
-    req.settingsPool ?? null, ident, session_id,
-  );
+  const { sessionId, history } = await loadHistory(pool, ident, session_id);
 
   // Persist the user turn BEFORE calling the agent, so the transcript is coherent even
   // when the turn ends in type:'error'.
-  await appendTurns(req.settingsPool ?? null, ident, sessionId, [
+  await appendTurns(pool, ident, sessionId, [
     { role: 'user', content: message },
   ]);
 
@@ -177,7 +185,7 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   const assistantTurn: AgentTurn = turn.type === 'result'
     ? { role: 'assistant', type: 'result', content: turn.message, result: turn.result }
     : { role: 'assistant', type: turn.type, content: turn.message, result: null };
-  await appendTurns(req.settingsPool ?? null, ident, sessionId, [assistantTurn]);
+  await appendTurns(pool, ident, sessionId, [assistantTurn]);
 
   // The route stamps session_id. The service never sees it. The response is a bare
   // object (the locked wire contract), not the {success: true, …} envelope app.ts
@@ -197,9 +205,10 @@ router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Respo
     tenantKey: tenantKeyFor(req.user.userDbUrl),
     userId: req.user.userId,
   };
-  const { sessionId, history, persisted } = await loadHistory(
-    req.settingsPool ?? null, ident, null,
-  );
+  // Same demo guard as POST /chat above: demo history lives in process memory
+  // only, so demo reads must not surface the real user's persisted transcript.
+  const pool = req.user.demo ? null : (req.settingsPool ?? null);
+  const { sessionId, history, persisted } = await loadHistory(pool, ident, null);
   return res.json({ session_id: sessionId, persisted, messages: history });
 }));
 
