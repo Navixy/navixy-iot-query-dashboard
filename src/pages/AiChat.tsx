@@ -251,9 +251,13 @@ const AiChat = () => {
         {sessionQuery.data?.persisted === false && (
           // Disables nothing, and says nothing about the agent's memory (D19)
           // — Bedrock holds its own conversation state server-side either way.
+          // Blames the SERVICE, not the browser (review !62 round 2, minor):
+          // unpersisted history lives in backend process memory, which a page
+          // reload does survive — a restart, a replica switch or the 2 h TTL
+          // is what loses it.
           <p className="mt-2 text-xs text-muted-foreground">
-            Chat history is not persisted for this workspace and will not
-            survive a reload.
+            Chat history is not being saved for this workspace and may be lost
+            when the service restarts.
           </p>
         )}
       </div>
