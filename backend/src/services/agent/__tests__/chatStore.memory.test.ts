@@ -205,6 +205,67 @@ describe('chatStore — tenant isolation (MR !61 review, Critical)', () => {
   });
 });
 
+describe('chatStore — byte budgets on the fallback (MR !61 review)', () => {
+  // Count caps alone admitted ~250 MiB per session (100 turns can hold ~50 results
+  // at the 5 MiB artifact cap) and hundreds of GiB across 500 sessions. The store
+  // now also budgets SERIALIZED BYTES — dropping whole oldest turns/sessions, never
+  // truncating a retained payload.
+  const MIB = 1024 * 1024;
+  const bigTurn = (label: string, mib: number): AgentTurn => ({
+    role: 'assistant', type: 'result', content: label,
+    result: {
+      title: label,
+      report_schema: { title: label, panels: [], blob: 'x'.repeat(mib * MIB) },
+    },
+  });
+
+  it('caps a session at 8 MiB by dropping whole oldest turns; the newest payload stays intact', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    for (let i = 0; i < 9; i++) {
+      await appendTurns(null, ident('u1'), sessionId, [bigTurn(`turn-${i}`, 1)]);
+    }
+
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history.length).toBeLessThan(9); // byte-capped far below MAX_TURNS = 100
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[0]).not.toMatchObject({ content: 'turn-0' }); // oldest went first
+
+    const newest = history[history.length - 1];
+    if (newest.role !== 'assistant' || newest.type !== 'result') {
+      throw new Error('expected an assistant result turn');
+    }
+    expect(newest.content).toBe('turn-8');
+    const schema = newest.result.report_schema as { blob: string };
+    expect(schema.blob).toHaveLength(MIB); // intact — never truncated to fit
+  });
+
+  it('caps the whole fallback at 64 MiB by evicting whole oldest sessions', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const t0 = 1_700_000_000_000;
+    const ids: string[] = [];
+
+    // Ten tenants' users at ~7 MiB each — 70 MiB demanded of a 64 MiB budget.
+    for (let u = 0; u < 10; u++) {
+      nowSpy.mockReturnValue(t0 + u); // strictly increasing — g0 is strictly oldest
+      const { sessionId } = await loadHistory(null, ident(`g${u}`), null);
+      ids.push(sessionId);
+      for (let i = 0; i < 7; i++) {
+        await appendTurns(null, ident(`g${u}`), sessionId, [bigTurn(`g${u}-turn-${i}`, 1)]);
+      }
+    }
+
+    // Survivor FIRST (loadHistory is resolve-or-CREATE — probing the evicted user
+    // first would mint a session and shift the byte ledger this test is about).
+    nowSpy.mockReturnValue(t0 + 100);
+    const survivor = await loadHistory(null, ident('g9'), ids[9]);
+    expect(survivor.sessionId).toBe(ids[9]);
+    expect(survivor.history).toHaveLength(7); // eviction is whole-session, not per-turn
+
+    const evicted = await loadHistory(null, ident('g0'), ids[0]);
+    expect(evicted.sessionId).not.toBe(ids[0]); // oldest session paid for the budget
+  });
+});
+
 describe('tenantKeyFor', () => {
   it('is a stable sha256 hex of the URL that never contains the password', () => {
     const url = 'postgresql://app:s3kret-pw@db.tenant-a.example:5432/meta';

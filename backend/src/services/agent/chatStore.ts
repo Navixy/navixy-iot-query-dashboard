@@ -69,9 +69,18 @@ export function tenantKeyFor(userDbUrl: string): string {
 /** In-memory bounds. Unbounded fallbacks are SILENT leaks, so every axis is capped:
  *  session count (oldest-first eviction), turns per session (oldest dropped — the
  *  COUNT is capped, never the payload, so surviving result turns keep their full
- *  report_schema; see B4-R6), and age (lazy sweep on write). */
+ *  report_schema; see B4-R6), age (lazy sweep on write) — and BYTES (MR !61
+ *  review): the count caps alone still admitted ~250 MiB per session (100 turns
+ *  can hold ~50 results at the 5 MiB artifact cap) and hundreds of GiB across 500
+ *  sessions. Byte budgets evict whole oldest turns/sessions the same way; a
+ *  retained payload is never truncated. 8 MiB comfortably holds the largest single
+ *  admissible turn (a 5 MiB artifact plus prose) with room for the dialogue around
+ *  it; 64 MiB bounds what a DEGRADED fallback may reasonably claim of the process
+ *  heap. Sizes are serialized-turn byte lengths, computed once per buffered turn. */
 const MAX_SESSIONS = 500;
 const MAX_TURNS = 100;
+const MAX_SESSION_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 h
 
 /** Probe cache TTL: short enough that a DBA applying the DDL sees history go live
@@ -96,6 +105,9 @@ interface StoredTurn {
    *  latency dwarfs any clock jitter. */
   at: number;
   turn: AgentTurn;
+  /** Serialized size — computed once, lazily, when the turn enters the BUFFER
+   *  (never on the Postgres happy path, which would stringify twice for nothing). */
+  bytes?: number;
 }
 
 interface MemorySession {
@@ -103,9 +115,12 @@ interface MemorySession {
   /** For a pooled tenant this doubles as the WRITE-BEHIND BUFFER: by construction
    *  every entry here is absent from Postgres (a turn is buffered only when its
    *  Postgres write failed or the tables are missing), which is the invariant that
-   *  makes blind replay safe. Bounded by MAX_TURNS — an outage longer than that
-   *  loses oldest turns, the same bound the pure-memory tenant already lives with. */
+   *  makes blind replay safe. Bounded by MAX_TURNS and MAX_SESSION_BYTES — an
+   *  outage longer than those loses oldest turns, the same bound the pure-memory
+   *  tenant already lives with. */
   entries: StoredTurn[];
+  /** Sum of entry bytes — maintained by every mutation helper below. */
+  bytes: number;
   /** Last write (or creation). Feeds both the TTL sweep and oldest-first eviction. */
   updatedAt: number;
 }
@@ -117,6 +132,10 @@ interface MemorySession {
  *  sticky-session-dependent. docker-compose runs a single backend, so this is
  *  acceptable for v1 — and is a concrete reason to land the DDL. */
 let memorySessions = new Map<string, MemorySession>();
+
+/** Serialized bytes across ALL memory sessions — the MAX_TOTAL_BYTES ledger.
+ *  Every entry add/drop below adjusts it; nothing else may. */
+let memoryTotalBytes = 0;
 
 function memKey(ident: ChatIdentity): string {
   return `${ident.tenantKey}:${ident.userId}`;
@@ -135,6 +154,7 @@ let probeCache = new WeakMap<Pool, { exists: boolean; checkedAt: number }>();
  *  order-independent. Production never calls it. */
 export function __resetChatStoreForTests(): void {
   memorySessions = new Map();
+  memoryTotalBytes = 0;
   probeCache = new WeakMap();
 }
 
@@ -220,24 +240,57 @@ async function chatTablesExist(pool: Pool): Promise<boolean> {
 // In-memory fallback
 // ---------------------------------------------------------------------------
 
+function entryBytes(entry: StoredTurn): number {
+  if (entry.bytes === undefined) {
+    entry.bytes = Buffer.byteLength(JSON.stringify(entry.turn));
+  }
+  return entry.bytes;
+}
+
+function dropSession(key: string): void {
+  const session = memorySessions.get(key);
+  if (!session) return;
+  memoryTotalBytes -= session.bytes;
+  memorySessions.delete(key);
+}
+
+/** Drop the session's oldest entry WHOLE — payloads are never truncated to fit. */
+function dropOldestEntry(session: MemorySession): void {
+  const dropped = session.entries.shift();
+  if (!dropped) return;
+  const bytes = dropped.bytes ?? 0;
+  session.bytes -= bytes;
+  memoryTotalBytes -= bytes;
+}
+
 function sweepExpired(now: number): void {
   for (const [key, session] of memorySessions) {
-    if (now - session.updatedAt > SESSION_TTL_MS) memorySessions.delete(key);
+    if (now - session.updatedAt > SESSION_TTL_MS) dropSession(key);
   }
+}
+
+function evictOldestSession(): boolean {
+  let oldestKey: string | null = null;
+  let oldestAt = Number.POSITIVE_INFINITY;
+  for (const [key, session] of memorySessions) {
+    if (session.updatedAt < oldestAt) {
+      oldestAt = session.updatedAt;
+      oldestKey = key;
+    }
+  }
+  if (oldestKey === null) return false;
+  dropSession(oldestKey);
+  return true;
 }
 
 function evictIfOverflow(): void {
   while (memorySessions.size > MAX_SESSIONS) {
-    let oldestKey: string | null = null;
-    let oldestAt = Number.POSITIVE_INFINITY;
-    for (const [key, session] of memorySessions) {
-      if (session.updatedAt < oldestAt) {
-        oldestAt = session.updatedAt;
-        oldestKey = key;
-      }
-    }
-    if (oldestKey === null) break;
-    memorySessions.delete(oldestKey);
+    if (!evictOldestSession()) break;
+  }
+  // The global byte budget (MR !61 review). `size > 1` keeps the newest session
+  // even in the degenerate case — per-session enforcement already bounds it.
+  while (memoryTotalBytes > MAX_TOTAL_BYTES && memorySessions.size > 1) {
+    if (!evictOldestSession()) break;
   }
 }
 
@@ -254,7 +307,9 @@ function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
   const existing = memorySessions.get(memKey(ident));
   if (existing) return existing;
 
-  const created: MemorySession = { sessionId: randomUUID(), entries: [], updatedAt: now };
+  const created: MemorySession = {
+    sessionId: randomUUID(), entries: [], bytes: 0, updatedAt: now,
+  };
   memorySessions.set(memKey(ident), created);
   evictIfOverflow();
   return created;
@@ -280,9 +335,8 @@ function memoryAppend(ident: ChatIdentity, sessionId: string, entries: StoredTur
     // A degraded Postgres append (e.g. read-only standby) lands here carrying a
     // Postgres-minted sessionId. Adopt it: if the outage persists, the next
     // loadHistory degrades too, resolves this session and the transcript survives.
-    session = { sessionId, entries: [], updatedAt: now };
+    session = { sessionId, entries: [], bytes: 0, updatedAt: now };
     memorySessions.set(memKey(ident), session);
-    evictIfOverflow();
   } else if (session.sessionId !== sessionId) {
     // The id from THIS request's loadHistory is authoritative (D13). Same user,
     // same single dialogue (D7) — keep the turns, adopt the newer id.
@@ -295,12 +349,22 @@ function memoryAppend(ident: ChatIdentity, sessionId: string, entries: StoredTur
   for (const entry of entries) {
     if (entry.at <= lastAt) entry.at = lastAt + 1;
     lastAt = entry.at;
+    const bytes = entryBytes(entry);
+    session.bytes += bytes;
+    memoryTotalBytes += bytes;
   }
   session.entries.push(...entries);
-  if (session.entries.length > MAX_TURNS) {
-    session.entries.splice(0, session.entries.length - MAX_TURNS);
+  // Per-session budgets, oldest-first and WHOLE turns only. `length > 1` keeps the
+  // just-appended turn even if it alone exceeds the budget (it cannot today: a
+  // result is capped at the 5 MiB artifact plus 4000 chars of prose).
+  while (session.bytes > MAX_SESSION_BYTES && session.entries.length > 1) {
+    dropOldestEntry(session);
+  }
+  while (session.entries.length > MAX_TURNS) {
+    dropOldestEntry(session);
   }
   session.updatedAt = now;
+  evictIfOverflow(); // the create above and the bytes just added, in one place
 }
 
 // ---------------------------------------------------------------------------
@@ -432,8 +496,15 @@ function clearReplayed(ident: ChatIdentity, replayedIds: string[]): void {
   const session = memorySessions.get(memKey(ident));
   if (!session) return;
   const replayed = new Set(replayedIds);
-  session.entries = session.entries.filter((e) => !replayed.has(e.id));
-  if (session.entries.length === 0) memorySessions.delete(memKey(ident));
+  let freed = 0;
+  session.entries = session.entries.filter((e) => {
+    if (!replayed.has(e.id)) return true;
+    freed += e.bytes ?? 0;
+    return false;
+  });
+  session.bytes -= freed;
+  memoryTotalBytes -= freed;
+  if (session.entries.length === 0) dropSession(memKey(ident));
 }
 
 /** Maps a chat_messages row onto the AgentTurn union (§3.1). Legacy rows (type NULL)
