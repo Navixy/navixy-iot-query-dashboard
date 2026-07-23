@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { QueryClient } from '@tanstack/react-query';
+import { MutationObserver, QueryClient } from '@tanstack/react-query';
 import {
+  agentChatMutationKey,
   agentSessionQueryKey,
   createAgentChatContext,
   settleChatTurnIntoSessionCache,
@@ -153,5 +154,51 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
 
     expect(client.getQueryCache().getAll()).toHaveLength(0);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+describe('failed chat turns in the mutation cache (review !62 round 2, Important 4)', () => {
+  it('a turn that fails after its page unmounted keeps its draft and error readable, scoped to its epoch', async () => {
+    // AiChat surfaces failures by READING the mutation cache, not from
+    // mutate-level onError — this pins the mechanism that design relies on:
+    // the mutation entry, its variables and its error survive the observer
+    // (the page) going away mid-flight.
+    const epochA = beginAuthSession();
+    const client = new QueryClient();
+    const observer = new MutationObserver(client, {
+      mutationKey: agentChatMutationKey(epochA),
+      retry: false,
+      networkMode: 'always',
+      mutationFn: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new Error('network dropped');
+      },
+    });
+
+    // The page subscribes on mount, sends...
+    const unsubscribe = observer.subscribe(() => {});
+    const inFlight = observer
+      .mutate({ session_id: null, message: 'my careful draft' })
+      .catch(() => undefined);
+    // ...and unmounts mid-turn (navigation). The observer goes away; the
+    // mutation does not.
+    unsubscribe();
+    await inFlight;
+
+    const failed = client.getMutationCache().findAll({
+      mutationKey: agentChatMutationKey(epochA),
+      status: 'error',
+    });
+    expect(failed).toHaveLength(1);
+    expect(failed[0].state.variables).toEqual({ session_id: null, message: 'my careful draft' });
+    expect((failed[0].state.error as Error).message).toBe('network dropped');
+
+    // Another sign-in's filter must not see this sign-in's failure.
+    expect(
+      client.getMutationCache().findAll({
+        mutationKey: agentChatMutationKey('another-epoch'),
+        status: 'error',
+      }),
+    ).toHaveLength(0);
   });
 });
