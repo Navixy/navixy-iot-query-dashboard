@@ -267,13 +267,58 @@ describe('chatStore — byte budgets on the fallback (MR !61 review)', () => {
 });
 
 describe('tenantKeyFor', () => {
-  it('is a stable sha256 hex of the URL that never contains the password', () => {
+  it('is a stable sha256 hex that never contains the password', () => {
     const url = 'postgresql://app:s3kret-pw@db.tenant-a.example:5432/meta';
     const key = tenantKeyFor(url);
     expect(key).toMatch(/^[0-9a-f]{64}$/);
     expect(tenantKeyFor(url)).toBe(key); // deterministic — the fallback survives across requests
     expect(key).not.toContain('s3kret-pw');
     expect(tenantKeyFor('postgresql://app:other@db.tenant-b.example:5432/meta')).not.toBe(key);
+  });
+
+  // MR !61 round 3 (note 56573): the key must be the NORMALIZED pool identity, not a
+  // hash of the raw string. parsePostgresUrl drops every query parameter except
+  // sslmode, so URLs differing only in ignored parameters — or only in password —
+  // reach the SAME database through the SAME pool. A raw-string hash handed each
+  // spelling its own 20/min rate-limit bucket (?application_name=1, =2, … was a
+  // working bypass) and lost the fallback transcript on password rotation.
+  it('collapses URLs that differ only in ignored query parameters (the rate-limit bypass)', () => {
+    const base = 'postgresql://app:pw@db.tenant-a.example:5432/meta';
+    const key = tenantKeyFor(base);
+    expect(tenantKeyFor(`${base}?application_name=1`)).toBe(key);
+    expect(tenantKeyFor(`${base}?application_name=2`)).toBe(key);
+    expect(tenantKeyFor(`${base}?sslmode=require`)).toBe(key); // transport, not identity
+  });
+
+  it('is stable across password rotation — the pool survives, so must the tenant key', () => {
+    expect(tenantKeyFor('postgresql://app:old-pw@db.tenant-a.example:5432/meta'))
+      .toBe(tenantKeyFor('postgresql://app:new-pw@db.tenant-a.example:5432/meta'));
+  });
+
+  it('inherits pool normalization: localhost spellings and the default port collapse', () => {
+    // Outside Docker parsePostgresUrl maps localhost → 127.0.0.1; jest runs outside.
+    expect(tenantKeyFor('postgresql://app:pw@localhost:5432/meta'))
+      .toBe(tenantKeyFor('postgresql://app:pw@127.0.0.1:5432/meta'));
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-a.example/meta'))
+      .toBe(tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta'));
+  });
+
+  it('still isolates real tenants: user, host and database each split the key', () => {
+    const base = tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta');
+    expect(tenantKeyFor('postgresql://other:pw@db.tenant-a.example:5432/meta')).not.toBe(base);
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-b.example:5432/meta')).not.toBe(base);
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/other')).not.toBe(base);
+  });
+
+  it('never throws — an unparseable URL degrades to a raw-string key (finer, never coarser)', () => {
+    // Unreachable for a URL that passed login, but the limiter's keyGenerator must
+    // never throw: errorHandler would 500 every chat request, and parse errors embed
+    // the full URL, password included.
+    const a = tenantKeyFor('not-a-postgres-url');
+    const b = tenantKeyFor('postgresql:///no-host');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(b).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(b);
   });
 });
 

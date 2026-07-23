@@ -31,6 +31,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { logger } from '../../utils/logger.js';
 import { isTransientDbError, toErrorMeta } from '../../utils/errors.js';
+import { settingsPoolKeyForUrl } from '../dbIdentity.js';
 import type { AgentChatResult, AgentTurn } from './types.js';
 
 export interface ChatStoreResult {
@@ -51,19 +52,51 @@ export interface ChatStoreResult {
  * The Postgres path needs no such scoping — each tenant's pool IS their own database.
  */
 export interface ChatIdentity {
-  /** Tenant scope — tenantKeyFor(userDbUrl). An opaque hash: NEVER the URL itself,
-   *  so no password enters this module or any map key (B4-R5). */
+  /** Tenant scope — tenantKeyFor(userDbUrl): a hash of the NORMALIZED pool
+   *  identity, so every equivalent spelling of one settings DB maps to one key
+   *  (MR !61 round 3). Opaque: never the URL itself, so no password enters this
+   *  module or any map key (B4-R5). */
   tenantKey: string;
   userId: string;
 }
 
-/** sha256 of the tenant's settings-DB URL. A HASH of the exact string, deliberately:
- *  the same granularity DatabaseService uses for its pool cache (keyed by URL,
- *  database.ts), so two spellings of one physical DB split — splitting is safe,
- *  merging is the vulnerability. Chosen over pool object identity so the fallback
- *  transcript survives a pool recreation (e.g. password rotation). */
+/** Memo of raw URL string → tenant key. tenantKeyFor sits on the rate limiter's
+ *  keyGenerator (every chat request) and parsePostgresUrl logs per call; distinct
+ *  URL strings per process ≈ tenants × password versions, so this stays tiny. The
+ *  cap only guards a hostile login spray — clearing wholesale is fine because the
+ *  derivation is deterministic. */
+let tenantKeyCache = new Map<string, string>();
+const TENANT_KEY_CACHE_MAX = 512;
+
+/** sha256 of the tenant's NORMALIZED pool identity (settingsPoolKeyForUrl:
+ *  `settings:user@host:port/database`) — NOT of the raw URL string. Raw-string
+ *  hashing keyed state per SPELLING, and parsePostgresUrl ignores every query
+ *  parameter except sslmode, so ?application_name=1, =2, … each minted a fresh
+ *  20/min rate-limit bucket while landing on the SAME pool — a working bypass —
+ *  and password rotation orphaned the fallback transcript (MR !61 round 3, note
+ *  56573). Merging spellings is safe precisely because the pool merges them: same
+ *  user@host:port/database IS the same physical database, i.e. the same tenant.
+ *  Isolation across real tenants is untouched — different host, database or DB
+ *  user still split. Hashing keeps the key opaque and password-free (B4-R5). */
 export function tenantKeyFor(userDbUrl: string): string {
-  return createHash('sha256').update(userDbUrl).digest('hex');
+  const cached = tenantKeyCache.get(userDbUrl);
+  if (cached) return cached;
+  let canonical: string;
+  try {
+    canonical = settingsPoolKeyForUrl(userDbUrl);
+  } catch {
+    // Unreachable for a URL that passed login (the parse is deterministic and login
+    // already ran it), but the limiter's keyGenerator MUST NOT throw: the error
+    // would surface through errorHandler as a 500 on every chat request, and parse
+    // errors embed the full URL — password included. Hashing the raw string is
+    // strictly FINER-grained: never weaker isolation, only more buckets. The
+    // prefixes keep the namespaces disjoint ('settings:' vs 'raw:').
+    canonical = `raw:${userDbUrl}`;
+  }
+  const key = createHash('sha256').update(canonical).digest('hex');
+  if (tenantKeyCache.size >= TENANT_KEY_CACHE_MAX) tenantKeyCache.clear();
+  tenantKeyCache.set(userDbUrl, key);
+  return key;
 }
 
 /** In-memory bounds. Unbounded fallbacks are SILENT leaks, so every axis is capped:
@@ -156,6 +189,7 @@ export function __resetChatStoreForTests(): void {
   memorySessions = new Map();
   memoryTotalBytes = 0;
   probeCache = new WeakMap();
+  tenantKeyCache = new Map();
 }
 
 /** Local replica of DatabaseService's private withSettingsDbRetry (database.ts:523):

@@ -46,7 +46,10 @@ const chatLimiter = rateLimit({
   // Key on tenant + userId, never req.ip — and never BARE userId: it is only unique
   // within one tenant's database, and login trusts any presented userDbUrl, so a bare
   // userId key lets one tenant sit in (or drain) another's bucket (MR !61 review; see
-  // ChatIdentity in chatStore.ts). A key that is not an IP sidesteps the library's
+  // ChatIdentity in chatStore.ts). The tenant half is the NORMALIZED pool identity,
+  // not the raw URL — a raw-URL hash let ?application_name=1, =2, … mint a fresh
+  // bucket per login, an unlimited-Bedrock-calls bypass (round 3, note 56573).
+  // A key that is not an IP sidesteps the library's
   // IP-address validation family entirely (verified against the pinned 7.5.1 dist: it
   // validates request-IP handling — ERR_ERL_INVALID_IP_ADDRESS and friends — and the
   // keyGenerator-IPv6 check documented for newer releases does not exist in this
