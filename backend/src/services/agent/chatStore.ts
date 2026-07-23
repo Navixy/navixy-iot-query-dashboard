@@ -24,7 +24,7 @@
  * convention (services/database.ts:610, :667, :730) — and caches the answer per pool
  * for a short TTL.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { logger } from '../../utils/logger.js';
 import { isTransientDbError, toErrorMeta } from '../../utils/errors.js';
@@ -34,6 +34,33 @@ export interface ChatStoreResult {
   sessionId: string;
   history: AgentTurn[];
   persisted: boolean;
+}
+
+/**
+ * WHO a transcript belongs to. userId ALONE IS NOT AN IDENTITY (MR !61 review,
+ * Critical): it is the tenant database's own users.id — unique only within that
+ * database — and login trusts whatever userDbUrl the caller presents, so a hostile
+ * tenant can mint a JWT for any userId by pre-seeding a row with a chosen id in a
+ * database they own. Every piece of CROSS-TENANT SHARED STATE in this process (the
+ * in-memory fallback here, the rate-limit bucket in routes/agent.ts) must therefore
+ * be scoped by tenant + user, never bare userId.
+ *
+ * The Postgres path needs no such scoping — each tenant's pool IS their own database.
+ */
+export interface ChatIdentity {
+  /** Tenant scope — tenantKeyFor(userDbUrl). An opaque hash: NEVER the URL itself,
+   *  so no password enters this module or any map key (B4-R5). */
+  tenantKey: string;
+  userId: string;
+}
+
+/** sha256 of the tenant's settings-DB URL. A HASH of the exact string, deliberately:
+ *  the same granularity DatabaseService uses for its pool cache (keyed by URL,
+ *  database.ts), so two spellings of one physical DB split — splitting is safe,
+ *  merging is the vulnerability. Chosen over pool object identity so the fallback
+ *  transcript survives a pool recreation (e.g. password rotation). */
+export function tenantKeyFor(userDbUrl: string): string {
+  return createHash('sha256').update(userDbUrl).digest('hex');
 }
 
 /** In-memory bounds. Unbounded fallbacks are SILENT leaks, so every axis is capped:
@@ -58,12 +85,17 @@ interface MemorySession {
   updatedAt: number;
 }
 
-/** Keyed by userId — DO-313 v1 is one continuous dialogue per user (D7), mirroring
- *  the chat_sessions_one_active_per_user partial unique index. PER-PROCESS: with
- *  more than one replica, in-memory history is sticky-session-dependent.
- *  docker-compose runs a single backend, so this is acceptable for v1 — and is a
- *  concrete reason to land the DDL. */
+/** Keyed by `${tenantKey}:${userId}` (memKey) — bare userId leaked transcripts
+ *  across tenants, see ChatIdentity (MR !61 review). One continuous dialogue per
+ *  user (D7), mirroring the chat_sessions_one_active_per_user partial unique index.
+ *  PER-PROCESS: with more than one replica, in-memory history is
+ *  sticky-session-dependent. docker-compose runs a single backend, so this is
+ *  acceptable for v1 — and is a concrete reason to land the DDL. */
 let memorySessions = new Map<string, MemorySession>();
+
+function memKey(ident: ChatIdentity): string {
+  return `${ident.tenantKey}:${ident.userId}`;
+}
 
 /** Probe result per tenant. The spec asked for Map<sha256(userDbUrl), …>, but this
  *  module is handed a Pool, not a URL — and DatabaseService.getClientSettingsPool
@@ -164,8 +196,8 @@ async function chatTablesExist(pool: Pool): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 function sweepExpired(now: number): void {
-  for (const [userId, session] of memorySessions) {
-    if (now - session.updatedAt > SESSION_TTL_MS) memorySessions.delete(userId);
+  for (const [key, session] of memorySessions) {
+    if (now - session.updatedAt > SESSION_TTL_MS) memorySessions.delete(key);
   }
 }
 
@@ -184,7 +216,7 @@ function evictIfOverflow(): void {
   }
 }
 
-function memoryResolveOrCreate(userId: string): MemorySession {
+function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
   // CONCURRENCY GUARD: the Postgres path makes first-turn get-or-create race-safe via
   // the chat_sessions_one_active_per_user partial unique index + ON CONFLICT DO
   // NOTHING. This map has no such constraint, so the guarantee here is that the
@@ -194,11 +226,11 @@ function memoryResolveOrCreate(userId: string): MemorySession {
   // disabled-while-pending rule is bypassed, but it costs three lines.
   const now = Date.now();
   sweepExpired(now); // TTL is swept lazily on write (and a create IS a write)
-  const existing = memorySessions.get(userId);
+  const existing = memorySessions.get(memKey(ident));
   if (existing) return existing;
 
   const created: MemorySession = { sessionId: randomUUID(), turns: [], updatedAt: now };
-  memorySessions.set(userId, created);
+  memorySessions.set(memKey(ident), created);
   evictIfOverflow();
   return created;
 }
@@ -206,21 +238,21 @@ function memoryResolveOrCreate(userId: string): MemorySession {
 /** The supplied session_id is deliberately not consulted here: one dialogue per user
  *  (D7) means the user's own live session IS the resolution for any id — unknown,
  *  expired or foreign ids silently land on it (D13). Never throws. */
-function memoryLoad(userId: string): ChatStoreResult {
-  const session = memoryResolveOrCreate(userId);
+function memoryLoad(ident: ChatIdentity): ChatStoreResult {
+  const session = memoryResolveOrCreate(ident);
   return { sessionId: session.sessionId, history: [...session.turns], persisted: false };
 }
 
-function memoryAppend(userId: string, sessionId: string, turns: AgentTurn[]): void {
+function memoryAppend(ident: ChatIdentity, sessionId: string, turns: AgentTurn[]): void {
   const now = Date.now();
   sweepExpired(now);
-  let session = memorySessions.get(userId);
+  let session = memorySessions.get(memKey(ident));
   if (!session) {
     // A degraded Postgres append (e.g. read-only standby) lands here carrying a
     // Postgres-minted sessionId. Adopt it: if the outage persists, the next
     // loadHistory degrades too, resolves this session and the transcript survives.
     session = { sessionId, turns: [], updatedAt: now };
-    memorySessions.set(userId, session);
+    memorySessions.set(memKey(ident), session);
     evictIfOverflow();
   } else if (session.sessionId !== sessionId) {
     // The id from THIS request's loadHistory is authoritative (D13). Same user,
@@ -325,8 +357,9 @@ function rowToTurn(row: ChatMessageRow): AgentTurn {
 }
 
 async function pgLoadHistory(
-  pool: Pool, userId: string, sessionId: string | null,
+  pool: Pool, ident: ChatIdentity, sessionId: string | null,
 ): Promise<ChatStoreResult> {
+  const { userId } = ident;
   // Wrapped in the transient retry like getGlobalVariables' whole read path
   // (database.ts:660): everything inside is idempotent — the INSERT arm is
   // get-or-create under ON CONFLICT DO NOTHING, so a retry lands on the re-SELECT.
@@ -356,8 +389,9 @@ async function pgLoadHistory(
 }
 
 async function pgAppendTurns(
-  pool: Pool, userId: string, sessionId: string, turns: AgentTurn[],
+  pool: Pool, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
 ): Promise<void> {
+  const { userId } = ident;
   // A WRITE — deliberately NOT wrapped in withTransientRetry (idempotent reads only:
   // a retried INSERT would duplicate the turn).
   const client = await pool.connect();
@@ -401,12 +435,12 @@ async function pgAppendTurns(
  *  oldest-first. NEVER rejects: a null pool, missing tables or any Postgres failure
  *  degrades to the bounded in-memory path with persisted: false. */
 export async function loadHistory(
-  pool: Pool | null, userId: string, sessionId: string | null,
+  pool: Pool | null, ident: ChatIdentity, sessionId: string | null,
 ): Promise<ChatStoreResult> {
   if (pool) {
     try {
       if (await chatTablesExist(pool)) {
-        return await pgLoadHistory(pool, userId, sessionId);
+        return await pgLoadHistory(pool, ident, sessionId);
       }
     } catch (error) {
       logger.warn('chatStore.loadHistory degraded to in-memory history', {
@@ -414,7 +448,7 @@ export async function loadHistory(
       });
     }
   }
-  return memoryLoad(userId);
+  return memoryLoad(ident);
 }
 
 /**
@@ -444,12 +478,12 @@ export async function loadHistory(
  * process; the turn itself already reached the user in the HTTP response.
  */
 export async function appendTurns(
-  pool: Pool | null, userId: string, sessionId: string, turns: AgentTurn[],
+  pool: Pool | null, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
 ): Promise<void> {
   if (pool) {
     try {
       if (await chatTablesExist(pool)) {
-        await pgAppendTurns(pool, userId, sessionId, turns);
+        await pgAppendTurns(pool, ident, sessionId, turns);
         return;
       }
     } catch (error) {
@@ -458,5 +492,5 @@ export async function appendTurns(
       });
     }
   }
-  memoryAppend(userId, sessionId, turns);
+  memoryAppend(ident, sessionId, turns);
 }

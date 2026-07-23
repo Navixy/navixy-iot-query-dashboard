@@ -20,7 +20,8 @@ import { asyncHandler, CustomError } from '../middleware/errorHandler.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { logger } from '../utils/logger.js';
 import { agentService } from '../services/agent/index.js';
-import { loadHistory, appendTurns } from '../services/agent/chatStore.js';
+import { loadHistory, appendTurns, tenantKeyFor } from '../services/agent/chatStore.js';
+import type { ChatIdentity } from '../services/agent/chatStore.js';
 import { validateDashboard } from '../services/agent/validateDashboard.js';
 import { envInt } from '../services/agent/artifactStore.js';
 import type { AgentTurn } from '../services/agent/types.js';
@@ -42,13 +43,19 @@ const chatLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  // Key STRICTLY on userId, never req.ip. A key that is not an IP sidesteps the
-  // library's IP-address validation family entirely (verified against the pinned 7.5.1
-  // dist: it validates request-IP handling — ERR_ERL_INVALID_IP_ADDRESS and friends —
-  // and the keyGenerator-IPv6 check documented for newer releases does not exist in
-  // this version). authenticateToken runs at the mount point, so user is always
-  // present — 'anonymous' is unreachable and exists to satisfy the type.
-  keyGenerator: (req) => (req as AuthenticatedRequest).user?.userId ?? 'anonymous',
+  // Key on tenant + userId, never req.ip — and never BARE userId: it is only unique
+  // within one tenant's database, and login trusts any presented userDbUrl, so a bare
+  // userId key lets one tenant sit in (or drain) another's bucket (MR !61 review; see
+  // ChatIdentity in chatStore.ts). A key that is not an IP sidesteps the library's
+  // IP-address validation family entirely (verified against the pinned 7.5.1 dist: it
+  // validates request-IP handling — ERR_ERL_INVALID_IP_ADDRESS and friends — and the
+  // keyGenerator-IPv6 check documented for newer releases does not exist in this
+  // version). authenticateToken runs at the mount point, so user is always present —
+  // 'anonymous' is unreachable and exists to satisfy the type.
+  keyGenerator: (req) => {
+    const user = (req as AuthenticatedRequest).user;
+    return user ? `${tenantKeyFor(user.userDbUrl)}:${user.userId}` : 'anonymous';
+  },
   // Mirrors the global limiter's localhost-in-development exemption (index.ts:125-129).
   // Without it, local testing of the chat loop hits 20/min almost immediately.
   // CONSEQUENCE: to exercise the 429 locally you must unset NODE_ENV=development.
@@ -93,6 +100,14 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
 
   const { session_id, message } = validateChatBody(req.body);
 
+  // Tenant-scoped identity for every piece of cross-tenant shared state (MR !61
+  // review, Critical) — see ChatIdentity in chatStore.ts. userDbUrl is guaranteed
+  // present: authenticateToken 401s without it (middleware/auth.ts:47).
+  const ident: ChatIdentity = {
+    tenantKey: tenantKeyFor(req.user.userDbUrl),
+    userId: req.user.userId,
+  };
+
   // --- session resolution. THE SERVER IS AUTHORITATIVE (D13). An unknown, expired or
   // foreign id silently yields a fresh session. NEVER 400, NEVER 404 — that is what makes
   // the in-memory fallback survivable across restarts and replicas (worst case: an empty
@@ -106,12 +121,12 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   // NOTE: this is the CHAT session. It is unrelated to req.user.session_id
   // (middleware/auth.ts:15), which is the AUTH session. Do not conflate them.
   const { sessionId, history } = await loadHistory(
-    req.settingsPool ?? null, req.user.userId, session_id,
+    req.settingsPool ?? null, ident, session_id,
   );
 
   // Persist the user turn BEFORE calling the agent, so the transcript is coherent even
   // when the turn ends in type:'error'.
-  await appendTurns(req.settingsPool ?? null, req.user.userId, sessionId, [
+  await appendTurns(req.settingsPool ?? null, ident, sessionId, [
     { role: 'user', content: message },
   ]);
 
@@ -159,7 +174,7 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   const assistantTurn: AgentTurn = turn.type === 'result'
     ? { role: 'assistant', type: 'result', content: turn.message, result: turn.result }
     : { role: 'assistant', type: turn.type, content: turn.message, result: null };
-  await appendTurns(req.settingsPool ?? null, req.user.userId, sessionId, [assistantTurn]);
+  await appendTurns(req.settingsPool ?? null, ident, sessionId, [assistantTurn]);
 
   // The route stamps session_id. The service never sees it. The response is a bare
   // object (the locked wire contract), not the {success: true, …} envelope app.ts
@@ -175,8 +190,12 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
 // makes a reloaded transcript re-previewable with zero S3 traffic.
 router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user?.userId) throw new CustomError('User not authenticated', 401);
+  const ident: ChatIdentity = {
+    tenantKey: tenantKeyFor(req.user.userDbUrl),
+    userId: req.user.userId,
+  };
   const { sessionId, history, persisted } = await loadHistory(
-    req.settingsPool ?? null, req.user.userId, null,
+    req.settingsPool ?? null, ident, null,
   );
   return res.json({ session_id: sessionId, persisted, messages: history });
 }));
