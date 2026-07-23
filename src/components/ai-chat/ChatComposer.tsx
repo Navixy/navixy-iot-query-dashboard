@@ -51,6 +51,15 @@ export function ChatComposer({ value, onChange, onSend, disabled }: ChatComposer
         onKeyDown={(event) => {
           // Enter sends; Shift+Enter inserts a newline.
           if (event.key === 'Enter' && !event.shiftKey) {
+            // Never send while an IME composition is active: committing a CJK
+            // conversion candidate fires Enter, and sending half-composed text
+            // into a non-idempotent 7-36 s turn permanently written into the
+            // stateful session is destructive (review !62, major 5). keyCode
+            // 229 covers Safari, which reports isComposing false on that
+            // keydown.
+            if (event.nativeEvent.isComposing || event.keyCode === 229) {
+              return;
+            }
             event.preventDefault();
             trySend();
           }
