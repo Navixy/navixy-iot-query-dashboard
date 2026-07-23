@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useMutationState } from '@tanstack/react-query';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/contexts/AuthContext';
-import { useAgentChatMutation, useAgentSession } from '@/hooks/use-agent-chat';
+import {
+  AGENT_CHAT_MUTATION_KEY,
+  useAgentChatMutation,
+  useAgentSession,
+} from '@/hooks/use-agent-chat';
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
 import { EmptyState } from '@/components/ai-chat/EmptyState';
@@ -42,6 +47,18 @@ const AiChat = () => {
   const sessionQuery = useAgentSession();
   const chat = useAgentChatMutation();
 
+  // Pending state ACROSS remounts (review !62, major 1). chat.isPending is
+  // per-observer: a page that unmounts mid-turn and remounts sees false while
+  // the 7-36 s turn is still in flight — composer enabled, no indicator, and a
+  // re-send double-feeds the stateful Bedrock session. useMutationState reads
+  // the shared mutation cache instead, so the returning mount keeps the
+  // composer locked and the typing indicator up until the turn settles.
+  const pendingChatTurns = useMutationState({
+    filters: { mutationKey: AGENT_CHAT_MUTATION_KEY, status: 'pending' },
+    select: (mutation) => mutation.state.status,
+  });
+  const isChatPending = pendingChatTurns.length > 0 || chat.isPending;
+
   // D13: the SERVER is authoritative. Seeded from the session query, then
   // OVERWRITTEN from every single response — including error responses, which
   // still carry a session_id. A ref, not state: nothing renders from it, and
@@ -53,14 +70,15 @@ const AiChat = () => {
   // turn.
   const [liveBubbles, setLiveBubbles] = useState<ChatBubble[]>([]);
 
-  // The history THIS mount renders: captured once from the session query, then
-  // frozen. The mutation's hook-level onSuccess also writes live turns into the
-  // query cache (for the NEXT mount — R26), so rendering the live query data
-  // here would show every live turn twice. Captured only while no live bubble
-  // exists: if a turn completes before the session read returns, the read's
-  // payload may already contain that turn, and freezing without it is the
-  // duplication-safe side of that race (the next mount reconciles from the
-  // server).
+  // The history THIS mount renders. Tracks the session query WHILE no live
+  // bubble exists — so a remount mid-turn re-materializes the in-flight user
+  // turn from the mount refetch, and the reply lands via the mutation's
+  // hook-level cache write (review !62, major 1). It FREEZES the moment a
+  // bubble is produced live: from then on the cache updates for this turn are
+  // already represented by liveBubbles, and rendering the live query data too
+  // would show every turn twice. If a turn completes before the session read
+  // returns, freezing without the history is the duplication-safe side of that
+  // race (the next mount reconciles from the server).
   const [historyBubbles, setHistoryBubbles] = useState<ChatBubble[] | null>(null);
 
   useEffect(() => {
@@ -69,10 +87,10 @@ const AiChat = () => {
     if (sessionIdRef.current === null) {
       sessionIdRef.current = data.session_id;
     }
-    if (historyBubbles === null && liveBubbles.length === 0) {
+    if (liveBubbles.length === 0) {
       setHistoryBubbles(data.messages.map(turnToBubble));
     }
-  }, [sessionQuery.data, historyBubbles, liveBubbles.length]);
+  }, [sessionQuery.data, liveBubbles.length]);
 
   const [composerValue, setComposerValue] = useState('');
   const liveIdRef = useRef(0);
@@ -85,7 +103,7 @@ const AiChat = () => {
 
   const send = () => {
     const message = composerValue.trim();
-    if (message === '' || chat.isPending) return;
+    if (message === '' || isChatPending) return;
     const nextLiveId = () => `live-${liveIdRef.current++}`;
     setComposerValue('');
     setLiveBubbles((prev) => [...prev, { id: nextLiveId(), role: 'user', text: message }]);
@@ -150,7 +168,7 @@ const AiChat = () => {
     <AppLayout contentClassName="h-full flex flex-col min-h-0 px-6 max-w-7xl mx-auto w-full">
       <div className="min-h-0 flex-1">
         {bubbles.length > 0 ? (
-          <ChatTranscript bubbles={bubbles} isPending={chat.isPending} canApply={canApply} />
+          <ChatTranscript bubbles={bubbles} isPending={isChatPending} canApply={canApply} />
         ) : sessionQuery.isLoading ? (
           <div className="space-y-4 py-6" aria-hidden="true">
             <Skeleton className="h-10 w-2/3" />
@@ -163,13 +181,13 @@ const AiChat = () => {
       </div>
       <div className="shrink-0 pb-6 pt-2">
         {/* The composer is NEVER disabled by sessionQuery.isError or isLoading —
-            only by chat.isPending. Gating it on the session read breaks the
-            page for every tenant whose session read fails (B5-R5, M13). */}
+            only by an in-flight chat turn. Gating it on the session read breaks
+            the page for every tenant whose session read fails (B5-R5, M13). */}
         <ChatComposer
           value={composerValue}
           onChange={setComposerValue}
           onSend={send}
-          disabled={chat.isPending}
+          disabled={isChatPending}
         />
         {sessionQuery.data?.persisted === false && (
           // Disables nothing, and says nothing about the agent's memory (D19)
