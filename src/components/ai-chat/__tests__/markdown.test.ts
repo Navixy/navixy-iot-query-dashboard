@@ -49,9 +49,29 @@ describe('parseMarkdown', () => {
     const block = blocks[0];
     expect(block.kind).toBe('ol');
     if (block.kind !== 'ol') throw new Error('unreachable');
+    expect(block.start).toBe(1);
     expect(block.items).toHaveLength(3);
     expect(block.items[0]).toEqual([{ kind: 'text', value: 'a' }]);
     expect(block.items[2]).toEqual([{ kind: 'text', value: 'c' }]);
+  });
+
+  it('keeps ordinals for a LOOSE numbered list — blank-line-separated items must not all render as "1."', () => {
+    // Interview questions with explanatory prose between them arrive exactly
+    // like this; each item becomes its own ol block and must carry its real
+    // number via `start` (review !62).
+    const blocks = parseMarkdown('1. first\n\n2. second\n\n3. third');
+    expect(blocks).toHaveLength(3);
+    for (const block of blocks) expect(block.kind).toBe('ol');
+    const starts = blocks.map((b) => (b.kind === 'ol' ? b.start : -1));
+    expect(starts).toEqual([1, 2, 3]);
+  });
+
+  it('starts an ordered list at the ordinal the text declares', () => {
+    const blocks = parseMarkdown('7. seventh item');
+    expect(blocks).toHaveLength(1);
+    const block = blocks[0];
+    if (block.kind !== 'ol') throw new Error('expected ol');
+    expect(block.start).toBe(7);
   });
 
   it('coalesces - and * markers into one ul', () => {
@@ -98,8 +118,19 @@ describe('parseMarkdown', () => {
     expect(blocks).toHaveLength(1);
     if (blocks[0].kind !== 'p') throw new Error('unreachable');
     expect(blocks[0].spans).toEqual([{ kind: 'text', value: payload }]);
-    // Structural guarantee, checked at compile time: there is no 'html' block
-    // kind to smuggle markup through. Adding one stops this test compiling.
+    // Runtime guard: every kind the tokenizer can emit is one of the three
+    // renderable block kinds / three span kinds — no 'html' anywhere. This is
+    // the ENFORCED check: the expectTypeOf lines below document the same
+    // property at the type level, but this suite has no vitest typecheck pass
+    // and tests are excluded from tsconfig.app.json, so they are never
+    // compiled by any gate (review !62) — do not rely on them alone.
+    const probe = parseMarkdown('text\n\n1. a\n\n- b\n`c` **d**');
+    expect(new Set(probe.map((b) => b.kind))).toEqual(new Set(['p', 'ol', 'ul']));
+    expect(
+      probe
+        .flatMap((b) => (b.kind === 'p' ? b.spans : b.items.flat()))
+        .every((s) => ['text', 'bold', 'code'].includes(s.kind)),
+    ).toBe(true);
     expectTypeOf<Extract<MdBlock, { kind: 'html' }>>().toBeNever();
     expectTypeOf<Extract<MdSpan, { kind: 'html' }>>().toBeNever();
   });
