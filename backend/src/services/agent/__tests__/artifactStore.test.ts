@@ -399,4 +399,24 @@ describe('envInt — feeds every tuning knob (MR !57 review gap)', () => {
   it('accepts a positive integer string', () => {
     expect(envInt('120000', 5_000)).toBe(120_000);
   });
+
+  // MR !61 review: envInt feeds AbortSignal.timeout, whose domain is NARROWER than
+  // "positive finite number". Measured: 1.5 and 4294967296 throw ERR_OUT_OF_RANGE
+  // (a bare error — no statusCode — so an opaque 500 on every chat request), and on
+  // the node:22-alpine deploy image 2147483648 is silently clamped to ~1 ms with a
+  // TimeoutOverflowWarning, timing out every agent request instantly.
+  it('falls back on a fractional value — AbortSignal.timeout(1.5) throws ERR_OUT_OF_RANGE', () => {
+    expect(envInt('1.5', 5_000)).toBe(5_000);
+  });
+
+  it('accepts the timer ceiling 2147483647 exactly', () => {
+    expect(envInt('2147483647', 5_000)).toBe(2_147_483_647);
+  });
+
+  it.each([
+    ['2^31 (clamped to ~1 ms on Node 22)', '2147483648'],
+    ['2^32 (ERR_OUT_OF_RANGE on Node 24)', '4294967296'],
+  ])('falls back past the 32-bit signed timer ceiling: %s', (_label, raw) => {
+    expect(envInt(raw, 5_000)).toBe(5_000);
+  });
 });

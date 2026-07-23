@@ -31,8 +31,9 @@ const router = Router();
 // and AbortSignal.timeout(NaN) throws a bare RangeError — no statusCode, so errorHandler
 // returns an opaque 500 on EVERY chat request, after the user turn is already persisted,
 // bypassing the in-band taxonomy this route exists to enforce; timeout(0) aborts on the
-// first tick. envInt falls back on anything that is not a positive finite number — the
-// same way bedrockAgent reads its own tuning knobs.
+// first tick. envInt falls back on anything that is not a timer-safe positive integer
+// (fractions throw ERR_OUT_OF_RANGE, values past 2^31-1 clamp to ~1 ms on the Node 22
+// deploy image — MR !61 review) — the same way bedrockAgent reads its own tuning knobs.
 const AGENT_TIMEOUT_MS = envInt(process.env.AGENT_TIMEOUT_MS, 180_000);
 export const MAX_MESSAGE_LENGTH = 4_000; // exported: the composer mirrors it (MR 5)
 

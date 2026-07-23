@@ -229,8 +229,25 @@ function namedError(name: string, message: string): Error {
   return e;
 }
 
-/** Shared with bedrockAgent.ts, which reads its own tuning knobs the same way. */
+/** The 32-bit signed timer ceiling. Every consumer of envInt is an integer knob
+ *  (milliseconds, bytes, attempt counts) and the most fragile sink is
+ *  AbortSignal.timeout: past this value Node 22 silently clamps to ~1 ms with a
+ *  TimeoutOverflowWarning (timing out every agent request instantly) and Node 24
+ *  throws ERR_OUT_OF_RANGE past 2^32-1 — a bare error with no statusCode, so an
+ *  opaque 500 (MR !61 review). 2^31-1 is the smallest ceiling across both. */
+const MAX_ENV_INT = 2_147_483_647;
+
+/** Shared with bedrockAgent.ts, which reads its own tuning knobs the same way.
+ *  Accepts POSITIVE INTEGERS up to MAX_ENV_INT only — AbortSignal.timeout throws
+ *  ERR_OUT_OF_RANGE on fractions, so "positive finite number" is not good enough
+ *  (MR !61 review). Unset and empty mean "not configured" and fall back silently;
+ *  anything else out of domain falls back with a warn, so a poisoned deploy is
+ *  visible in the logs instead of crashing or hobbling the route. */
 export function envInt(raw: string | undefined, fallback: number): number {
   const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  if (Number.isInteger(n) && n > 0 && n <= MAX_ENV_INT) return n;
+  if (raw !== undefined && raw !== '') {
+    logger.warn('Ignoring out-of-domain integer env value; using fallback', { raw, fallback });
+  }
+  return fallback;
 }
