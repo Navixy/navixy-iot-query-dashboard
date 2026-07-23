@@ -132,6 +132,12 @@ const AiChat = () => {
           ]);
         },
         onError: (error) => {
+          // Give the user their message back: the send cleared the composer
+          // optimistically, and a 429/timeout/network drop must not destroy a
+          // possibly long, carefully-typed request (review !62). The composer
+          // was disabled for the whole flight, so it can only be empty here —
+          // the guard is belt and braces against a future edit.
+          setComposerValue((current) => (current === '' ? message : current));
           // No session_id to adopt — a transport failure carries no response
           // body. The ref keeps its last known value.
           setLiveBubbles((prev) => [

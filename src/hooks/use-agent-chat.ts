@@ -98,6 +98,13 @@ export function useAgentChatMutation() {
     // agent's server-side conversation memory and double-appending the
     // transcript (R20).
     retry: false,
+    // Fail fast when offline instead of pausing (review !62): the default
+    // 'online' mode holds the mutation in isPending with no request in flight
+    // — the typing indicator runs forever, the 190 s transport ceiling never
+    // starts, and nothing tells the user why. 'always' lets fetch fail
+    // immediately, which lands in onError and renders the standard in-line
+    // error bubble with the draft restored.
+    networkMode: 'always',
     // Snapshot the transcript length at send time. The backend persists the
     // user turn at POST receipt — BEFORE the agent call (routes/agent.ts) — so
     // any session refetch that resolves while the turn is in flight already
