@@ -5,9 +5,12 @@
  *
  * 1. IT NEVER THROWS AND NEVER 500s. Missing tables, revoked grants, a settings DB
  *    briefly routed to a read-only standby — every failure is caught, logger.warn'ed
- *    once, and degraded to the bounded in-memory path. A tenant whose DBA has not
- *    applied 002_add_chat_tables.sql still gets a working chat; they just lose the
- *    transcript on reload.
+ *    once, and degraded to the bounded in-memory path. The memory path is a
+ *    WRITE-BEHIND BUFFER (MR !61 review): the next healthy Postgres touch replays
+ *    it into the resolved session, so a mid-dialogue outage no longer forfeits the
+ *    turns it swallowed — a tenant whose DBA has not applied
+ *    002_add_chat_tables.sql still gets a working chat, and the transcript now
+ *    survives INTO Postgres once the DDL lands.
  *
  * 2. IT IS DISPLAY-ONLY. The transcript is (a) what GET /api/agent/session rehydrates
  *    into the UI and (b) the mock's turn counter. It is NEVER sent to Bedrock: under
@@ -78,9 +81,31 @@ const PROBE_TTL_MS = 60_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** A turn plus the identity it carries through EVERY store (MR !61 review). */
+interface StoredTurn {
+  /** Minted ONCE, when the turn enters the store, and carried through memory and
+   *  Postgres alike: the message INSERT is `ON CONFLICT (id) DO NOTHING`, which
+   *  makes replaying a buffered turn idempotent even across an in-doubt COMMIT
+   *  (connection lost after the server applied it — the classic case where
+   *  "just retry the INSERT" duplicates the row). */
+  id: string;
+  /** Entry wall-clock (ms) — becomes the Postgres row's created_at, so a replayed
+   *  outage buffer keeps truthful timestamps and total order instead of collapsing
+   *  onto one transaction NOW(). Nudged strictly monotonic within a batch and
+   *  within a session buffer; across separate requests the agent's multi-second
+   *  latency dwarfs any clock jitter. */
+  at: number;
+  turn: AgentTurn;
+}
+
 interface MemorySession {
   sessionId: string;
-  turns: AgentTurn[];
+  /** For a pooled tenant this doubles as the WRITE-BEHIND BUFFER: by construction
+   *  every entry here is absent from Postgres (a turn is buffered only when its
+   *  Postgres write failed or the tables are missing), which is the invariant that
+   *  makes blind replay safe. Bounded by MAX_TURNS — an outage longer than that
+   *  loses oldest turns, the same bound the pure-memory tenant already lives with. */
+  entries: StoredTurn[];
   /** Last write (or creation). Feeds both the TTL sweep and oldest-first eviction. */
   updatedAt: number;
 }
@@ -229,7 +254,7 @@ function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
   const existing = memorySessions.get(memKey(ident));
   if (existing) return existing;
 
-  const created: MemorySession = { sessionId: randomUUID(), turns: [], updatedAt: now };
+  const created: MemorySession = { sessionId: randomUUID(), entries: [], updatedAt: now };
   memorySessions.set(memKey(ident), created);
   evictIfOverflow();
   return created;
@@ -240,10 +265,14 @@ function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
  *  expired or foreign ids silently land on it (D13). Never throws. */
 function memoryLoad(ident: ChatIdentity): ChatStoreResult {
   const session = memoryResolveOrCreate(ident);
-  return { sessionId: session.sessionId, history: [...session.turns], persisted: false };
+  return {
+    sessionId: session.sessionId,
+    history: session.entries.map((e) => e.turn),
+    persisted: false,
+  };
 }
 
-function memoryAppend(ident: ChatIdentity, sessionId: string, turns: AgentTurn[]): void {
+function memoryAppend(ident: ChatIdentity, sessionId: string, entries: StoredTurn[]): void {
   const now = Date.now();
   sweepExpired(now);
   let session = memorySessions.get(memKey(ident));
@@ -251,7 +280,7 @@ function memoryAppend(ident: ChatIdentity, sessionId: string, turns: AgentTurn[]
     // A degraded Postgres append (e.g. read-only standby) lands here carrying a
     // Postgres-minted sessionId. Adopt it: if the outage persists, the next
     // loadHistory degrades too, resolves this session and the transcript survives.
-    session = { sessionId, turns: [], updatedAt: now };
+    session = { sessionId, entries: [], updatedAt: now };
     memorySessions.set(memKey(ident), session);
     evictIfOverflow();
   } else if (session.sessionId !== sessionId) {
@@ -259,9 +288,17 @@ function memoryAppend(ident: ChatIdentity, sessionId: string, turns: AgentTurn[]
     // same single dialogue (D7) — keep the turns, adopt the newer id.
     session.sessionId = sessionId;
   }
-  session.turns.push(...turns);
-  if (session.turns.length > MAX_TURNS) {
-    session.turns.splice(0, session.turns.length - MAX_TURNS);
+  // Keep entry timestamps strictly increasing within the buffer: replay order IS
+  // created_at order, so a clock step backwards between two buffered writes must
+  // not be able to flip a user/assistant pair.
+  let lastAt = session.entries[session.entries.length - 1]?.at ?? 0;
+  for (const entry of entries) {
+    if (entry.at <= lastAt) entry.at = lastAt + 1;
+    lastAt = entry.at;
+  }
+  session.entries.push(...entries);
+  if (session.entries.length > MAX_TURNS) {
+    session.entries.splice(0, session.entries.length - MAX_TURNS);
   }
   session.updatedAt = now;
 }
@@ -329,10 +366,74 @@ async function resolveSession(
 }
 
 interface ChatMessageRow {
+  id: string;
   role: string;
   type: string | null;
   content: string;
   result: unknown;
+}
+
+/** The ONE way a turn reaches chat_messages — direct append and buffered replay
+ *  share it, so both carry the store-minted id (idempotence) and the entry-time
+ *  created_at (order). Runs inside the caller's open transaction. */
+async function insertEntry(
+  client: PoolClient, userId: string, sessionId: string, entry: StoredTurn,
+): Promise<void> {
+  const { turn } = entry;
+  const type = turn.role === 'assistant' ? turn.type ?? null : null;
+  const result =
+    turn.role === 'assistant' && turn.type === 'result'
+      ? JSON.stringify(turn.result)
+      : null;
+  if (result !== null) {
+    // §3.4.6's size budget (~5-50 KB per result turn) is observable if it drifts.
+    logger.info('Persisting agent result turn', {
+      sessionId,
+      resultBytes: Buffer.byteLength(result),
+    });
+  }
+  await client.query(
+    `INSERT INTO dashboard_studio_meta_data.chat_messages
+       (id, session_id, user_id, role, content, type, result, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8 / 1000.0))
+     ON CONFLICT (id) DO NOTHING`,
+    [entry.id, sessionId, userId, turn.role, turn.content, type, result, entry.at],
+  );
+}
+
+/** RECONCILIATION (MR !61 review): INSERT every buffered entry for this identity
+ *  into the given Postgres session, inside the caller's OPEN transaction. Returns
+ *  the replayed ids; the caller clears them from the buffer with clearReplayed
+ *  AFTER its COMMIT — clearing earlier would lose them on rollback. The buffer may
+ *  target a different (memory-minted) sessionId than the resolved one; D7's single
+ *  dialogue per user makes the resolved session the right destination either way. */
+async function replayBufferedEntries(
+  client: PoolClient, ident: ChatIdentity, sessionId: string,
+): Promise<string[]> {
+  const session = memorySessions.get(memKey(ident));
+  if (!session || session.entries.length === 0) return [];
+  const snapshot = [...session.entries];
+  for (const entry of snapshot) {
+    await insertEntry(client, ident.userId, sessionId, entry);
+  }
+  logger.info('Replayed buffered chat turns into Postgres', {
+    sessionId,
+    replayed: snapshot.length,
+  });
+  return snapshot.map((e) => e.id);
+}
+
+/** Drop successfully replayed entries from the buffer — by id, not wholesale: a
+ *  concurrent request (GET /session racing POST /chat) may have buffered NEW
+ *  entries between the replay snapshot and the COMMIT, and those must survive for
+ *  the next replay. */
+function clearReplayed(ident: ChatIdentity, replayedIds: string[]): void {
+  if (replayedIds.length === 0) return;
+  const session = memorySessions.get(memKey(ident));
+  if (!session) return;
+  const replayed = new Set(replayedIds);
+  session.entries = session.entries.filter((e) => !replayed.has(e.id));
+  if (session.entries.length === 0) memorySessions.delete(memKey(ident));
 }
 
 /** Maps a chat_messages row onto the AgentTurn union (§3.1). Legacy rows (type NULL)
@@ -361,26 +462,62 @@ async function pgLoadHistory(
 ): Promise<ChatStoreResult> {
   const { userId } = ident;
   // Wrapped in the transient retry like getGlobalVariables' whole read path
-  // (database.ts:660): everything inside is idempotent — the INSERT arm is
-  // get-or-create under ON CONFLICT DO NOTHING, so a retry lands on the re-SELECT.
+  // (database.ts:660): everything inside is idempotent — session get-or-create is
+  // ON CONFLICT DO NOTHING, and replayed turns carry store-minted ids under
+  // ON CONFLICT (id) DO NOTHING, so a retried replay cannot duplicate.
   return withTransientRetry('chatStore.loadHistory', async () => {
     const client = await pool.connect();
     try {
       const resolved = await resolveSession(client, userId, sessionId);
 
+      // RECONCILIATION, read side (MR !61 review): drain the outage buffer BEFORE
+      // reading, so a transcript split across stores heals on the next healthy
+      // touch — including the whole memory-era transcript the moment the probe
+      // notices the tables were applied.
+      let unreplayed: StoredTurn[] = [];
+      const buffered = memorySessions.get(memKey(ident));
+      if (buffered && buffered.entries.length > 0) {
+        try {
+          await client.query('BEGIN');
+          const replayedIds = await replayBufferedEntries(client, ident, resolved);
+          await client.query('COMMIT');
+          clearReplayed(ident, replayedIds);
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => undefined);
+          // A failed replay must not fail the READ: keep the buffer for the next
+          // touch and MERGE it into the response below, so the user still sees
+          // their result while it waits to reach Postgres.
+          unreplayed = [...buffered.entries];
+          logger.warn('chat buffer replay failed; serving merged history, keeping the buffer', {
+            error: toErrorMeta(error).message,
+          });
+        }
+      }
+
       // Cap the COUNT of turns on read — a long transcript cannot blow the response
       // size. Result turns keep their full `result` payload: stripping dashboards
       // would be the failure D16 exists to prevent (an assistant claiming it built a
       // dashboard with no way to preview it). Newest MAX_TURNS, returned oldest-first.
+      // id is only a tiebreak: entry-time created_at makes ties unreachable in the
+      // normal flow, but DBA-inserted or legacy rows must still order stably.
       const rows = await client.query(
-        `SELECT role, type, content, result
+        `SELECT id, role, type, content, result
            FROM dashboard_studio_meta_data.chat_messages
           WHERE session_id = $1 AND user_id = $2
-          ORDER BY created_at DESC
+          ORDER BY created_at DESC, id DESC
           LIMIT $3`,
         [resolved, userId, MAX_TURNS],
       );
-      const history = (rows.rows as ChatMessageRow[]).reverse().map(rowToTurn);
+      const pgRows = rows.rows as ChatMessageRow[];
+      let history = pgRows.slice().reverse().map(rowToTurn);
+      if (unreplayed.length > 0) {
+        // Buffer ∩ Postgres is empty by construction, with ONE exception: an
+        // in-doubt COMMIT (applied server-side, error client-side) leaves the turn
+        // in both until the next replay clears it — so merge by id, not blindly.
+        const present = new Set(pgRows.map((r) => String(r.id)));
+        const missing = unreplayed.filter((e) => !present.has(e.id)).map((e) => e.turn);
+        history = [...history, ...missing].slice(-MAX_TURNS);
+      }
       return { sessionId: resolved, history, persisted: true };
     } finally {
       client.release();
@@ -389,32 +526,25 @@ async function pgLoadHistory(
 }
 
 async function pgAppendTurns(
-  pool: Pool, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
+  pool: Pool, ident: ChatIdentity, sessionId: string, entries: StoredTurn[],
 ): Promise<void> {
   const { userId } = ident;
-  // A WRITE — deliberately NOT wrapped in withTransientRetry (idempotent reads only:
-  // a retried INSERT would duplicate the turn).
+  // A WRITE — deliberately NOT wrapped in withTransientRetry: the failure path
+  // (buffer, then replay on the next healthy touch) already delivers the turn
+  // exactly once, which an inline retry could only approximate.
+  //
+  // ONE transaction covers the buffered replay, the new turns and the session
+  // touch (MR !61 review): it lands whole or not at all, so memory and Postgres
+  // can never hold overlapping halves of a request.
   const client = await pool.connect();
   try {
-    for (const turn of turns) {
-      const type = turn.role === 'assistant' ? turn.type ?? null : null;
-      const result =
-        turn.role === 'assistant' && turn.type === 'result'
-          ? JSON.stringify(turn.result)
-          : null;
-      if (result !== null) {
-        // §3.4.6's size budget (~5-50 KB per result turn) is observable if it drifts.
-        logger.info('Persisting agent result turn', {
-          sessionId,
-          resultBytes: Buffer.byteLength(result),
-        });
-      }
-      await client.query(
-        `INSERT INTO dashboard_studio_meta_data.chat_messages
-           (session_id, user_id, role, content, type, result)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [sessionId, userId, turn.role, turn.content, type, result],
-      );
+    await client.query('BEGIN');
+    // RECONCILIATION, write side: drain older buffered turns FIRST so a healed
+    // transcript keeps its order — the user turn from a moment ago may sit in the
+    // buffer while this assistant turn finds Postgres healthy again.
+    const replayedIds = await replayBufferedEntries(client, ident, sessionId);
+    for (const entry of entries) {
+      await insertEntry(client, userId, sessionId, entry);
     }
     await client.query(
       `UPDATE dashboard_studio_meta_data.chat_sessions
@@ -422,6 +552,11 @@ async function pgAppendTurns(
         WHERE id = $1 AND user_id = $2`,
       [sessionId, userId],
     );
+    await client.query('COMMIT');
+    clearReplayed(ident, replayedIds);
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
   } finally {
     client.release();
   }
@@ -474,16 +609,25 @@ export async function loadHistory(
  * MITIGATION, and should be alarming, not routine.
  *
  * NEVER rejects: any Postgres failure (including a read-only standby refusing the
- * INSERT) degrades to the in-memory path so the transcript stays coherent for this
- * process; the turn itself already reached the user in the HTTP response.
+ * INSERT) degrades to the in-memory path — which since MR !61's review is a
+ * WRITE-BEHIND BUFFER, not a dead end: the next healthy Postgres touch (load or
+ * append) transactionally replays buffered turns into the resolved session, so a
+ * partial failure can never orphan an assistant result, and the turn itself
+ * already reached the user in the HTTP response.
  */
 export async function appendTurns(
   pool: Pool | null, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
 ): Promise<void> {
+  // Entry ids and timestamps are minted HERE, before any storage decision, so the
+  // same identity follows a turn wherever it lands — memory today, Postgres on
+  // replay tomorrow — and ON CONFLICT (id) DO NOTHING makes double-insertion
+  // structurally impossible.
+  let at = Date.now();
+  const entries: StoredTurn[] = turns.map((turn) => ({ id: randomUUID(), at: at++, turn }));
   if (pool) {
     try {
       if (await chatTablesExist(pool)) {
-        await pgAppendTurns(pool, ident, sessionId, turns);
+        await pgAppendTurns(pool, ident, sessionId, entries);
         return;
       }
     } catch (error) {
@@ -492,5 +636,5 @@ export async function appendTurns(
       });
     }
   }
-  memoryAppend(ident, sessionId, turns);
+  memoryAppend(ident, sessionId, entries);
 }

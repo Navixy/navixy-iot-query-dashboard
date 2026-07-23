@@ -8,10 +8,11 @@ import {
 } from '../chatStore.js';
 import type { AgentChatResult, AgentTurn } from '../types.js';
 
-// The in-memory fallback path — no database anywhere. The single Postgres-path
-// assertion that IS unit-testable (the failure contract: a rejecting pool must
-// DEGRADE, never reject) runs against an injected stub pool; the happy Postgres
-// path and its SQL are covered by the MR's manual M-PERSIST check instead.
+// The in-memory fallback path — no database anywhere. The Postgres failure
+// contract (a rejecting pool must DEGRADE, never reject) runs against an injected
+// stub pool here; the split-write/recovery contract lives in chatStore.replay.test.ts
+// against a scripted SQL stub; the happy path against a REAL server stays covered
+// by the MR's manual M-PERSIST check.
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TTL_MS = 2 * 60 * 60 * 1000;
