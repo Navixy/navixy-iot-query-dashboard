@@ -8,6 +8,7 @@ import type { DateFormat, TimeFormat } from '@/utils/datetime';
 import type { ChartCatalog } from '@/types/chart-catalog';
 import type { MenuTree, ReorderResponse, RenameResponse, DeleteSectionResponse, DeleteReportResponse } from '@/types/menu-editor';
 import type { CompositeReport, CompositeReportExecutionResult, StoredReport, RawReportSchema } from '@/types/dashboard-types';
+import type { AgentChatResponse, AgentSessionResponse } from '@/types/agent';
 import { toErrorMeta } from '@/utils/errors';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -846,6 +847,46 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify({ coordinates }),
     });
+  }
+
+  // ==========================================
+  // AI Agent API (DO-313)
+  // ==========================================
+
+  /**
+   * NO isDemoMode() BRANCH, AND NO demoApi.ts TWIN — deliberate (D11).
+   *
+   * The agent (mock or Bedrock) lives server-side behind an authed route that a
+   * demo user reaches normally, and demo storage has no LLM state to emulate.
+   * This mirrors the existing SQL carve-out: executeSQL (api.ts:149) also does not
+   * demo-branch — see its comment "SQL queries always go to real backend, even in
+   * demo mode" (api.ts:171) — and demoApi routes SQL to the real backend through
+   * realRequest (definition demoApi.ts:113, section banner :158-160, call :213).
+   *
+   * This is SAFE ONLY BECAUSE THE REST OF THE APPLY CHAIN IS DEMO-BRANCHED:
+   * getSections (api.ts:254-255), createSection (:295-296), createReport
+   * (:326, :333). A demo user therefore gets the full chat -> preview -> apply flow,
+   * with the dashboard landing in IndexedDB.
+   *
+   * REVIEWERS: CLAUDE.md's rule "verify the same shape is honoured in demoApi.ts"
+   * does NOT apply to this method. This comment is the record of the exception.
+   */
+  async agentChat(params: { session_id?: string | null; message: string }): Promise<ApiResponse<AgentChatResponse>> {
+    return this.request<AgentChatResponse>('/api/agent/chat', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      // A ceiling above the server's AGENT_TIMEOUT_MS (180 s), not a policy
+      // deadline: it exists so a wedged connection cannot hang a tab forever;
+      // the server's deadline is the real one and fires first. Do not lower it
+      // to a "nicer" number — a 36 s build (n=1) against a 180 s server budget
+      // means any client timeout below ~185 s can abort a turn the server
+      // would have completed.
+      signal: AbortSignal.timeout(190_000),
+    });
+  }
+
+  async getAgentSession(): Promise<ApiResponse<AgentSessionResponse>> {
+    return this.request<AgentSessionResponse>('/api/agent/session');
   }
 
   // Panel Export
