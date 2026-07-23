@@ -117,20 +117,6 @@ export function parsePostgresUrl(url: string): DatabaseConfig {
     const decodedUser = decodeURIComponent(rawUser);
     const decodedPassword = decodeURIComponent(rawPassword);
 
-    logger.info('parsePostgresUrl: parsed components', {
-      rawUser,
-      decodedUser,
-      rawPasswordLength: rawPassword.length,
-      decodedPasswordLength: decodedPassword.length,
-      passwordFirst3: decodedPassword.substring(0, 3),
-      passwordLast3: decodedPassword.substring(decodedPassword.length - 3),
-      hostname: urlObj.hostname,
-      port: urlObj.port,
-      pathname: urlObj.pathname,
-      sslmode,
-      searchParams: urlObj.search,
-    });
-
     if (!urlObj.hostname) {
       throw new Error('Database URL must include a hostname');
     }
@@ -147,20 +133,20 @@ export function parsePostgresUrl(url: string): DatabaseConfig {
 
     if (hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || hostname === '127.0.0.1') {
       hostname = isDocker ? 'host.docker.internal' : '127.0.0.1';
-      logger.info('Normalized localhost in URL', {
+      logger.debug('Normalized localhost in URL', {
         original: urlObj.hostname,
         normalized: hostname,
         isDocker
       });
     } else if (hostname === 'postgres' && !isDocker) {
       hostname = '127.0.0.1';
-      logger.info('Normalized Docker hostname "postgres" to localhost', {
+      logger.debug('Normalized Docker hostname "postgres" to localhost', {
         original: urlObj.hostname,
         normalized: hostname
       });
     }
 
-    return {
+    const config: DatabaseConfig = {
       user: decodedUser,
       password: decodedPassword,
       database: urlObj.pathname.slice(1),
@@ -168,12 +154,31 @@ export function parsePostgresUrl(url: string): DatabaseConfig {
       port: parseInt(urlObj.port) || 5432,
       ssl: sslmode === 'require',
     };
+
+    // Metadata only, at debug — this runs on the rate limiter's hot path. NEVER
+    // the password (round 4, note 56582: first3+last3 of a ≤6-char password IS
+    // the password) and NEVER the query string, whose values can carry secrets.
+    logger.debug('parsePostgresUrl: parsed', {
+      user: config.user,
+      hostname: config.hostname,
+      port: config.port,
+      database: config.database,
+      ssl: config.ssl,
+    });
+
+    return config;
   } catch (error) {
     if (error instanceof CustomError) {
       throw error;
     }
-    logger.error('Error parsing PostgreSQL URL:', { url, error });
-    throw new CustomError(`Invalid PostgreSQL URL format ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`, 400);
+    // Redacted (round 4, note 56582): the raw URL carries the password — it
+    // belongs in NO log line and NO error message (errorHandler logs and echoes
+    // CustomError messages). Every reason reaching here is static and URL-free:
+    // the guards above, WHATWG's 'Invalid URL' (the input lives on err.input,
+    // never err.message), URIError's 'URI malformed' — and must stay that way.
+    const reason = error instanceof Error ? error.message : 'Unknown error';
+    logger.error('Error parsing PostgreSQL URL', { error: reason });
+    throw new CustomError(`Invalid PostgreSQL URL format: ${reason}`, 400);
   }
 }
 

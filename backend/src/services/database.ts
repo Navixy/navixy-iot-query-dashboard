@@ -142,11 +142,9 @@ export class DatabaseService {
 
     const existing = this.clientSettingsPools.get(poolKey);
     if (existing && existing.password !== config.password) {
-      logger.info('Password changed for client settings pool, recreating', {
-        poolKey,
-        oldPasswordFirst3: existing.password.substring(0, 3),
-        newPasswordFirst3: config.password.substring(0, 3),
-      });
+      // The EVENT is the signal — never log password fragments, even truncated
+      // ones (MR !61 round 4, note 56582).
+      logger.info('Password changed for client settings pool, recreating', { poolKey });
       existing.pool.end().catch(err => {
         logger.error('Error closing stale client settings pool', { poolKey, error: err.message });
       });
@@ -163,9 +161,6 @@ export class DatabaseService {
         database: config.database,
         ssl: config.ssl,
         sslConfig: JSON.stringify(sslConfig),
-        passwordLength: config.password.length,
-        passwordFirst3: config.password.substring(0, 3),
-        passwordLast3: config.password.substring(config.password.length - 3),
       });
 
       const pool = new Pool({

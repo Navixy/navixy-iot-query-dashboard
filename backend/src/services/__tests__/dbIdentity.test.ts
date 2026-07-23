@@ -1,6 +1,11 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import { parsePostgresUrl, settingsPoolKey, settingsPoolKeyForUrl } from '../dbIdentity.js';
 import { CustomError } from '../../middleware/errorHandler.js';
+import { logger } from '../../utils/logger.js';
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 // The canonical settings-DB identity (MR !61 round 3, note 56573). These tests pin
 // the contract at its construction site; chatStore.memory.test.ts pins the same
@@ -120,5 +125,53 @@ describe('hostname canonicalization — DNS-equivalent spellings are one endpoin
     // A doubled trailing dot is not valid DNS either — distinct, untouched.
     expect(key('postgresql://app:pw@db.example..:5432/meta'))
       .toBe('settings:app@db.example..:5432/meta');
+  });
+});
+
+// MR !61 round 4 (note 56582): the parser used to log passwordFirst3/Last3 and
+// the whole query string on every call — for a password of six characters or
+// fewer, first3+last3 IS the password — and its parse error embedded the raw
+// URL, password included, in both the log line and the thrown CustomError.
+// An identity module handles credentials; it must never emit them.
+describe('credential hygiene — nothing secret in logs or errors', () => {
+  const spyAll = () => (['debug', 'info', 'warn', 'error'] as const)
+    .map((level) => jest.spyOn(logger, level));
+
+  it('never logs password material or query values on a successful parse', () => {
+    const spies = spyAll();
+    parsePostgresUrl('postgresql://app:ZZp4sswordZZ@db.tenant-a.example:5432/meta?application_name=zz9secret');
+    const logged = JSON.stringify(spies.flatMap((s) => s.mock.calls));
+    expect(logged).not.toContain('ZZp4sswordZZ'); // the password itself
+    expect(logged).not.toContain('ZZp'); // …nor its first-3 fragment
+    expect(logged).not.toContain('dZZ'); // …nor its last-3 fragment
+    expect(logged).not.toContain('zz9secret'); // query values carry secrets too
+  });
+
+  it('redacts the URL from parse errors — thrown message and error log alike', () => {
+    const spies = spyAll();
+    // No database name → the parser's own static guard throws inside the try.
+    let thrown: unknown;
+    try {
+      parsePostgresUrl('postgresql://app:ZZs3cretZZ@db.tenant-a.example:5432');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CustomError);
+    expect((thrown as CustomError).statusCode).toBe(400);
+    expect((thrown as CustomError).message).not.toContain('ZZs3cretZZ');
+    expect(JSON.stringify(spies.flatMap((s) => s.mock.calls))).not.toContain('ZZs3cretZZ');
+    // Still actionable — the static reason survives redaction.
+    expect((thrown as CustomError).message).toContain('database name');
+  });
+
+  it('keeps the 400 static for garbage input — no echo of what was typed', () => {
+    let thrown: unknown;
+    try {
+      parsePostgresUrl('ZZgarbage-not-a-urlZZ');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(CustomError);
+    expect((thrown as CustomError).message).not.toContain('ZZgarbage');
   });
 });
