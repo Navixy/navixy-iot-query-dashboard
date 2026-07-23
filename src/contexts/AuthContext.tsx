@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { demoStorageService } from '@/services/demoStorage';
 import { isDemoMode, setDemoMode, setDemoUserId } from '@/services/demoApi';
@@ -79,6 +79,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAuthSessionId(null);
   };
 
+  // Generation counter of EXPLICIT auth transitions (sign-in success,
+  // sign-out). verifyToken captures it at start and refuses to apply a result
+  // from an older generation (review !62 round 3, Important 1): the boot-time
+  // verification of a stored token races the login form — a late failure used
+  // to DELETE the just-signed-in user's token and drop their epoch, and a late
+  // success used to overwrite user/token state for the old identity while the
+  // newer epoch and localStorage token stayed, splitting state across two
+  // identities. A ref, not state: callbacks need the current value without a
+  // re-render, and nothing renders from it.
+  const authGenerationRef = useRef(0);
+
   useEffect(() => {
     // Check for existing token in localStorage
     const storedToken = localStorage.getItem('auth_token');
@@ -97,20 +108,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const verifyToken = async (tokenToVerify: string) => {
+    // A verification result may only be applied while it still DESCRIBES the
+    // present (review !62 round 3, Important 1). If a sign-in or sign-out
+    // happened since this call started (the generation moved), or the stored
+    // token is no longer the one being verified, this result belongs to a dead
+    // auth attempt and must be ignored WHOLESALE — no state writes, no
+    // localStorage removal, no epoch changes. Checked after every await.
+    const generationAtStart = authGenerationRef.current;
+    const isStaleVerification = () =>
+      authGenerationRef.current !== generationAtStart ||
+      localStorage.getItem('auth_token') !== tokenToVerify;
     try {
       // First, decode the JWT to check for demo mode flag
       const jwtPayload = decodeJwtPayload(tokenToVerify);
       const tokenHasDemoFlag = jwtPayload?.demo === true;
-      
+
       const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
         headers: {
           'Authorization': `Bearer ${tokenToVerify}`,
           'Content-Type': 'application/json',
         },
       });
+      if (isStaleVerification()) return;
 
       if (response.ok) {
         const text = await response.text();
+        if (isStaleVerification()) return;
         if (!text) {
           localStorage.removeItem('auth_token');
           setToken(null);
@@ -142,6 +165,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               
               // Seed demo storage if not already seeded
               const isSeeded = await demoStorageService.isSeeded();
+              // Seeding is slow (several backend fetches) — do not start or
+              // finish it on behalf of an auth attempt that is already dead.
+              if (isStaleVerification()) return;
               if (!isSeeded) {
                 console.log('[AuthContext] Demo storage not seeded, fetching data from backend...');
                 await initializeDemoStorage(tokenToVerify, data.user.id);
@@ -184,6 +210,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error('Token verification failed:', error);
+      if (isStaleVerification()) return;
       localStorage.removeItem('auth_token');
       setToken(null);
       setUser(null);
@@ -192,6 +219,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setDemoModeState(false);
       dropAuthSession();
     } finally {
+      // Unconditional even for stale results: `loading` only answers "has the
+      // BOOT verification settled" — a superseding sign-in does not un-settle it.
       setLoading(false);
     }
   };
@@ -314,6 +343,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await response.json();
 
       if (data.success) {
+        // Outrun any in-flight verifyToken of an older token: its late result
+        // must not touch the session this sign-in is about to establish.
+        authGenerationRef.current += 1;
         setUser(data.user);
         setToken(data.token);
         // A fresh login is a NEW auth session even for the same human — the
@@ -488,6 +520,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setDemoModeState(true);
 
       // Set user and token
+      authGenerationRef.current += 1; // same reason as signIn
       setUser(loginData.user);
       setToken(authToken);
       // Same rule as signIn: every sign-in mints a new auth-session epoch.
@@ -511,6 +544,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
+    // Outrun any in-flight verifyToken: sign-out is an explicit transition and
+    // no verification result from before it may apply afterwards.
+    authGenerationRef.current += 1;
     localStorage.removeItem('auth_token');
     setToken(null);
     setUser(null);
