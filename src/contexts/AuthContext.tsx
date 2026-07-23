@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { demoStorageService } from '@/services/demoStorage';
 import { isDemoMode, setDemoMode, setDemoUserId } from '@/services/demoApi';
 import { queryClient } from '@/lib/queryClient';
+import { beginAuthSession, endAuthSession, getAuthSessionId } from '@/lib/authSession';
 import type { ChartCatalog } from '@/types/chart-catalog';
 
 /**
@@ -38,6 +39,13 @@ interface AuthContextType {
   token: string | null;
   loading: boolean;
   demoMode: boolean;
+  /**
+   * Opaque id of the CURRENT authenticated presence on this tab — minted per
+   * sign-in / token restore, null when signed out. Scope user-specific client
+   * caches by THIS, never by user.id: ids are tenant-local and collide across
+   * tenants (review !62 round 2). See src/lib/authSession.ts.
+   */
+  authSessionId: string | null;
   serverPreferences: ServerPreferences | null;
   signIn: (email: string, role: 'admin' | 'editor' | 'viewer', iotDbUrl: string, userDbUrl: string) => Promise<{ error: Error | null }>;
   signInDemo: (email: string, role: 'admin' | 'editor' | 'viewer', iotDbUrl: string, userDbUrl: string) => Promise<{ error: Error | null }>;
@@ -57,7 +65,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [demoModeState, setDemoModeState] = useState(isDemoMode());
   const [serverPreferences, setServerPreferences] = useState<ServerPreferences | null>(null);
+  // Mirror of the module-level auth-session epoch (src/lib/authSession.ts) so
+  // consumers re-render when it changes. The module is the single writer; this
+  // state only reflects it.
+  const [authSessionId, setAuthSessionId] = useState<string | null>(getAuthSessionId());
   const navigate = useNavigate();
+
+  /** The auth session ended without a successor: invalid/expired token, or an
+   *  explicit sign-out. In-flight mutation callbacks compare their captured
+   *  epoch against the (now null) current one and drop themselves. */
+  const dropAuthSession = () => {
+    endAuthSession();
+    setAuthSessionId(null);
+  };
 
   useEffect(() => {
     // Check for existing token in localStorage
@@ -98,6 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setServerPreferences(null);
           setDemoMode(false);
           setDemoModeState(false);
+          dropAuthSession();
           return;
         }
         try {
@@ -105,6 +126,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (data.success && data.user) {
             setUser(data.user);
             setToken(tokenToVerify);
+            // KEEP the epoch across a refreshUser() re-verify of the same
+            // session — regenerating it here would invalidate the guards of a
+            // chat turn in flight during a routine profile refresh. Mint one
+            // only when none exists yet (initial restore from localStorage).
+            setAuthSessionId(getAuthSessionId() ?? beginAuthSession());
             if (data.preferences) setServerPreferences(data.preferences);
             
             // If JWT has demo flag and we're not already in demo mode, initialize demo mode
@@ -136,6 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setServerPreferences(null);
             setDemoMode(false);
             setDemoModeState(false);
+            dropAuthSession();
           }
         } catch {
           localStorage.removeItem('auth_token');
@@ -144,6 +171,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setServerPreferences(null);
           setDemoMode(false);
           setDemoModeState(false);
+          dropAuthSession();
         }
       } else {
         localStorage.removeItem('auth_token');
@@ -152,6 +180,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setServerPreferences(null);
         setDemoMode(false);
         setDemoModeState(false);
+        dropAuthSession();
       }
     } catch (error) {
       console.error('Token verification failed:', error);
@@ -161,6 +190,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setServerPreferences(null);
       setDemoMode(false);
       setDemoModeState(false);
+      dropAuthSession();
     } finally {
       setLoading(false);
     }
@@ -286,6 +316,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (data.success) {
         setUser(data.user);
         setToken(data.token);
+        // A fresh login is a NEW auth session even for the same human — the
+        // epoch is what keeps caches of consecutive sign-ins apart.
+        setAuthSessionId(beginAuthSession());
         if (data.preferences) setServerPreferences(data.preferences);
         localStorage.setItem('auth_token', data.token);
         navigate('/app');
@@ -457,6 +490,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Set user and token
       setUser(loginData.user);
       setToken(authToken);
+      // Same rule as signIn: every sign-in mints a new auth-session epoch.
+      setAuthSessionId(beginAuthSession());
       if (loginData.preferences) setServerPreferences(loginData.preferences);
       localStorage.setItem('auth_token', authToken);
 
@@ -484,6 +519,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear demo mode on sign out
     setDemoMode(false);
     setDemoModeState(false);
+
+    // END THE EPOCH BEFORE CLEARING (review !62 round 2): clear() empties the
+    // caches but cannot cancel an in-flight mutation — its callbacks still run
+    // when the request settles, potentially after the next user signed in.
+    // With the epoch already gone, those callbacks compare epochs, mismatch,
+    // and drop themselves instead of writing into the next identity's cache.
+    dropAuthSession();
 
     // The QueryClient is a module singleton that outlives this session. Cached
     // server state is user-scoped (chat transcripts, reports, search) and must
@@ -584,6 +626,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       token,
       loading,
       demoMode: demoModeState,
+      authSessionId,
       serverPreferences,
       signIn,
       signInDemo,
