@@ -1,5 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
+import { getAuthSessionId } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import type {
   AgentChatRequest,
@@ -12,37 +18,124 @@ import type {
  * Query key for the agent session read (GET /api/agent/session). Shared between
  * the session query and the chat mutation's cache write below.
  *
- * SCOPED BY USER ID (review !62, major 3): the QueryClient is a module
- * singleton that outlives sign-out, so an identity-free key would hand user
- * A's cached transcript to user B signing in on the same tab. signOut also
- * clears the whole query cache (AuthContext), but the scoped key keeps this
- * correct even for identity switches that skip signOut.
+ * SCOPED BY THE AUTH-SESSION EPOCH (review !62 round 2, Critical 2), not by
+ * user.id: ids are the tenant database's own users.id — unique only within that
+ * tenant, so user 7 of tenant A and user 7 of tenant B collide on one machine.
+ * The epoch (src/lib/authSession.ts) is opaque and unique per sign-in, so keys
+ * can never collide across identities on one tab — including two consecutive
+ * sign-ins of the same user. signOut also clears the whole query cache
+ * (AuthContext), but clear() cannot stop in-flight callbacks; the epoch both
+ * scopes the keys and powers the stale-session guard in
+ * settleChatTurnIntoSessionCache.
  */
-export const agentSessionQueryKey = (userId: string | null | undefined) =>
-  ['agent', 'session', userId ?? 'anonymous'] as const;
+export const agentSessionQueryKey = (authSessionId: string | null) =>
+  ['agent', 'session', authSessionId ?? 'anonymous'] as const;
 
 /**
- * Mutation key for chat turns. Exists so AiChat can derive pending state
- * ACROSS remounts via useMutationState: useMutation's own isPending is
- * per-observer, so a page that unmounts mid-turn and remounts would otherwise
- * see isPending === false while the 7-36 s turn is still in flight — no typing
- * indicator, composer enabled, and a re-send double-feeding the stateful
- * Bedrock session (review !62, major 1; the same hazard R20/D19 guard).
+ * Mutation key for chat turns — same epoch scope, same reason. It exists so
+ * AiChat can derive pending/failed state ACROSS remounts via useMutationState:
+ * useMutation's own isPending is per-observer, so a page that unmounts mid-turn
+ * and remounts would otherwise see isPending === false while the 7-36 s turn is
+ * still in flight — no typing indicator, composer enabled, and a re-send
+ * double-feeding the stateful Bedrock session (review !62, major 1; the same
+ * hazard R20/D19 guard). The epoch in the key keeps one sign-in's turns
+ * invisible to the next sign-in's filters.
  */
-export const AGENT_CHAT_MUTATION_KEY = ['agent', 'chat'] as const;
+export const agentChatMutationKey = (authSessionId: string | null) =>
+  ['agent', 'chat', authSessionId ?? 'anonymous'] as const;
+
+/**
+ * Everything the settled callbacks need, captured AT SEND TIME. It travels with
+ * the mutation (onMutate context), so it survives page unmounts and sign-outs —
+ * unlike anything closed over from a component render.
+ */
+export interface AgentChatMutationContext {
+  /** The auth-session epoch under which the turn was sent. Compared against the
+   *  CURRENT epoch when the turn settles: a mismatch means the sender signed
+   *  out (and possibly someone else signed in) while the turn was in flight,
+   *  and the reply must not touch any cache. */
+  authSessionAtSend: string | null;
+  /** The session cache OBJECT as it was at send time — the reconciliation
+   *  baseline for the guarded write below. Held by REFERENCE, never by shape:
+   *  the backend caps GET /session at the newest 100 turns, so a mid-turn
+   *  refetch at the cap SLIDES the window — drops the oldest turn, gains the
+   *  just-persisted user turn — and the length comes back unchanged while the
+   *  content moved (review !62 round 2, Important 3). */
+  snapshotAtSend: AgentSessionResponse | null;
+}
+
+/** onMutate body, exported for tests. */
+export function createAgentChatContext(queryClient: QueryClient): AgentChatMutationContext {
+  const authSessionAtSend = getAuthSessionId();
+  return {
+    authSessionAtSend,
+    snapshotAtSend:
+      queryClient.getQueryData<AgentSessionResponse>(agentSessionQueryKey(authSessionAtSend)) ??
+      null,
+  };
+}
+
+/**
+ * Hook-level onSuccess body, exported for tests: write the settled turn into the
+ * session query's cache — or reconcile from the server when the cache moved
+ * under us — under the identity that SENT the turn.
+ *
+ * STALE AUTH SESSION FIRST (review !62 round 2, Critical 2): hook-level
+ * callbacks run even after queryClient.clear() removed the mutation — TanStack
+ * v5 cannot cancel an executing mutation. If the epoch changed since send, the
+ * sender is signed out; whatever cache exists now belongs to someone else and
+ * must not be touched — not even an invalidation, which would refetch under the
+ * NEXT identity's key on this turn's behalf.
+ */
+export function settleChatTurnIntoSessionCache(
+  queryClient: QueryClient,
+  context: AgentChatMutationContext,
+  message: string,
+  data: AgentChatResponse,
+): void {
+  if (context.authSessionAtSend === null || context.authSessionAtSend !== getAuthSessionId()) {
+    return;
+  }
+  const sessionKey = agentSessionQueryKey(context.authSessionAtSend);
+  const prev = queryClient.getQueryData<AgentSessionResponse>(sessionKey);
+  // Append ONLY when the cache object IS the send-time snapshot. Reference
+  // identity is exact here BECAUSE of structural sharing: a refetch whose
+  // payload is deep-equal keeps the original object (append stays cheap), and
+  // ANY content change — including the capped-window slide that keeps the
+  // length at 100 while the turns move — produces a new one. If the reference
+  // moved, or the cache is absent (the session read failed or has not
+  // completed — synthesizing an entry would mean inventing `persisted`),
+  // reconcile from the server instead of guessing at a merge: a mid-turn
+  // refetch already contains the user turn the server persisted at receipt,
+  // so a blind append would duplicate it (review !62 round 2, Important 3).
+  if (prev && context.snapshotAtSend === prev) {
+    const userTurn: AgentTurn = { role: 'user', content: message };
+    const assistantTurn: AgentTurn =
+      data.type === 'result'
+        ? { role: 'assistant', type: 'result', content: data.message, result: data.result }
+        : { role: 'assistant', type: data.type, content: data.message, result: null };
+    queryClient.setQueryData<AgentSessionResponse>(sessionKey, {
+      ...prev,
+      session_id: data.session_id,
+      messages: [...prev.messages, userTurn, assistantTurn],
+    });
+  } else {
+    void queryClient.invalidateQueries({ queryKey: sessionKey });
+  }
+}
 
 /**
  * Loads the agent chat session: the server-authoritative session_id, the
  * persistence flag and the rehydrated transcript (DO-313).
  */
 export function useAgentSession() {
-  const { user } = useAuth();
+  const { user, authSessionId } = useAuth();
 
   return useQuery<AgentSessionResponse>({
-    queryKey: agentSessionQueryKey(user?.id),
-    // Without a user there is no identity to scope by and no token worth
-    // spending a 401 on — the page redirects to /login anyway.
-    enabled: !!user,
+    queryKey: agentSessionQueryKey(authSessionId),
+    // Without an authenticated session there is no identity to scope by and no
+    // token worth spending a 401 on — the page redirects to /login anyway.
+    enabled: !!user && authSessionId !== null,
     queryFn: async () => {
       const response = await apiService.getAgentSession();
       if (response.error) {
@@ -74,13 +167,10 @@ export function useAgentSession() {
  */
 export function useAgentChatMutation() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
-  // Captured at render, so the callbacks below write under the identity that
-  // sent the turn even if sign-out races the reply.
-  const sessionKey = agentSessionQueryKey(user?.id);
+  const { authSessionId } = useAuth();
 
-  return useMutation<AgentChatResponse, Error, AgentChatRequest, { messagesAtSend: number | null }>({
-    mutationKey: AGENT_CHAT_MUTATION_KEY,
+  return useMutation<AgentChatResponse, Error, AgentChatRequest, AgentChatMutationContext>({
+    mutationKey: agentChatMutationKey(authSessionId),
     mutationFn: async (params) => {
       const response = await apiService.agentChat(params);
       // Throw on response.error so onError/onSuccess split cleanly: transport
@@ -102,19 +192,15 @@ export function useAgentChatMutation() {
     // 'online' mode holds the mutation in isPending with no request in flight
     // — the typing indicator runs forever, the 190 s transport ceiling never
     // starts, and nothing tells the user why. 'always' lets fetch fail
-    // immediately, which lands in onError and renders the standard in-line
-    // error bubble with the draft restored.
+    // immediately, which lands in the mutation cache's error state and renders
+    // the standard in-line error bubble with the draft restored.
     networkMode: 'always',
-    // Snapshot the transcript length at send time. The backend persists the
-    // user turn at POST receipt — BEFORE the agent call (routes/agent.ts) — so
-    // any session refetch that resolves while the turn is in flight already
-    // ends with that turn. onSuccess compares against this snapshot to decide
-    // between appending and reconciling (review !62, major 2).
-    onMutate: () => ({
-      messagesAtSend:
-        queryClient.getQueryData<AgentSessionResponse>(sessionKey)?.messages
-          .length ?? null,
-    }),
+    // Capture the send-time identity and reconciliation baseline. The backend
+    // persists the user turn at POST receipt — BEFORE the agent call
+    // (routes/agent.ts) — so any session refetch that resolves while the turn
+    // is in flight already ends with that turn; settle uses the baseline to
+    // decide between appending and reconciling (review !62, major 2).
+    onMutate: () => createAgentChatContext(queryClient),
     // Cache-write placement option (b): write the new turns into the session
     // query's cache from the mutation's own onSuccess, not a shared
     // MutationCache handler. Hook-level callbacks belong to the mutation, not
@@ -123,27 +209,8 @@ export function useAgentChatMutation() {
     // next mount reads these turns from the cache instead of losing the
     // assistant turn the server produced while the page was gone.
     onSuccess: (data, variables, context) => {
-      const prev = queryClient.getQueryData<AgentSessionResponse>(sessionKey);
-      // Append ONLY when the cache is exactly as it was at send time. If it is
-      // absent (the session read failed or has not completed — synthesizing an
-      // entry would mean inventing `persisted`), or a mid-turn refetch landed
-      // (its payload already contains the user turn the server persisted at
-      // receipt, so a blind append would duplicate it), reconcile from the
-      // server instead of guessing at a merge.
-      if (prev && context && context.messagesAtSend === prev.messages.length) {
-        const userTurn: AgentTurn = { role: 'user', content: variables.message };
-        const assistantTurn: AgentTurn =
-          data.type === 'result'
-            ? { role: 'assistant', type: 'result', content: data.message, result: data.result }
-            : { role: 'assistant', type: data.type, content: data.message, result: null };
-        queryClient.setQueryData<AgentSessionResponse>(sessionKey, {
-          ...prev,
-          session_id: data.session_id,
-          messages: [...prev.messages, userTurn, assistantTurn],
-        });
-      } else {
-        void queryClient.invalidateQueries({ queryKey: sessionKey });
-      }
+      if (!context) return;
+      settleChatTurnIntoSessionCache(queryClient, context, variables.message, data);
     },
   });
 }

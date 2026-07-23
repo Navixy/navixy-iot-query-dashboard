@@ -5,7 +5,7 @@ import { AppLayout } from '@/components/layout/AppLayout';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/contexts/AuthContext';
 import {
-  AGENT_CHAT_MUTATION_KEY,
+  agentChatMutationKey,
   useAgentChatMutation,
   useAgentSession,
 } from '@/hooks/use-agent-chat';
@@ -35,7 +35,7 @@ function turnToBubble(turn: AgentTurn, index: number): ChatBubble {
 }
 
 const AiChat = () => {
-  const { user, loading } = useAuth();
+  const { user, loading, authSessionId } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -52,9 +52,12 @@ const AiChat = () => {
   // the 7-36 s turn is still in flight — composer enabled, no indicator, and a
   // re-send double-feeds the stateful Bedrock session. useMutationState reads
   // the shared mutation cache instead, so the returning mount keeps the
-  // composer locked and the typing indicator up until the turn settles.
+  // composer locked and the typing indicator up until the turn settles. The
+  // key is epoch-scoped (review !62 round 2): another sign-in's in-flight turn
+  // must not lock THIS user's composer.
+  const chatMutationKey = agentChatMutationKey(authSessionId);
   const pendingChatTurns = useMutationState({
-    filters: { mutationKey: AGENT_CHAT_MUTATION_KEY, status: 'pending' },
+    filters: { mutationKey: chatMutationKey, status: 'pending' },
     select: (mutation) => mutation.state.status,
   });
   const isChatPending = pendingChatTurns.length > 0 || chat.isPending;
