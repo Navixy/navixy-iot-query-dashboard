@@ -569,13 +569,16 @@ async function pgLoadHistory(
       // size. Result turns keep their full `result` payload: stripping dashboards
       // would be the failure D16 exists to prevent (an assistant claiming it built a
       // dashboard with no way to preview it). Newest MAX_TURNS, returned oldest-first.
-      // id is only a tiebreak: entry-time created_at makes ties unreachable in the
-      // normal flow, but DBA-inserted or legacy rows must still order stably.
+      //
+      // ORDER BY seq, NOT created_at: replay drains the buffer before any new
+      // append, so insertion order IS conversation order — while timestamps can tie
+      // within a millisecond (a replayed turn plus a fresh one) or step backwards
+      // with the clock, and either would let a user/assistant pair flip on read.
       const rows = await client.query(
         `SELECT id, role, type, content, result
            FROM dashboard_studio_meta_data.chat_messages
           WHERE session_id = $1 AND user_id = $2
-          ORDER BY created_at DESC, id DESC
+          ORDER BY seq DESC
           LIMIT $3`,
         [resolved, userId, MAX_TURNS],
       );

@@ -30,6 +30,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS chat_sessions_one_active_per_user
 
 CREATE TABLE IF NOT EXISTS dashboard_studio_meta_data.chat_messages (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- THE transcript order authority (MR !61 review round): the store replays
+  -- outage-buffered turns transactionally before appending new ones, so insertion
+  -- order IS conversation order — while created_at can tie (same-millisecond
+  -- writes) or even step backwards (clock adjustments), which would let a
+  -- user/assistant pair flip on read. Gaps are expected (ON CONFLICT DO NOTHING
+  -- consumes values).
+  seq         BIGINT GENERATED ALWAYS AS IDENTITY,
   session_id  UUID NOT NULL
               REFERENCES dashboard_studio_meta_data.chat_sessions(id) ON DELETE CASCADE,
   user_id     UUID NOT NULL,
@@ -45,7 +52,10 @@ CREATE TABLE IF NOT EXISTS dashboard_studio_meta_data.chat_messages (
   -- fetched once, at turn time, and copied here — they expire from S3 after a few months
   -- and a saved conversation outlives that. Budget ~5-50 KB per result turn.
   result      JSONB,
+  -- WHEN the turn entered the store (the application supplies it), not when this row
+  -- was written: a turn buffered through a Postgres outage keeps its truthful time on
+  -- replay. Display metadata only — ordering uses seq.
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS chat_messages_session_created_idx
-  ON dashboard_studio_meta_data.chat_messages (session_id, created_at);
+CREATE INDEX IF NOT EXISTS chat_messages_session_seq_idx
+  ON dashboard_studio_meta_data.chat_messages (session_id, seq);

@@ -54,7 +54,6 @@ function makeScriptedPool() {
     failCommitOnceAfterApply: false,
   };
   let mintedSession = 0;
-  let mintedMessage = 0;
   let txn: MsgRow[] | null = null;
 
   const applied = () => db.messages;
@@ -102,25 +101,20 @@ function makeScriptedPool() {
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_messages')) {
         if (script.failMessageInsert) throw new Error('message insert refused (scripted)');
-        // Tolerates both the pre-fix 6-param shape (id/created_at minted here) and
-        // the store-minted 8-param shape with ON CONFLICT (id) DO NOTHING.
-        const storeMinted = params.length === 8;
-        const row: MsgRow = storeMinted
-          ? {
-              id: String(params[0]), session_id: String(params[1]), user_id: String(params[2]),
-              role: String(params[3]), content: String(params[4]),
-              type: params[5] === null ? null : String(params[5]),
-              result: params[6] === null ? null : String(params[6]),
-              at: Number(params[7]),
-            }
-          : {
-              id: `message-${++mintedMessage}`, session_id: String(params[0]), user_id: String(params[1]),
-              role: String(params[2]), content: String(params[3]),
-              type: params[4] === null ? null : String(params[4]),
-              result: params[5] === null ? null : String(params[5]),
-              at: ++mintedMessage * 1000,
-            };
-        if (storeMinted && idTaken(row.id)) return { rows: [] }; // ON CONFLICT (id) DO NOTHING
+        // The store-minted shape: (id, session, user, role, content, type, result, at).
+        // A regression to letting the DATABASE mint ids/timestamps must fail loudly —
+        // it would silently break replay idempotence and ordering.
+        if (params.length !== 8) {
+          throw new Error(`unexpected chat_messages INSERT shape: ${params.length} params`);
+        }
+        const row: MsgRow = {
+          id: String(params[0]), session_id: String(params[1]), user_id: String(params[2]),
+          role: String(params[3]), content: String(params[4]),
+          type: params[5] === null ? null : String(params[5]),
+          result: params[6] === null ? null : String(params[6]),
+          at: Number(params[7]),
+        };
+        if (idTaken(row.id)) return { rows: [] }; // ON CONFLICT (id) DO NOTHING
         (txn ?? db.messages).push(row);
         return { rows: [] };
       }
@@ -130,12 +124,13 @@ function makeScriptedPool() {
       }
 
       if (q.includes('FROM dashboard_studio_meta_data.chat_messages')) {
+        // ORDER BY seq DESC LIMIT n — seq is insertion order, so: last n, newest first.
         const rows = applied()
           .filter((m) => m.session_id === params[0] && m.user_id === params[1])
-          .sort((a, b) => (b.at - a.at) || (a.id < b.id ? 1 : -1))
-          .slice(0, Number(params[2]))
+          .slice(-Number(params[2]))
+          .reverse()
           .map((m) => ({
-            role: m.role, type: m.type, content: m.content,
+            id: m.id, role: m.role, type: m.type, content: m.content,
             result: m.result === null ? null : JSON.parse(m.result),
           }));
         return { rows };
@@ -201,10 +196,10 @@ describe('chatStore — buffered replay on Postgres recovery (MR !61 review)', (
     expect(recovered.sessionId).not.toBe(memoryEra.sessionId); // D13: fresh Postgres session
     expect(recovered.history).toEqual([user('hello'), question('Which vehicles?')]);
 
-    // And they are truly IN Postgres, in order, not merely merged into the response.
-    const stored = db.messages.slice().sort((a, b) => a.at - b.at);
-    expect(stored.map((m) => m.content)).toEqual(['hello', 'Which vehicles?']);
-    expect(new Set(stored.map((m) => m.session_id))).toEqual(new Set([recovered.sessionId]));
+    // And they are truly IN Postgres, in insertion (= seq) order, not merely
+    // merged into the response.
+    expect(db.messages.map((m) => m.content)).toEqual(['hello', 'Which vehicles?']);
+    expect(new Set(db.messages.map((m) => m.session_id))).toEqual(new Set([recovered.sessionId]));
   });
 
   it('an in-doubt COMMIT cannot duplicate a turn: store-minted ids dedupe the replay', async () => {
@@ -236,7 +231,8 @@ describe('chatStore — buffered replay on Postgres recovery (MR !61 review)', (
     const { history } = await loadHistory(pool, ident('u1'), sessionId);
     expect(history).toEqual([user('first'), question('second')]);
 
-    const stored = db.messages.slice().sort((a, b) => a.at - b.at);
-    expect(stored.map((m) => m.content)).toEqual(['first', 'second']);
+    // Insertion (= seq) order carries the healed order — even when both writes
+    // land in the same millisecond and created_at ties.
+    expect(db.messages.map((m) => m.content)).toEqual(['first', 'second']);
   });
 });
