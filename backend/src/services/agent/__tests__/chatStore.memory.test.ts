@@ -303,6 +303,18 @@ describe('tenantKeyFor', () => {
       .toBe(tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta'));
   });
 
+  // MR !61 round 4 (note 56582): equivalence must extend to the network endpoint
+  // itself. postgresql: is a non-special URL scheme, so hostname case, a trailing
+  // root dot and numeric IPv4 shorthand all survived parsing — each spelling a
+  // fresh 20/min bucket (16 case-spellings of one host = 16 buckets, measured).
+  it('collapses DNS-equivalent hostname spellings — case, root dot, numeric IPv4', () => {
+    const key = tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta');
+    expect(tenantKeyFor('postgresql://app:pw@DB.TENANT-A.EXAMPLE:5432/meta')).toBe(key);
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-a.example.:5432/meta')).toBe(key);
+    expect(tenantKeyFor('postgresql://app:pw@127.1:5432/meta'))
+      .toBe(tenantKeyFor('postgresql://app:pw@127.0.0.1:5432/meta'));
+  });
+
   it('still isolates real tenants: user, host and database each split the key', () => {
     const base = tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta');
     expect(tenantKeyFor('postgresql://other:pw@db.tenant-a.example:5432/meta')).not.toBe(base);
