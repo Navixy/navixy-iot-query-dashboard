@@ -14,6 +14,16 @@ import type {
 export const AGENT_SESSION_QUERY_KEY = ['agent', 'session'] as const;
 
 /**
+ * Mutation key for chat turns. Exists so AiChat can derive pending state
+ * ACROSS remounts via useMutationState: useMutation's own isPending is
+ * per-observer, so a page that unmounts mid-turn and remounts would otherwise
+ * see isPending === false while the 7-36 s turn is still in flight — no typing
+ * indicator, composer enabled, and a re-send double-feeding the stateful
+ * Bedrock session (review !62, major 1; the same hazard R20/D19 guard).
+ */
+export const AGENT_CHAT_MUTATION_KEY = ['agent', 'chat'] as const;
+
+/**
  * Loads the agent chat session: the server-authoritative session_id, the
  * persistence flag and the rehydrated transcript (DO-313).
  */
@@ -53,6 +63,7 @@ export function useAgentChatMutation() {
   const queryClient = useQueryClient();
 
   return useMutation<AgentChatResponse, Error, AgentChatRequest, { messagesAtSend: number | null }>({
+    mutationKey: AGENT_CHAT_MUTATION_KEY,
     mutationFn: async (params) => {
       const response = await apiService.agentChat(params);
       // Throw on response.error so onError/onSuccess split cleanly: transport
