@@ -17,7 +17,7 @@ import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
 import { EmptyState } from '@/components/ai-chat/EmptyState';
 import { trimHistoryOverlap } from '@/components/ai-chat/historyOverlap';
-import { classifyTurnDelivery } from '@/components/ai-chat/turnDelivery';
+import { classifyTurnDelivery, type TurnDelivery } from '@/components/ai-chat/turnDelivery';
 import type {
   AgentChatRequest,
   AgentSessionResponse,
@@ -72,7 +72,46 @@ const AiChat = () => {
     filters: { mutationKey: chatMutationKey, status: 'pending' },
     select: (mutation) => mutation.state.status,
   });
-  const isChatPending = pendingChatTurns.length > 0 || chat.isPending;
+
+  // FAILED turns are read from the MUTATION CACHE, never from mutate-level
+  // onError (review !62 round 2, Important 4): mutate-level callbacks are
+  // observer-bound — navigate away mid-turn and they simply never run, so the
+  // failure used to vanish on the returning mount. The cache entry outlives the
+  // page (until its gcTime, ~5 min), so whichever mount is live when the turn
+  // settles reconciles it against the server.
+  const failedChatTurns = useMutationState({
+    filters: { mutationKey: chatMutationKey, status: 'error' },
+    select: (mutation) => ({
+      mutationId: mutation.mutationId,
+      message: (mutation.state.variables as AgentChatRequest | undefined)?.message ?? '',
+      errorMessage:
+        mutation.state.error instanceof Error ? mutation.state.error.message : '',
+      // Send-time occurrence baseline (review !62 round 4, Important 2): how
+      // many identical user turns the client already knew about when this turn
+      // was sent, so the reconciler counts only a NEW occurrence as delivery.
+      priorSameContentUserTurns:
+        (mutation.state.context as AgentChatMutationContext | undefined)
+          ?.priorSameContentUserTurns ?? 0,
+    }),
+  });
+  const handledFailedTurnsRef = useRef<Set<number>>(new Set());
+  // Reconciling a failed turn against the server is ASYNC (review !62 round 4,
+  // Important 1c): after the mutation flips to 'error' it is no longer 'pending',
+  // so without this the composer would UNLOCK mid-reconciliation and let a
+  // second, possibly duplicate, turn go out. `reconcilingCount` covers the async
+  // window; `unhandledFailedTurns` covers the render between the error landing
+  // and the effect starting — together the composer stays locked from error to
+  // resolution.
+  const [reconcilingCount, setReconcilingCount] = useState(0);
+  const unhandledFailedTurns = failedChatTurns.filter(
+    (f) => !handledFailedTurnsRef.current.has(f.mutationId),
+  ).length;
+
+  const isChatPending =
+    pendingChatTurns.length > 0 ||
+    chat.isPending ||
+    reconcilingCount > 0 ||
+    unhandledFailedTurns > 0;
 
   // D13: the SERVER is authoritative. Seeded from the session query, then
   // OVERWRITTEN from every single response — including error responses, which
@@ -123,32 +162,9 @@ const AiChat = () => {
   const liveIdRef = useRef(0);
   const nextLiveId = () => `live-${liveIdRef.current++}`;
 
-  // FAILED turns are read from the MUTATION CACHE, never from mutate-level
-  // onError (review !62 round 2, Important 4): mutate-level callbacks are
-  // observer-bound — navigate away mid-turn and they simply never run, so the
-  // failure used to vanish on the returning mount: the typing indicator
-  // stopped, with no error bubble and the draft gone. The cache entry outlives
-  // the page (until its gcTime, ~5 min), so whichever mount is live when the
-  // turn settles renders the failure and returns the draft.
-  const failedChatTurns = useMutationState({
-    filters: { mutationKey: chatMutationKey, status: 'error' },
-    select: (mutation) => ({
-      mutationId: mutation.mutationId,
-      message: (mutation.state.variables as AgentChatRequest | undefined)?.message ?? '',
-      errorMessage:
-        mutation.state.error instanceof Error ? mutation.state.error.message : '',
-      // Send-time occurrence baseline (review !62 round 4, Important 2): how
-      // many identical user turns the client already knew about when this turn
-      // was sent, so the reconciler counts only a NEW occurrence as delivery.
-      priorSameContentUserTurns:
-        (mutation.state.context as AgentChatMutationContext | undefined)
-          ?.priorSameContentUserTurns ?? 0,
-    }),
-  });
-  const handledFailedTurnsRef = useRef<Set<number>>(new Set());
-  // The handling below is ASYNC (it consults the server first). If this mount
-  // dies before a classification resolves, the mutation must stay in the cache
-  // so the next mount re-runs it — this flag is how the continuation knows.
+  // The handling below is ASYNC (it polls the server). If this mount dies
+  // before reconciliation resolves, the mutation must stay in the cache so the
+  // next mount re-runs it — this flag is how the continuation knows.
   const failureHandlingAliveRef = useRef(true);
   useEffect(() => {
     failureHandlingAliveRef.current = true;
@@ -164,90 +180,121 @@ const AiChat = () => {
         // StrictMode double-effects and re-renders.
         if (handledFailedTurnsRef.current.has(failed.mutationId)) continue;
         handledFailedTurnsRef.current.add(failed.mutationId);
-
-        // TRANSPORT UNCERTAINTY (review !62 round 3, Important 2): a transport
-        // error does NOT mean the turn failed. The server persists the user
-        // turn at receipt and keeps processing after a client disconnect, so
-        // the turn may have fully succeeded with only the response lost —
-        // and restoring the draft then INVITES re-feeding the stateful agent
-        // session with a message it already consumed (R20/D19). Ask the
-        // server what actually happened before surfacing anything.
-        const response = await apiService.getAgentSession().catch(() => null);
-        const authoritative = response?.data ?? null;
-        // If the GET itself failed, the network is down generally — the POST
-        // almost certainly never processed, and 'lost' (retry-friendly) is
-        // the right verdict.
-        const delivery = authoritative
-          ? classifyTurnDelivery(
-              authoritative.messages,
+        // Holds the composer locked for the whole reconciliation, not just
+        // while the mutation was 'pending' (review !62 round 4, Important 1c).
+        setReconcilingCount((c) => c + 1);
+        try {
+          // TRANSPORT UNCERTAINTY (review !62 rounds 3–4): a transport error is
+          // not a verdict. The server persists the user turn at receipt and
+          // keeps processing after a client disconnect, so the turn may have
+          // fully succeeded with only the response lost — restoring the draft
+          // then invites re-feeding the stateful agent a message it already
+          // consumed (R20/D19). A single GET is not proof either: the route
+          // does loadHistory BEFORE it appends the user turn (agent.ts), so a
+          // GET can overtake an in-flight POST and miss it. BOUNDED POLL: the
+          // user turn lands at receipt — before the multi-second agent call —
+          // so a couple of short retries reliably separate "arrived, still
+          // working / response lost" from "never arrived", closing that race
+          // (round 4, Important 1a/1b).
+          let authoritative: AgentSessionResponse | null = null;
+          let delivery: TurnDelivery = 'lost';
+          const backoffMs = [0, 700, 1400];
+          for (let attempt = 0; attempt < backoffMs.length; attempt++) {
+            if (backoffMs[attempt] > 0) {
+              await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+            }
+            if (!failureHandlingAliveRef.current) {
+              handledFailedTurnsRef.current.delete(failed.mutationId);
+              return;
+            }
+            const response = await apiService.getAgentSession().catch(() => null);
+            if (!failureHandlingAliveRef.current) {
+              handledFailedTurnsRef.current.delete(failed.mutationId);
+              return;
+            }
+            if (!response?.data) continue; // this GET failed; keep the last good one
+            authoritative = response.data;
+            delivery = classifyTurnDelivery(
+              response.data.messages,
               failed.message,
               failed.priorSameContentUserTurns,
-            )
-          : 'lost';
-
-        if (!failureHandlingAliveRef.current) {
-          // Un-mark so a still-alive later effect run (StrictMode's simulated
-          // remount shares these refs) — or the next real mount — retries.
-          handledFailedTurnsRef.current.delete(failed.mutationId);
-          return;
-        }
-
-        if (authoritative && delivery !== 'lost') {
-          // The server HAS the turn. Render server truth wholesale: the
-          // authoritative transcript replaces both sources (older transport
-          // error bubbles vanish with it — they were client-only and are
-          // superseded by the server's account). NO draft restore in either
-          // branch: the message is on the server.
-          sessionIdRef.current = authoritative.session_id;
-          if (authSessionId !== null && getAuthSessionId() === authSessionId) {
-            queryClient.setQueryData<AgentSessionResponse>(
-              agentSessionQueryKey(authSessionId),
-              authoritative,
             );
+            if (delivery !== 'lost') break; // delivered — stop polling
+            // 'lost' on a SUCCESSFUL GET may still be the overtake race; poll again.
           }
-          historyAcceptedRef.current = true;
-          setHistoryBubbles(authoritative.messages.map(turnToBubble));
-          setLiveBubbles(
-            delivery === 'received'
-              ? [
-                  // Delivered but unanswered so far — the agent may still be
-                  // working server-side. Say so without inviting a re-send.
-                  {
-                    id: nextLiveId(),
-                    role: 'assistant',
-                    text: 'The connection was lost while the assistant was replying. Your message was delivered — the reply may appear the next time you open this page.',
-                    isError: true,
-                  },
-                ]
-              : [],
-          );
-        } else {
-          // Genuinely lost before the server saw it. Give the user their
-          // message back: the send cleared the composer optimistically, and a
-          // 429/network drop must not destroy a carefully-typed request
-          // (review !62). The guard keeps anything they typed since.
-          const draft = failed.message;
-          setComposerValue((current) => (current === '' ? draft : current));
-          // One renderer, two failure paths (2 of 2): transport failures
-          // render exactly like the in-band type:'error' handled in send's
-          // onSuccess. No toast — the error belongs in the transcript.
-          setLiveBubbles((prev) => [
-            ...prev,
-            {
-              id: nextLiveId(),
-              role: 'assistant',
-              text: failed.errorMessage || 'The request failed. Please try again.',
-              isError: true,
-            },
-          ]);
-        }
 
-        // Handled — REMOVE it so a later mount does not surface it again.
-        const mutationCache = queryClient.getMutationCache();
-        const mutation = mutationCache
-          .getAll()
-          .find((m) => m.mutationId === failed.mutationId);
-        if (mutation) mutationCache.remove(mutation);
+          if (authoritative && delivery !== 'lost') {
+            // The server HAS the turn. Render server truth wholesale: the
+            // authoritative transcript replaces both sources (older client-only
+            // error bubbles vanish with it). NO draft restore — the message is
+            // on the server, and re-sending would double-feed the agent.
+            sessionIdRef.current = authoritative.session_id;
+            if (authSessionId !== null && getAuthSessionId() === authSessionId) {
+              queryClient.setQueryData<AgentSessionResponse>(
+                agentSessionQueryKey(authSessionId),
+                authoritative,
+              );
+            }
+            historyAcceptedRef.current = true;
+            setHistoryBubbles(authoritative.messages.map(turnToBubble));
+            setLiveBubbles(
+              delivery === 'received'
+                ? [
+                    // Delivered but unanswered so far — the agent may still be
+                    // working server-side. Say so without inviting a re-send.
+                    {
+                      id: nextLiveId(),
+                      role: 'assistant',
+                      text: 'The connection was lost while the assistant was replying. Your message was delivered — the reply may appear the next time you open this page.',
+                      isError: true,
+                    },
+                  ]
+                : [],
+            );
+          } else if (authoritative) {
+            // Every successful GET agreed the turn is ABSENT, even after the
+            // poll closed the overtake window: it never reached the server.
+            // Now it is safe to give the message back (the send cleared the
+            // composer optimistically; a 429/network drop must not destroy a
+            // carefully-typed request). The guard keeps anything typed since.
+            setComposerValue((current) => (current === '' ? failed.message : current));
+            setLiveBubbles((prev) => [
+              ...prev,
+              {
+                id: nextLiveId(),
+                role: 'assistant',
+                text: failed.errorMessage || 'The request failed. Please try again.',
+                isError: true,
+              },
+            ]);
+          } else {
+            // UNCERTAIN (review !62 round 4, Important 1a): no GET ever
+            // succeeded — the network is down, and we CANNOT tell "never sent"
+            // from "sent, still processing, response lost". Do NOT restore the
+            // draft: an automatic retry could double-feed a turn the server may
+            // have taken. No data is lost — the user's own message is still the
+            // optimistic bubble above; the composer just stays empty so the
+            // re-send is a deliberate choice after the page reconciles.
+            setLiveBubbles((prev) => [
+              ...prev,
+              {
+                id: nextLiveId(),
+                role: 'assistant',
+                text: "We couldn't reach the server to confirm your last message was delivered. Reload the page to check before sending it again.",
+                isError: true,
+              },
+            ]);
+          }
+
+          // Handled — REMOVE it so a later mount does not surface it again.
+          const mutationCache = queryClient.getMutationCache();
+          const mutation = mutationCache
+            .getAll()
+            .find((m) => m.mutationId === failed.mutationId);
+          if (mutation) mutationCache.remove(mutation);
+        } finally {
+          setReconcilingCount((c) => c - 1);
+        }
       }
     };
     void run();
