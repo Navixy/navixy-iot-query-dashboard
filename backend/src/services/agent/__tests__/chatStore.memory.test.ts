@@ -324,8 +324,7 @@ describe('tenantKeyFor', () => {
 
   it('never throws — an unparseable URL degrades to a raw-string key (finer, never coarser)', () => {
     // Unreachable for a URL that passed login, but the limiter's keyGenerator must
-    // never throw: errorHandler would 500 every chat request, and parse errors embed
-    // the full URL, password included.
+    // never throw: errorHandler would 500 every chat request.
     const a = tenantKeyFor('not-a-postgres-url');
     const b = tenantKeyFor('postgresql:///no-host');
     expect(a).toMatch(/^[0-9a-f]{64}$/);
