@@ -57,5 +57,10 @@ CREATE TABLE IF NOT EXISTS dashboard_studio_meta_data.chat_messages (
   -- replay. Display metadata only — ordering uses seq.
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- RETENTION (DO-313 review round 5): the store keeps the newest 100 rows
+-- (MAX_TURNS, chatStore.ts) per session — exactly what GET /api/agent/session can
+-- ever return — pruning older rows inside the same transaction as every
+-- append/replay, via this index. No DBA-side cleanup job is needed; the table is
+-- bounded per user by construction.
 CREATE INDEX IF NOT EXISTS chat_messages_session_seq_idx
   ON dashboard_studio_meta_data.chat_messages (session_id, seq);

@@ -60,7 +60,7 @@ function makeScriptedPool() {
   const idTaken = (id: string) => applied().some((m) => m.id === id) || (txn ?? []).some((m) => m.id === id);
 
   const client = {
-    async query(sql: string, params: unknown[] = []): Promise<{ rows: unknown[] }> {
+    async query(sql: string, params: unknown[] = []): Promise<{ rows: unknown[]; rowCount?: number }> {
       const q = sql.replace(/\s+/g, ' ').trim();
 
       if (q === 'BEGIN') { txn = []; return { rows: [] }; }
@@ -121,6 +121,23 @@ function makeScriptedPool() {
 
       if (q.includes('UPDATE dashboard_studio_meta_data.chat_sessions')) {
         return { rows: [] };
+      }
+
+      // RETENTION (review round 5): keep the newest $3 rows per session by seq —
+      // the stub's seq is insertion order across applied rows plus this txn's own
+      // (a real DELETE sees the transaction's inserts). Checked BEFORE the history
+      // read: the prune's subquery also contains 'FROM …chat_messages'. Emulated
+      // as applied-at-execution; every scripted failure fires before the prune
+      // runs, so txn-rollback fidelity is not needed here.
+      if (q.startsWith('DELETE FROM dashboard_studio_meta_data.chat_messages')) {
+        const inSession = [...db.messages, ...(txn ?? [])]
+          .filter((m) => m.session_id === params[0] && m.user_id === params[1]);
+        const doomed = new Set(
+          inSession.slice(0, Math.max(0, inSession.length - Number(params[2]))).map((m) => m.id),
+        );
+        db.messages = db.messages.filter((m) => !doomed.has(m.id));
+        if (txn) txn = txn.filter((m) => !doomed.has(m.id));
+        return { rows: [], rowCount: doomed.size };
       }
 
       if (q.includes('FROM dashboard_studio_meta_data.chat_messages')) {
@@ -234,5 +251,54 @@ describe('chatStore — buffered replay on Postgres recovery (MR !61 review)', (
     // Insertion (= seq) order carries the healed order — even when both writes
     // land in the same millisecond and created_at ties.
     expect(db.messages.map((m) => m.content)).toEqual(['first', 'second']);
+  });
+});
+
+// MR !61 round 5 (note 56601): every turn INSERTed unconditionally while
+// MAX_TURNS bounded only the SELECT and the memory path — 101 exchanges left 202
+// rows (result payloads included) in the tenant's settings DB with the API able
+// to return just the newest 100, and growth never stopped. The store now prunes
+// past the bound inside the SAME transaction as the inserts, on both write
+// paths. Retention IS visibility: only rows the read path can never return
+// again are deleted.
+describe('chatStore — Postgres retention (MR !61 round 5)', () => {
+  it('bounds persisted rows per session at MAX_TURNS — the newest 100, exactly what reads expose', async () => {
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    // 51 exchanges = 102 turns, appended in the route's user+assistant rhythm.
+    for (let i = 0; i < 51; i++) {
+      await appendTurns(pool, ident('u1'), sessionId, [user(`u-${i}`)]);
+      await appendTurns(pool, ident('u1'), sessionId, [question(`a-${i}`)]);
+    }
+
+    expect(db.messages).toHaveLength(100); // not 102 — the oldest exchange is gone
+    expect(db.messages[0].content).toBe('u-1');
+
+    const { history } = await loadHistory(pool, ident('u1'), sessionId);
+    expect(history).toHaveLength(100);
+    expect(history[0]).toEqual(user('u-1'));
+    expect(history[99]).toEqual(question('a-50'));
+  });
+
+  it('the replay path prunes too: a drained outage buffer cannot overfill the table', async () => {
+    const { pool, db, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    for (let i = 0; i < 60; i++) {
+      await appendTurns(pool, ident('u1'), sessionId, [user(`pg-${i}`)]);
+    }
+    script.failMessageInsert = true; // outage: the next 60 turns buffer in memory
+    for (let i = 0; i < 60; i++) {
+      await appendTurns(pool, ident('u1'), sessionId, [user(`buf-${i}`)]);
+    }
+    script.failMessageInsert = false;
+
+    // The healthy read drains all 60 buffered turns into Postgres in one
+    // transaction — which must leave 100 rows, not 120.
+    const { history } = await loadHistory(pool, ident('u1'), sessionId);
+    expect(db.messages).toHaveLength(100);
+    expect(db.messages[0].content).toBe('pg-20');
+    expect(history).toHaveLength(100);
   });
 });

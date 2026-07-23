@@ -510,6 +510,39 @@ async function insertEntry(
   );
 }
 
+/** RETENTION (MR !61 round 5, note 56601): chat_messages grew without bound —
+ *  every turn INSERTed unconditionally while MAX_TURNS bounded only the SELECT
+ *  and the memory path, so 101 exchanges left 202 rows (full result payloads
+ *  included) in the tenant's settings DB with the API able to return just the
+ *  newest 100, and growth never stopped. Runs inside the SAME transaction as the
+ *  inserts — both write paths (append and replay) call it after their INSERTs —
+ *  so the bound lands atomically with the growth. Retention IS visibility:
+ *  `seq <= (the MAX_TURNS-th newest seq)` deletes exactly the rows the read
+ *  path (ORDER BY seq DESC LIMIT MAX_TURNS) can never return again, and the
+ *  subquery-plus-DELETE both walk chat_messages_session_seq_idx. When the
+ *  session holds ≤ MAX_TURNS rows the subquery is empty and `seq <= NULL`
+ *  matches nothing — a no-op. */
+async function pruneOldTurns(
+  client: PoolClient, userId: string, sessionId: string,
+): Promise<void> {
+  const pruned = await client.query(
+    `DELETE FROM dashboard_studio_meta_data.chat_messages
+      WHERE session_id = $1 AND user_id = $2
+        AND seq <= (SELECT seq FROM dashboard_studio_meta_data.chat_messages
+                     WHERE session_id = $1 AND user_id = $2
+                     ORDER BY seq DESC
+                     OFFSET $3 LIMIT 1)`,
+    [sessionId, userId, MAX_TURNS],
+  );
+  if ((pruned.rowCount ?? 0) > 0) {
+    logger.info('Pruned chat turns beyond the retention bound', {
+      sessionId,
+      pruned: pruned.rowCount,
+      keep: MAX_TURNS,
+    });
+  }
+}
+
 /** RECONCILIATION (MR !61 review): INSERT every buffered entry for this identity
  *  into the given Postgres session, inside the caller's OPEN transaction. Returns
  *  the replayed ids; the caller clears them from the buffer with clearReplayed
@@ -596,6 +629,9 @@ async function pgLoadHistory(
         try {
           await client.query('BEGIN');
           const replayedIds = await replayBufferedEntries(client, ident, resolved);
+          // A drained outage buffer can push the session past MAX_TURNS just
+          // like an append can — prune in the same transaction (round 5).
+          await pruneOldTurns(client, userId, resolved);
           await client.query('COMMIT');
           clearReplayed(ident, replayedIds);
         } catch (error) {
@@ -665,6 +701,8 @@ async function pgAppendTurns(
     for (const entry of entries) {
       await insertEntry(client, userId, sessionId, entry);
     }
+    // Retention bound, atomic with the inserts above (round 5, note 56601).
+    await pruneOldTurns(client, userId, sessionId);
     await client.query(
       `UPDATE dashboard_studio_meta_data.chat_sessions
           SET updated_at = NOW()
