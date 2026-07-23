@@ -7,6 +7,7 @@ import {
 import { useAuth } from '@/contexts/AuthContext';
 import { getAuthSessionId } from '@/lib/authSession';
 import { apiService } from '@/services/api';
+import { countMatchingUserTurns } from '@/components/ai-chat/turnDelivery';
 import type {
   AgentChatRequest,
   AgentChatResponse,
@@ -62,16 +63,27 @@ export interface AgentChatMutationContext {
    *  just-persisted user turn — and the length comes back unchanged while the
    *  content moved (review !62 round 2, Important 3). */
   snapshotAtSend: AgentSessionResponse | null;
+  /** How many user turns with THIS turn's exact content the client already knew
+   *  about at send time — the occurrence baseline the lost-response reconciler
+   *  needs so a repeated prompt is not absorbed by an older identical turn
+   *  (review !62 round 4, Important 2; see classifyTurnDelivery). Derived from
+   *  snapshotAtSend, so it is 0 when the session read had not yet resolved. */
+  priorSameContentUserTurns: number;
 }
 
-/** onMutate body, exported for tests. */
-export function createAgentChatContext(queryClient: QueryClient): AgentChatMutationContext {
+/** onMutate body, exported for tests. Receives the turn's message so it can
+ *  record the send-time occurrence baseline for that exact content. */
+export function createAgentChatContext(
+  queryClient: QueryClient,
+  message: string,
+): AgentChatMutationContext {
   const authSessionAtSend = getAuthSessionId();
+  const snapshotAtSend =
+    queryClient.getQueryData<AgentSessionResponse>(agentSessionQueryKey(authSessionAtSend)) ?? null;
   return {
     authSessionAtSend,
-    snapshotAtSend:
-      queryClient.getQueryData<AgentSessionResponse>(agentSessionQueryKey(authSessionAtSend)) ??
-      null,
+    snapshotAtSend,
+    priorSameContentUserTurns: countMatchingUserTurns(snapshotAtSend?.messages ?? [], message),
   };
 }
 
@@ -200,7 +212,7 @@ export function useAgentChatMutation() {
     // (routes/agent.ts) — so any session refetch that resolves while the turn
     // is in flight already ends with that turn; settle uses the baseline to
     // decide between appending and reconciling (review !62, major 2).
-    onMutate: () => createAgentChatContext(queryClient),
+    onMutate: (variables) => createAgentChatContext(queryClient, variables.message),
     // Cache-write placement option (b): write the new turns into the session
     // query's cache from the mutation's own onSuccess, not a shared
     // MutationCache handler. Hook-level callbacks belong to the mutation, not

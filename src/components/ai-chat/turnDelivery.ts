@@ -2,45 +2,80 @@ import type { AgentTurn } from '@/types/agent';
 
 export type TurnDelivery = 'completed' | 'received' | 'lost';
 
+/** Number of USER turns in `history` whose content is exactly `content`. The
+ *  send-time value is the reconciliation baseline below; the reconcile-time
+ *  value is compared against it. */
+export function countMatchingUserTurns(history: AgentTurn[], content: string): number {
+  let n = 0;
+  for (const turn of history) {
+    if (turn.role === 'user' && turn.content === content) n += 1;
+  }
+  return n;
+}
+
 /**
- * Classifies what actually happened to a chat turn whose HTTP RESPONSE was
- * lost (review !62 round 3, Important 2). POST /chat is not idempotent: the
- * server persists the user turn at receipt and the assistant turn after the
- * agent finishes, and the agent's own conversation memory is stateful (D19).
- * A transport error therefore does NOT mean the turn failed — the server may
- * have processed it completely and only the response died. An authoritative
- * GET /session tells the three states apart:
+ * Classifies what happened to a chat turn whose HTTP RESPONSE was lost
+ * (review !62 rounds 3–4). POST /chat is not idempotent: the server persists
+ * the user turn at receipt and the assistant turn after the agent finishes,
+ * and the agent's memory is stateful (D19). A transport error therefore does
+ * NOT mean the turn failed — the server may have processed it completely with
+ * only the response dying. An authoritative GET /session tells the states
+ * apart, but ONLY relative to a SEND-TIME BASELINE.
  *
- * - 'completed' — the sent message is in the transcript with an assistant turn
- *   after it. The turn SUCCEEDED; render server truth. Restoring the draft
- *   here is the hazard this module exists to remove: it invites re-sending a
- *   message the agent already consumed (R20).
- * - 'received' — the sent message is in the transcript with no assistant turn
- *   after it: the server got it and the agent may still be working (the server
- *   keeps processing after a client disconnect), or the reply is imminent.
- *   Do not restore the draft; the reply may appear on a later load.
- * - 'lost' — the sent message is not in the transcript: the POST (almost
- *   certainly) never reached the server. Retrying is safe; restore the draft.
+ * `priorOccurrences` is how many user turns with this exact content the client
+ * already knew about at send time (from the session-cache snapshot). Without
+ * it, a repeated prompt is silent data loss (review !62 round 4, Important 2):
+ * if the user successfully sent "refresh this dashboard" earlier and sends it
+ * again, and THAT second POST is genuinely lost, the OLD identical turn matches
+ * and the attempt is wrongly called 'completed' — the failed mutation is
+ * dropped, the draft is not restored, and the new command vanishes. Requiring a
+ * match STRICTLY BEYOND the baseline means only a turn the server added THIS
+ * time counts as delivery.
  *
- * Matching scans USER turns from the end for exact content — the NEWEST
- * occurrence wins. Accepted bias, deliberately: if the user re-sent the exact
- * text of an older completed turn and THAT send was truly lost, the older turn
- * classifies it 'completed' and no draft comes back — uncertainty always
- * resolves AWAY from feeding the stateful agent twice, at the cost of a
- * retype. An assistant turn of any type counts, including type:'error': an
- * in-band failure the server persisted IS the turn's real outcome.
+ * - 'completed' — a new occurrence exists AND an assistant turn follows the
+ *   newest matching user turn. The turn SUCCEEDED; render server truth. Never
+ *   restore the draft here: it would invite re-sending a message the agent
+ *   already consumed (R20).
+ * - 'received' — a new occurrence exists with no assistant after it yet: the
+ *   server got it and the agent may still be working (it keeps processing
+ *   after a client disconnect). Do not restore the draft.
+ * - 'lost' — no occurrence beyond the baseline: the server transcript does not
+ *   contain this send. Retrying is safe; the caller restores the draft — but
+ *   ONLY on a SUCCESSFUL, settled GET, never on a failed or in-flight one
+ *   (that ambiguity is the caller's 'uncertain' path, not 'lost').
+ *
+ * An assistant turn of any type counts, including type:'error': an in-band
+ * failure the server persisted IS the turn's outcome. Completed-vs-received
+ * looks after the NEWEST matching user turn — our just-sent turn is the newest
+ * of its content, so an assistant after it is its answer even if a concurrent
+ * tab appended around it.
+ *
+ * RESIDUAL EDGE (no client turn id exists — that is the real fix, deferred):
+ * the newest-MAX_TURNS window can evict an OLD identical turn exactly as ours
+ * is appended, leaving the count equal to the baseline; the turn is then called
+ * 'lost' though it was delivered. That degrades to a draft restore (safe-ish:
+ * text preserved, a double-feed only on an explicit manual resend), never to
+ * silent loss. Requires the transcript within ~2 of the 100 cap AND a prior
+ * identical turn old enough to slide — narrow, and strictly better than the
+ * newest-match rule it replaces.
  */
 export function classifyTurnDelivery(
   history: AgentTurn[],
   sentMessage: string,
+  priorOccurrences = 0,
 ): TurnDelivery {
-  for (let i = history.length - 1; i >= 0; i--) {
+  // Indices of every matching user turn, oldest-first.
+  const matches: number[] = [];
+  for (let i = 0; i < history.length; i++) {
     const turn = history[i];
-    if (turn.role !== 'user' || turn.content !== sentMessage) continue;
-    for (let j = i + 1; j < history.length; j++) {
-      if (history[j].role === 'assistant') return 'completed';
-    }
-    return 'received';
+    if (turn.role === 'user' && turn.content === sentMessage) matches.push(i);
   }
-  return 'lost';
+  // No occurrence beyond what we already knew at send time → not delivered.
+  if (matches.length <= priorOccurrences) return 'lost';
+
+  const newestMatch = matches[matches.length - 1];
+  for (let j = newestMatch + 1; j < history.length; j++) {
+    if (history[j].role === 'assistant') return 'completed';
+  }
+  return 'received';
 }
