@@ -16,7 +16,7 @@ import type { AgentTurn } from '../types.js';
  * the MR's manual M-PERSIST check.
  */
 
-const ident = (userId: string, tenantKey = 'tenant-1') => ({ tenantKey, userId });
+const ident = (userId: string, tenantKey = 'tenant-1') => ({ tenantKey, userId, demo: false });
 
 const user = (content: string): AgentTurn => ({ role: 'user', content });
 const question = (content: string): AgentTurn => ({

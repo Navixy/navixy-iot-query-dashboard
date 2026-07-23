@@ -10,7 +10,9 @@
  *    it into the resolved session, so a mid-dialogue outage no longer forfeits the
  *    turns it swallowed — a tenant whose DBA has not applied
  *    002_add_chat_tables.sql still gets a working chat, and the transcript now
- *    survives INTO Postgres once the DDL lands.
+ *    survives INTO Postgres once the DDL lands. DEMO identities are the exception
+ *    (review !62 round 2): they live in their own memory namespace, never reach
+ *    Postgres and never join the replay — see ChatIdentity.demo.
  *
  * 2. IT IS DISPLAY-ONLY. The transcript is (a) what GET /api/agent/session rehydrates
  *    into the UI and (b) the mock's turn counter. It is NEVER sent to Bedrock: under
@@ -58,6 +60,16 @@ export interface ChatIdentity {
    *  module or any map key (B4-R5). */
   tenantKey: string;
   userId: string;
+  /** True for demo-mode requests. Demo transcripts live in a SEPARATE memory
+   *  namespace and NEVER touch Postgres (review !62 round 2, Critical 1): without
+   *  this split, demo shared `${tenantKey}:${userId}` with a degraded real-mode
+   *  session — demo read the real user's buffered history, demo turns landed in
+   *  the same write-behind buffer, and the next healthy real-mode touch REPLAYED
+   *  them into the tenant's database, breaking the demo promise that nothing is
+   *  saved. The store enforces both properties itself (memKey below, and the
+   *  pool override in loadHistory/appendTurns) instead of trusting every caller
+   *  to remember to pass pool = null. */
+  demo: boolean;
 }
 
 /** sha256 of the tenant's NORMALIZED pool identity (settingsPoolKeyForUrl:
@@ -153,9 +165,11 @@ interface MemorySession {
   updatedAt: number;
 }
 
-/** Keyed by `${tenantKey}:${userId}` (memKey) — bare userId leaked transcripts
- *  across tenants, see ChatIdentity (MR !61 review). One continuous dialogue per
- *  user (D7), mirroring the chat_sessions_one_active_per_user partial unique index.
+/** Keyed by `${mode}:${tenantKey}:${userId}` (memKey) — bare userId leaked
+ *  transcripts across tenants (MR !61 review), and a mode-less key leaked them
+ *  between demo and real sessions of one user (review !62 round 2); see
+ *  ChatIdentity. One continuous dialogue per user AND MODE (D7), mirroring the
+ *  chat_sessions_one_active_per_user partial unique index.
  *  PER-PROCESS: with more than one replica, in-memory history is
  *  sticky-session-dependent. docker-compose runs a single backend, so this is
  *  acceptable for v1 — and is a concrete reason to land the DDL. */
@@ -166,7 +180,10 @@ let memorySessions = new Map<string, MemorySession>();
 let memoryTotalBytes = 0;
 
 function memKey(ident: ChatIdentity): string {
-  return `${ident.tenantKey}:${ident.userId}`;
+  // The 'demo'/'live' prefix keeps demo and real sessions for the SAME user on
+  // separate buffers (review !62 round 2, Critical 1) — see ChatIdentity.demo.
+  // Without it, replayBufferedEntries drained demo turns into Postgres.
+  return `${ident.demo ? 'demo' : 'live'}:${ident.tenantKey}:${ident.userId}`;
 }
 
 /** Probe result per tenant. The spec asked for Map<sha256(userDbUrl), …>, but this
@@ -674,7 +691,11 @@ async function pgAppendTurns(
 export async function loadHistory(
   pool: Pool | null, ident: ChatIdentity, sessionId: string | null,
 ): Promise<ChatStoreResult> {
-  if (pool) {
+  // A demo identity NEVER reaches Postgres, even when handed a live pool
+  // (review !62 round 2, Critical 1). Enforced HERE, in the store, so no route
+  // wiring mistake can read the tenant's persisted transcript into a demo
+  // session — or replay a demo buffer out of memory into their database.
+  if (pool && !ident.demo) {
     try {
       if (await chatTablesExist(pool)) {
         return await pgLoadHistory(pool, ident, sessionId);
@@ -726,7 +747,9 @@ export async function appendTurns(
   // structurally impossible.
   let at = Date.now();
   const entries: StoredTurn[] = turns.map((turn) => ({ id: randomUUID(), at: at++, turn }));
-  if (pool) {
+  // Same demo override as loadHistory (review !62 round 2, Critical 1): a demo
+  // turn must be structurally unable to reach chat_messages.
+  if (pool && !ident.demo) {
     try {
       if (await chatTablesExist(pool)) {
         await pgAppendTurns(pool, ident, sessionId, entries);

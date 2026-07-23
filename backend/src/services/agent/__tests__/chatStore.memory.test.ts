@@ -22,7 +22,7 @@ const PROBE_ARTIFACT_PATH = fileURLToPath(new URL('./fixtures/artifact.json', im
 
 /** Store identity — the tenantKey is opaque to the store, so tests use plain
  *  strings; tenantKeyFor's URL-hashing contract is pinned separately below. */
-const ident = (userId: string, tenantKey = 'tenant-1') => ({ tenantKey, userId });
+const ident = (userId: string, tenantKey = 'tenant-1') => ({ tenantKey, userId, demo: false });
 
 const user = (content: string): AgentTurn => ({ role: 'user', content });
 const question = (content: string): AgentTurn => ({

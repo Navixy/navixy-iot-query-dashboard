@@ -105,10 +105,15 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
 
   // Tenant-scoped identity for every piece of cross-tenant shared state (MR !61
   // review, Critical) — see ChatIdentity in chatStore.ts. userDbUrl is guaranteed
-  // present: authenticateToken 401s without it (middleware/auth.ts:47).
+  // present: authenticateToken 401s without it (middleware/auth.ts:47). The demo
+  // flag is part of the identity (review !62 round 2, Critical 1): the store
+  // namespaces demo transcripts away from the real user's write-behind buffer
+  // and refuses Postgres for them — without it, demo turns joined the buffer
+  // replay and landed in the tenant's database.
   const ident: ChatIdentity = {
     tenantKey: tenantKeyFor(req.user.userDbUrl),
     userId: req.user.userId,
+    demo: req.user.demo === true,
   };
 
   // Demo sessions must never touch the tenant settings DB (D11 amendment,
@@ -118,7 +123,8 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   // null routes the chat store to its per-process in-memory path, read and
   // write, so demo transcripts never create rows (and never read the real
   // user's persisted history). GET /session then reports persisted:false,
-  // which is truthful for demo.
+  // which is truthful for demo. Since review !62 round 2 the store enforces
+  // this itself off ident.demo; the null here is a second, independent layer.
   const pool = req.user.demo ? null : (req.settingsPool ?? null);
 
   // --- session resolution. THE SERVER IS AUTHORITATIVE (D13). An unknown, expired or
@@ -195,8 +201,9 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
 
 // Rehydrates the single continuous dialogue on page load. Without it, an applied
 // 002_add_chat_tables.sql is write-only — a DBA runs the migration and observes nothing (D16).
-// persisted: false tells the UI this tenant has not applied 002 and history will not survive
-// a reload; it says NOTHING about the agent's memory, which Bedrock holds server-side either
+// persisted: false tells the UI this tenant has not applied 002 and history lives in process
+// memory — it survives page reloads but not a backend restart, a replica switch or the 2 h
+// TTL; it says NOTHING about the agent's memory, which Bedrock holds server-side either
 // way (D19). Result turns are returned with their `result` payload attached — that is what
 // makes a reloaded transcript re-previewable with zero S3 traffic.
 router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
@@ -204,9 +211,11 @@ router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Respo
   const ident: ChatIdentity = {
     tenantKey: tenantKeyFor(req.user.userDbUrl),
     userId: req.user.userId,
+    demo: req.user.demo === true,
   };
-  // Same demo guard as POST /chat above: demo history lives in process memory
-  // only, so demo reads must not surface the real user's persisted transcript.
+  // Same demo guard as POST /chat above: demo history lives in its own process-
+  // memory namespace, so demo reads must not surface the real user's persisted
+  // transcript (or their degraded-mode buffer — review !62 round 2, Critical 1).
   const pool = req.user.demo ? null : (req.settingsPool ?? null);
   const { sessionId, history, persisted } = await loadHistory(pool, ident, null);
   return res.json({ session_id: sessionId, persisted, messages: history });
