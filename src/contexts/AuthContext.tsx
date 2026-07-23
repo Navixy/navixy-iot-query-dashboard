@@ -170,7 +170,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               if (isStaleVerification()) return;
               if (!isSeeded) {
                 console.log('[AuthContext] Demo storage not seeded, fetching data from backend...');
-                await initializeDemoStorage(tokenToVerify, data.user.id);
+                // Pass the staleness predicate through: initializeDemoStorage
+                // clears and reseeds the SINGLETON IndexedDB and DELETEs the
+                // demo user across several awaits, and a sign-out/sign-in can
+                // switch identity mid-flight — a stale run must not clobber the
+                // new identity's data (review !62 round 4, Important 4).
+                await initializeDemoStorage(tokenToVerify, data.user.id, isStaleVerification);
               }
             } else if (tokenHasDemoFlag) {
               // JWT has demo flag and we're already in demo mode, just sync state
@@ -191,6 +196,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             dropAuthSession();
           }
         } catch {
+          // A stale verification must not run auth cleanup here either (review
+          // !62 round 4, Important 3): demoStorageService.isSeeded() above is
+          // awaited inside this try, and if IndexedDB rejects AFTER a newer
+          // sign-in, this catch would otherwise delete the new session's token
+          // and end its epoch. The outer catch already guards; this inner one
+          // did not.
+          if (isStaleVerification()) return;
           localStorage.removeItem('auth_token');
           setToken(null);
           setUser(null);
@@ -226,16 +238,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
   
   /**
-   * Initialize demo storage by fetching data from the backend
+   * Initialize demo storage by fetching data from the backend.
+   *
+   * `isStale` (review !62 round 4, Important 4) is re-checked before EVERY
+   * destructive or write stage — clearAllData, seedFromBackend, the demo-user
+   * DELETE. IndexedDB is a per-origin SINGLETON, so a verification whose
+   * identity has been superseded by a sign-out/sign-in mid-flight must abort
+   * rather than clear or reseed the CURRENT identity's data. Aborting leaves
+   * IndexedDB as the live identity's own sign-in left it.
    */
-  const initializeDemoStorage = async (authToken: string, userId: string) => {
+  const initializeDemoStorage = async (
+    authToken: string,
+    userId: string,
+    isStale: () => boolean,
+  ) => {
     try {
       const headers = {
         'Authorization': `Bearer ${authToken}`,
         'Content-Type': 'application/json',
       };
 
-      // First, clear IndexedDB to ensure fresh data
+      // First, clear IndexedDB to ensure fresh data — but only if this run still
+      // owns the session. A stale run here would wipe the new identity's store.
+      if (isStale()) {
+        console.log('[AuthContext] Demo init superseded before clear; aborting');
+        return;
+      }
       console.log('[AuthContext] Clearing IndexedDB before initializing demo storage...');
       await demoStorageService.clearAllData();
 
@@ -271,6 +299,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         chartCatalog = data.catalog || data.data || null;
       }
 
+      // The fetches above were read-only; seeding is the next WRITE — re-check.
+      if (isStale()) {
+        console.log('[AuthContext] Demo init superseded before seed; aborting');
+        return;
+      }
       await demoStorageService.seedFromBackend({
         sections,
         reports,
@@ -281,6 +314,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Delete the temporary demo user from the database
       // This cleans up the user record since all data is now in IndexedDB
+      if (isStale()) {
+        console.log('[AuthContext] Demo init superseded before demo-user delete; aborting');
+        return;
+      }
       console.log('[AuthContext] Deleting temporary demo user from database...');
       try {
         const deleteRes = await fetch(`${API_BASE_URL}/api/auth/demo-user`, {
