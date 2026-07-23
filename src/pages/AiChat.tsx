@@ -12,6 +12,7 @@ import {
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
 import { EmptyState } from '@/components/ai-chat/EmptyState';
+import { trimHistoryOverlap } from '@/components/ai-chat/historyOverlap';
 import type { AgentChatRequest, AgentTurn, ChatBubble } from '@/types/agent';
 
 /**
@@ -77,13 +78,13 @@ const AiChat = () => {
   // The history THIS mount renders. Tracks the session query WHILE no live
   // bubble exists — so a remount mid-turn re-materializes the in-flight user
   // turn from the mount refetch, and the reply lands via the mutation's
-  // hook-level cache write (review !62, major 1). It FREEZES the moment a
-  // bubble is produced live: from then on the cache updates for this turn are
-  // already represented by liveBubbles, and rendering the live query data too
-  // would show every turn twice. If a turn completes before the session read
-  // returns, freezing without the history is the duplication-safe side of that
-  // race (the next mount reconciles from the server).
+  // hook-level cache write (review !62, major 1). Once a live bubble exists it
+  // accepts at most ONE more payload — the FIRST (see below) — and then
+  // FREEZES: from then on the cache updates are the mutation's own writes,
+  // already represented by liveBubbles, and rendering the query data too would
+  // show every turn twice.
   const [historyBubbles, setHistoryBubbles] = useState<ChatBubble[] | null>(null);
+  const historyAcceptedRef = useRef(false);
 
   useEffect(() => {
     const data = sessionQuery.data;
@@ -92,9 +93,21 @@ const AiChat = () => {
       sessionIdRef.current = data.session_id;
     }
     if (liveBubbles.length === 0) {
+      historyAcceptedRef.current = true;
       setHistoryBubbles(data.messages.map(turnToBubble));
+    } else if (!historyAcceptedRef.current) {
+      // FIRST history to arrive on a mount that has already sent (review !62
+      // round 2, Important 5): the composer is deliberately usable while the
+      // initial GET is in flight, and refusing its late response outright hid
+      // the user's entire previous transcript until the next remount. Accept
+      // it once, minus the seam — the response may already contain the turns
+      // this mount rendered live (the user turn persists at POST receipt; a
+      // slow GET can even carry the finished exchange), and rendering both
+      // copies would duplicate them.
+      historyAcceptedRef.current = true;
+      setHistoryBubbles(trimHistoryOverlap(data.messages, liveBubbles).map(turnToBubble));
     }
-  }, [sessionQuery.data, liveBubbles.length]);
+  }, [sessionQuery.data, liveBubbles]);
 
   const [composerValue, setComposerValue] = useState('');
   const liveIdRef = useRef(0);
