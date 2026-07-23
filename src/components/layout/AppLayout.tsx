@@ -6,9 +6,22 @@ import { DemoBanner } from './DemoBanner';
 
 interface AppLayoutProps {
   children: ReactNode;
+  /**
+   * Replaces the default content wrapper classes on the box inside <main>.
+   * Exists for ONE reason: the default wrapper has AUTO height, so a page that
+   * needs a definite height (a pinned composer above a self-scrolling transcript
+   * — /app/chat) cannot get one, and h-full on a child collapses.
+   *
+   * This is NOT a general styling hook. The <main> above is the app's SOLE scroll
+   * container and the h-svh/overflow-hidden shell above it is load-bearing for
+   * FR-11509 (see the comment block below). Anything passed here MUST stay inside
+   * <main> and MUST NOT introduce min-h-screen, h-screen, or its own document-level
+   * scroll. When in doubt, do not pass it.
+   */
+  contentClassName?: string;
 }
 
-export function AppLayout({ children }: AppLayoutProps) {
+export function AppLayout({ children, contentClassName }: AppLayoutProps) {
   return (
     <SidebarProvider>
       {/*
@@ -33,8 +46,8 @@ export function AppLayout({ children }: AppLayoutProps) {
           <AppSidebar />
           <div className="flex-1 flex flex-col min-h-0 bg-[var(--surface-1)] pt-[var(--app-header-height)]">
             <AppHeader />
-            <main className="flex-1 overflow-auto bg-[var(--bg)] print:overflow-visible">
-              <div className="container mx-auto px-6 py-8 max-w-7xl">
+            <main className="flex-1 overflow-auto min-h-0 bg-[var(--bg)] print:overflow-visible">
+              <div className={contentClassName ?? "container mx-auto px-6 py-8 max-w-7xl"}>
                 {children}
               </div>
             </main>

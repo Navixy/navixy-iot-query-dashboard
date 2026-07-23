@@ -16,6 +16,7 @@ import NotFound from "./pages/NotFound";
 import LineChartTest from "./pages/LineChartTest";
 import CompositeReportView from "./pages/CompositeReportView";
 import CompositeReportEditor from "./pages/CompositeReportEditor";
+import AiChat from "./pages/AiChat";
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -41,6 +42,7 @@ const App = () => (
                 <Route path="/app/report/:reportId" element={<ReportView />} />
                 <Route path="/app/settings" element={<Settings />} />
                 <Route path="/app/sql-editor" element={<SqlEditor />} />
+                <Route path="/app/chat" element={<AiChat />} />
                 <Route
                   path="/app/composite-report/:id"
                   element={<CompositeReportView />}
