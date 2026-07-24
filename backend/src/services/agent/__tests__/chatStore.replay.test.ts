@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import type { Pool } from 'pg';
-import { loadHistory, appendTurns, __resetChatStoreForTests } from '../chatStore.js';
+import { loadHistory, appendTurns, getTurnStatus, __resetChatStoreForTests } from '../chatStore.js';
 import type { AgentTurn } from '../types.js';
 
 /**
@@ -25,6 +25,9 @@ const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
 const question = (content: string): AgentTurn => ({
   role: 'assistant', type: 'question', content, result: null,
 });
+const questionWithId = (content: string, client_turn_id: string): AgentTurn => ({
+  role: 'assistant', type: 'question', content, result: null, client_turn_id,
+});
 
 interface MsgRow {
   id: string;
@@ -44,6 +47,8 @@ interface Script {
    *  an earlier 002 have the tables but not the column; the store must keep
    *  persisting without it. */
   clientTurnIdColumn: boolean;
+  /** Whether the round-7 chat_turn_receipts table exists. */
+  receiptsTable: boolean;
   /** Every chat_messages INSERT throws while true. */
   failMessageInsert: boolean;
   /** Emulates an in-doubt COMMIT once: the server APPLIES the transaction, but the
@@ -55,10 +60,12 @@ function makeScriptedPool() {
   const db = {
     sessions: [] as Array<{ id: string; user_id: string; created_at: number }>,
     messages: [] as MsgRow[],
+    receipts: [] as Array<{ client_turn_id: string; user_id: string; status: string }>,
   };
   const script: Script = {
     tablesExist: true,
     clientTurnIdColumn: true,
+    receiptsTable: true,
     failMessageInsert: false,
     failCommitOnceAfterApply: false,
   };
@@ -104,7 +111,40 @@ function makeScriptedPool() {
         return { rows: [{ exists: script.clientTurnIdColumn }] };
       }
       if (q.includes('information_schema.tables')) {
+        // The receipts table (round 7) is a distinct table probe.
+        if (q.includes("'chat_turn_receipts'")) {
+          return { rows: [{ exists: script.receiptsTable }] };
+        }
         return { rows: [{ exists: script.tablesExist }] };
+      }
+
+      // Durable receipts (round 7, finding 5b). Applied directly, not txn-buffered:
+      // insertEntry only writes a receipt AFTER a successful message INSERT, and the
+      // ON CONFLICT clauses make replay idempotent, so buffer fidelity is not needed.
+      if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_turn_receipts')) {
+        const id = String(params[0]);
+        const answered = q.includes("'answered'");
+        const existing = db.receipts.find((r) => r.client_turn_id === id);
+        if (existing) {
+          if (q.includes('DO UPDATE')) existing.status = 'answered';
+          // else ON CONFLICT DO NOTHING
+        } else {
+          db.receipts.push({
+            client_turn_id: id, user_id: String(params[1]),
+            status: answered ? 'answered' : 'received',
+          });
+        }
+        return { rows: [] };
+      }
+      if (q.startsWith('DELETE FROM dashboard_studio_meta_data.chat_turn_receipts')) {
+        // Age-based prune; the stub has no clock, so nothing is old enough — no-op.
+        return { rows: [], rowCount: 0 };
+      }
+      if (q.includes('SELECT status FROM dashboard_studio_meta_data.chat_turn_receipts')) {
+        const r = db.receipts.find(
+          (x) => x.client_turn_id === params[0] && x.user_id === params[1],
+        );
+        return { rows: r ? [{ status: r.status }] : [] };
       }
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_sessions')) {
@@ -452,5 +492,104 @@ describe('chatStore — client_turn_id idempotency id (review !62 round 6)', () 
     const reloaded = await loadHistory(pool, ident('u1'), sessionId);
     expect(reloaded.history).toEqual([userWithId('buffered turn', 'tid-replay')]);
     expect(db.messages[0].client_turn_id).toBe('tid-replay');
+  });
+});
+
+describe('chatStore — assistant reply carries the originating id (review !62 round 7, finding 3)', () => {
+  it('stamps the assistant/error row with the user turn\'s client_turn_id', async () => {
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('build', 'tid-A')]);
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('here it is', 'tid-A')]);
+
+    const reloaded = await loadHistory(pool, ident('u1'), sessionId);
+    // Both halves of the pair carry the SAME id, so the client matches exactly.
+    expect(reloaded.history).toEqual([
+      userWithId('build', 'tid-A'),
+      questionWithId('here it is', 'tid-A'),
+    ]);
+    expect(db.messages.map((m) => m.client_turn_id)).toEqual(['tid-A', 'tid-A']);
+  });
+});
+
+describe('chatStore — supports_turn_ids capability (review !62 round 7, finding 5a)', () => {
+  it('is true when the client_turn_id column exists', async () => {
+    const { pool } = makeScriptedPool(); // clientTurnIdColumn defaults true
+    const result = await loadHistory(pool, ident('u1'), null);
+    expect(result.supportsTurnIds).toBe(true);
+  });
+
+  it('is false for a tenant on an older 002 without the column', async () => {
+    const { pool, script } = makeScriptedPool();
+    script.clientTurnIdColumn = false;
+    const result = await loadHistory(pool, ident('u1'), null);
+    expect(result.persisted).toBe(true); // still persists...
+    expect(result.supportsTurnIds).toBe(false); // ...but signals no id round-trip
+  });
+
+  it('is true for the in-memory path (it carries ids on the turn objects)', async () => {
+    const { pool, script } = makeScriptedPool();
+    script.tablesExist = false;
+    const result = await loadHistory(pool, ident('u1'), null);
+    expect(result.persisted).toBe(false);
+    expect(result.supportsTurnIds).toBe(true);
+  });
+});
+
+describe('chatStore — durable turn receipts (review !62 round 7, finding 5b)', () => {
+  it('records received, upgrades to answered, and getTurnStatus reads it back', async () => {
+    const { pool } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('q', 'tid-1')]);
+    expect(await getTurnStatus(pool, ident('u1'), 'tid-1')).toEqual({
+      status: 'received', supported: true,
+    });
+
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('a', 'tid-1')]);
+    expect(await getTurnStatus(pool, ident('u1'), 'tid-1')).toEqual({
+      status: 'answered', supported: true,
+    });
+  });
+
+  it('confirms a delivered turn EVEN AFTER its content row is evicted (the finding-5b point)', async () => {
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('q', 'tid-evicted')]);
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('a', 'tid-evicted')]);
+
+    // Simulate the 100-row retention evicting this turn's content entirely.
+    db.messages.length = 0;
+
+    // The transcript no longer shows it, but the durable receipt still confirms it.
+    expect(await getTurnStatus(pool, ident('u1'), 'tid-evicted')).toEqual({
+      status: 'answered', supported: true,
+    });
+  });
+
+  it('returns unknown/supported for an id that never reached the server', async () => {
+    const { pool } = makeScriptedPool();
+    await loadHistory(pool, ident('u1'), null);
+    expect(await getTurnStatus(pool, ident('u1'), 'never-sent')).toEqual({
+      status: 'unknown', supported: true,
+    });
+  });
+
+  it('reports unsupported (and keeps persisting) when the receipts table is absent', async () => {
+    const { pool, script } = makeScriptedPool();
+    script.receiptsTable = false;
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('q', 'tid-x')]); // must not throw
+    expect(await getTurnStatus(pool, ident('u1'), 'tid-x')).toEqual({
+      status: 'unknown', supported: false,
+    });
+  });
+
+  it('never exposes a demo identity\'s turn status from Postgres', async () => {
+    const { pool } = makeScriptedPool();
+    const demoIdent = { tenantKey: 'tenant-1', userId: 'u1', demo: true };
+    expect(await getTurnStatus(pool, demoIdent, 'tid-1')).toEqual({
+      status: 'unknown', supported: false,
+    });
   });
 });

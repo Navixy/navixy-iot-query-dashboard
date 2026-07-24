@@ -40,6 +40,18 @@ export interface ChatStoreResult {
   sessionId: string;
   history: AgentTurn[];
   persisted: boolean;
+  /** Whether this result's turns round-trip client_turn_id (review !62 round 7,
+   *  finding 5a). True for the in-memory path and for Postgres WITH the round-6
+   *  column; false only on an older 002 whose column is absent. Surfaced so the
+   *  client trusts id reconciliation from an explicit capability, not inference. */
+  supportsTurnIds: boolean;
+}
+
+/** Durable per-turn receipt status (review !62 round 7, finding 5b). */
+export interface TurnStatusResult {
+  status: 'received' | 'answered' | 'unknown';
+  /** Whether the tenant has the receipts table at all. */
+  supported: boolean;
 }
 
 /**
@@ -200,6 +212,9 @@ function memKey(ident: ChatIdentity): string {
 interface ChatSchema {
   tables: boolean;
   clientTurnId: boolean;
+  /** Whether the durable per-turn receipts table exists (review !62 round 7,
+   *  finding 5b) — gates the receipt upsert and the turn-status lookup. */
+  receipts: boolean;
 }
 
 let probeCache = new WeakMap<Pool, { schema: ChatSchema; checkedAt: number }>();
@@ -260,7 +275,7 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
         `);
         if (!sessionsExist.rows[0].exists) {
           logger.warn('chat_sessions table does not exist in dashboard_studio_meta_data schema');
-          return { tables: false, clientTurnId: false };
+          return { tables: false, clientTurnId: false, receipts: false };
         }
 
         const messagesExist = await client.query(`
@@ -272,7 +287,7 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
         `);
         if (!messagesExist.rows[0].exists) {
           logger.warn('chat_messages table does not exist in dashboard_studio_meta_data schema');
-          return { tables: false, clientTurnId: false };
+          return { tables: false, clientTurnId: false, receipts: false };
         }
 
         // The idempotency column is OPTIONAL (review !62 round 6): a tenant on an
@@ -288,7 +303,21 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
             AND column_name = 'client_turn_id'
           )
         `);
-        return { tables: true, clientTurnId: Boolean(columnExists.rows[0].exists) };
+        // The receipts table is also OPTIONAL (review !62 round 7, 003 migration):
+        // absent on a tenant who has not applied 003. Its absence only disables
+        // the durable turn-status lookup; it never blocks chat or persistence.
+        const receiptsExist = await client.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.tables
+            WHERE table_schema = 'dashboard_studio_meta_data'
+            AND table_name = 'chat_turn_receipts'
+          )
+        `);
+        return {
+          tables: true,
+          clientTurnId: Boolean(columnExists.rows[0].exists),
+          receipts: Boolean(receiptsExist.rows[0].exists),
+        };
       } finally {
         client.release();
       }
@@ -299,7 +328,7 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
     logger.warn('chat schema probe failed; degrading to in-memory history', {
       error: toErrorMeta(error).message,
     });
-    return { tables: false, clientTurnId: false };
+    return { tables: false, clientTurnId: false, receipts: false };
   }
 }
 
@@ -391,6 +420,9 @@ function memoryLoad(ident: ChatIdentity): ChatStoreResult {
     sessionId: session.sessionId,
     history: session.entries.map((e) => e.turn),
     persisted: false,
+    // The in-memory store carries client_turn_id on the turn objects it holds, so
+    // ids round-trip here too (review !62 round 7, finding 5a).
+    supportsTurnIds: true,
   };
 }
 
@@ -548,7 +580,7 @@ async function lockSession(
  *  created_at (order). Runs inside the caller's open transaction. */
 async function insertEntry(
   client: PoolClient, userId: string, sessionId: string, entry: StoredTurn,
-  hasClientTurnId: boolean,
+  schema: ChatSchema,
 ): Promise<void> {
   const { turn } = entry;
   const type = turn.role === 'assistant' ? turn.type ?? null : null;
@@ -563,12 +595,13 @@ async function insertEntry(
       resultBytes: Buffer.byteLength(result),
     });
   }
-  // client_turn_id rides on user turns only (review !62 round 6). The column
-  // exists only where the tenant applied the round-6 002 — probeChatSchema tells
-  // us — so branch the INSERT: on an older schema, write the legacy shape and let
-  // the turn carry no id in Postgres rather than fail the write.
-  const clientTurnId = turn.role === 'user' ? turn.client_turn_id ?? null : null;
-  if (hasClientTurnId) {
+  // client_turn_id rides on BOTH the user turn and its assistant reply (review
+  // !62 round 7, finding 3 — the route stamps the reply with the originating id).
+  // The column exists only where the tenant applied the round-6 002/003 —
+  // probeChatSchema tells us — so branch the INSERT: on an older schema, write the
+  // legacy shape and let the turn carry no id in Postgres rather than fail.
+  const clientTurnId = turn.client_turn_id ?? null;
+  if (schema.clientTurnId) {
     await client.query(
       `INSERT INTO dashboard_studio_meta_data.chat_messages
          (id, session_id, user_id, role, content, type, result, client_turn_id, created_at)
@@ -576,15 +609,41 @@ async function insertEntry(
        ON CONFLICT (id) DO NOTHING`,
       [entry.id, sessionId, userId, turn.role, turn.content, type, result, clientTurnId, entry.at],
     );
-    return;
+  } else {
+    await client.query(
+      `INSERT INTO dashboard_studio_meta_data.chat_messages
+         (id, session_id, user_id, role, content, type, result, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8 / 1000.0))
+       ON CONFLICT (id) DO NOTHING`,
+      [entry.id, sessionId, userId, turn.role, turn.content, type, result, entry.at],
+    );
   }
-  await client.query(
-    `INSERT INTO dashboard_studio_meta_data.chat_messages
-       (id, session_id, user_id, role, content, type, result, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8 / 1000.0))
-     ON CONFLICT (id) DO NOTHING`,
-    [entry.id, sessionId, userId, turn.role, turn.content, type, result, entry.at],
-  );
+
+  // Durable per-turn receipt (review !62 round 7, finding 5b), written in the SAME
+  // transaction as the message so status and content can never disagree, but kept
+  // in a table that is NOT pruned with the transcript. The user turn records
+  // 'received'; its assistant/error reply (same originating id) upgrades it to
+  // 'answered'. So a delivered turn evicted from the capped transcript is still
+  // confirmable via GET /turn-status.
+  if (schema.receipts && clientTurnId) {
+    if (turn.role === 'user') {
+      await client.query(
+        `INSERT INTO dashboard_studio_meta_data.chat_turn_receipts
+           (client_turn_id, user_id, session_id, status)
+         VALUES ($1, $2, $3, 'received')
+         ON CONFLICT (client_turn_id) DO NOTHING`,
+        [clientTurnId, userId, sessionId],
+      );
+    } else {
+      await client.query(
+        `INSERT INTO dashboard_studio_meta_data.chat_turn_receipts
+           (client_turn_id, user_id, session_id, status)
+         VALUES ($1, $2, $3, 'answered')
+         ON CONFLICT (client_turn_id) DO UPDATE SET status = 'answered', updated_at = NOW()`,
+        [clientTurnId, userId, sessionId],
+      );
+    }
+  }
 }
 
 /** RETENTION (MR !61 round 5, note 56601): chat_messages grew without bound —
@@ -623,6 +682,22 @@ async function pruneOldTurns(
   }
 }
 
+/** Bound the durable receipts table by RECENCY (review !62 round 7, finding 5b).
+ *  A receipt only needs to outlive a reconciliation — seconds to minutes after the
+ *  send — with wide margin; 7 days is far more than the client ever waits, and an
+ *  age DELETE per append (indexed on user_id, updated_at) keeps the tiny table
+ *  bounded without a per-session count. Runs in the append transaction. */
+async function pruneOldReceipts(
+  client: PoolClient, userId: string, schema: ChatSchema,
+): Promise<void> {
+  if (!schema.receipts) return;
+  await client.query(
+    `DELETE FROM dashboard_studio_meta_data.chat_turn_receipts
+      WHERE user_id = $1 AND updated_at < NOW() - INTERVAL '7 days'`,
+    [userId],
+  );
+}
+
 /** RECONCILIATION (MR !61 review): INSERT every buffered entry for this identity
  *  into the given Postgres session, inside the caller's OPEN transaction. Returns
  *  the replayed ids; the caller clears them from the buffer with clearReplayed
@@ -630,13 +705,13 @@ async function pruneOldTurns(
  *  target a different (memory-minted) sessionId than the resolved one; D7's single
  *  dialogue per user makes the resolved session the right destination either way. */
 async function replayBufferedEntries(
-  client: PoolClient, ident: ChatIdentity, sessionId: string, hasClientTurnId: boolean,
+  client: PoolClient, ident: ChatIdentity, sessionId: string, schema: ChatSchema,
 ): Promise<string[]> {
   const session = memorySessions.get(memKey(ident));
   if (!session || session.entries.length === 0) return [];
   const snapshot = [...session.entries];
   for (const entry of snapshot) {
-    await insertEntry(client, ident.userId, sessionId, entry, hasClientTurnId);
+    await insertEntry(client, ident.userId, sessionId, entry, schema);
   }
   logger.info('Replayed buffered chat turns into Postgres', {
     sessionId,
@@ -669,12 +744,12 @@ function clearReplayed(ident: ChatIdentity, replayedIds: string[]): void {
  *  and — defensively — a 'result' row whose payload is missing render as plain
  *  assistant prose, i.e. the 'question' arm with `type` absent. */
 function rowToTurn(row: ChatMessageRow): AgentTurn {
+  // Carry client_turn_id when the row has one (round-6/7 schema) on BOTH user and
+  // assistant turns (finding 3). exactOptional types forbid an explicit
+  // `undefined`, so spread an empty object when absent rather than set null.
+  const id = row.client_turn_id ? { client_turn_id: row.client_turn_id } : {};
   if (row.role === 'user') {
-    // Carry client_turn_id when the row has one (round-6 schema). exactOptional
-    // types forbid an explicit `undefined`, so branch rather than spread a null.
-    return row.client_turn_id
-      ? { role: 'user', content: row.content, client_turn_id: row.client_turn_id }
-      : { role: 'user', content: row.content };
+    return { role: 'user', content: row.content, ...id };
   }
   if (row.type === 'result' && row.result && typeof row.result === 'object') {
     return {
@@ -682,16 +757,17 @@ function rowToTurn(row: ChatMessageRow): AgentTurn {
       type: 'result',
       content: row.content,
       result: row.result as AgentChatResult,
+      ...id,
     };
   }
   if (row.type === 'question' || row.type === 'error') {
-    return { role: 'assistant', type: row.type, content: row.content, result: null };
+    return { role: 'assistant', type: row.type, content: row.content, result: null, ...id };
   }
-  return { role: 'assistant', content: row.content, result: null };
+  return { role: 'assistant', content: row.content, result: null, ...id };
 }
 
 async function pgLoadHistory(
-  pool: Pool, ident: ChatIdentity, sessionId: string | null, hasClientTurnId: boolean,
+  pool: Pool, ident: ChatIdentity, sessionId: string | null, schema: ChatSchema,
 ): Promise<ChatStoreResult> {
   const { userId } = ident;
   // Wrapped in the transient retry like getGlobalVariables' whole read path
@@ -716,10 +792,11 @@ async function pgLoadHistory(
           // replay racing a concurrent append cannot compute the prune boundary
           // from a stale count and overfill the table (round 6, note 56627).
           await lockSession(client, userId, resolved);
-          const replayedIds = await replayBufferedEntries(client, ident, resolved, hasClientTurnId);
+          const replayedIds = await replayBufferedEntries(client, ident, resolved, schema);
           // A drained outage buffer can push the session past MAX_TURNS just
           // like an append can — prune in the same transaction (round 5).
           await pruneOldTurns(client, userId, resolved);
+          await pruneOldReceipts(client, userId, schema);
           await client.query('COMMIT');
           clearReplayed(ident, replayedIds);
         } catch (error) {
@@ -745,7 +822,7 @@ async function pgLoadHistory(
       // with the clock, and either would let a user/assistant pair flip on read.
       // Select client_turn_id only where the column exists (probeChatSchema).
       // Both column lists are fixed literals — no user input is interpolated.
-      const columns = hasClientTurnId
+      const columns = schema.clientTurnId
         ? 'id, role, type, content, result, client_turn_id'
         : 'id, role, type, content, result';
       const rows = await client.query(
@@ -766,7 +843,7 @@ async function pgLoadHistory(
         const missing = unreplayed.filter((e) => !present.has(e.id)).map((e) => e.turn);
         history = [...history, ...missing].slice(-MAX_TURNS);
       }
-      return { sessionId: resolved, history, persisted: true };
+      return { sessionId: resolved, history, persisted: true, supportsTurnIds: schema.clientTurnId };
     } finally {
       client.release();
     }
@@ -775,7 +852,7 @@ async function pgLoadHistory(
 
 async function pgAppendTurns(
   pool: Pool, ident: ChatIdentity, sessionId: string, entries: StoredTurn[],
-  hasClientTurnId: boolean,
+  schema: ChatSchema,
 ): Promise<void> {
   const { userId } = ident;
   // A WRITE — deliberately NOT wrapped in withTransientRetry: the failure path
@@ -795,12 +872,13 @@ async function pgAppendTurns(
     // RECONCILIATION, write side: drain older buffered turns FIRST so a healed
     // transcript keeps its order — the user turn from a moment ago may sit in the
     // buffer while this assistant turn finds Postgres healthy again.
-    const replayedIds = await replayBufferedEntries(client, ident, sessionId, hasClientTurnId);
+    const replayedIds = await replayBufferedEntries(client, ident, sessionId, schema);
     for (const entry of entries) {
-      await insertEntry(client, userId, sessionId, entry, hasClientTurnId);
+      await insertEntry(client, userId, sessionId, entry, schema);
     }
     // Retention bound, atomic with the inserts above (round 5, note 56601).
     await pruneOldTurns(client, userId, sessionId);
+    await pruneOldReceipts(client, userId, schema);
     await client.query(
       `UPDATE dashboard_studio_meta_data.chat_sessions
           SET updated_at = NOW()
@@ -835,7 +913,7 @@ export async function loadHistory(
     try {
       const schema = await probeChatSchema(pool);
       if (schema.tables) {
-        return await pgLoadHistory(pool, ident, sessionId, schema.clientTurnId);
+        return await pgLoadHistory(pool, ident, sessionId, schema);
       }
     } catch (error) {
       logger.warn('chatStore.loadHistory degraded to in-memory history', {
@@ -890,7 +968,7 @@ export async function appendTurns(
     try {
       const schema = await probeChatSchema(pool);
       if (schema.tables) {
-        await pgAppendTurns(pool, ident, sessionId, entries, schema.clientTurnId);
+        await pgAppendTurns(pool, ident, sessionId, entries, schema);
         return;
       }
     } catch (error) {
@@ -900,4 +978,49 @@ export async function appendTurns(
     }
   }
   memoryAppend(ident, sessionId, entries);
+}
+
+/**
+ * DURABLE per-turn status lookup (review !62 round 7, finding 5b). Answers "what
+ * happened to the turn I sent with this client_turn_id?" from the receipts table,
+ * which is NOT pruned with the capped transcript — so a delivered turn evicted
+ * from the newest-100 window is still confirmable. Absence from the transcript
+ * alone is not proof of non-delivery; this is.
+ *
+ * NEVER rejects. Returns supported:false for demo/no-pool/older-schema tenants —
+ * there the client keeps its transcript-based reconciliation, and 'unknown' says
+ * nothing. supported:true with 'unknown' means the turn genuinely never reached
+ * the server (within the 7-day receipt window). Scoped to the auth user, so one
+ * tenant can never probe another's turn ids.
+ */
+export async function getTurnStatus(
+  pool: Pool | null, ident: ChatIdentity, clientTurnId: string,
+): Promise<TurnStatusResult> {
+  if (!pool || ident.demo) return { status: 'unknown', supported: false };
+  try {
+    const schema = await probeChatSchema(pool);
+    if (!schema.receipts) return { status: 'unknown', supported: false };
+    return await withTransientRetry('chatStore.turnStatus', async () => {
+      const client = await pool.connect();
+      try {
+        const res = await client.query(
+          `SELECT status FROM dashboard_studio_meta_data.chat_turn_receipts
+            WHERE client_turn_id = $1 AND user_id = $2`,
+          [clientTurnId, ident.userId],
+        );
+        const status = res.rows[0]?.status;
+        if (status === 'received' || status === 'answered') {
+          return { status, supported: true };
+        }
+        return { status: 'unknown', supported: true };
+      } finally {
+        client.release();
+      }
+    });
+  } catch (error) {
+    logger.warn('chatStore.getTurnStatus failed; treating as unsupported', {
+      error: toErrorMeta(error).message,
+    });
+    return { status: 'unknown', supported: false };
+  }
 }

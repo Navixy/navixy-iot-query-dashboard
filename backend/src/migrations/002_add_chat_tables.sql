@@ -65,8 +65,9 @@ CREATE TABLE IF NOT EXISTS dashboard_studio_meta_data.chat_messages (
   -- BACKWARD COMPATIBLE: the backend probes information_schema.columns for this
   -- column and, when a tenant applied an EARLIER 002 without it, keeps persisting
   -- (writing NULL, reading it as absent) rather than downgrading to in-memory. A
-  -- tenant on that older schema can add it live with:
-  --   ALTER TABLE dashboard_studio_meta_data.chat_messages ADD COLUMN client_turn_id TEXT;
+  -- tenant on that older schema gets the column from the EXECUTABLE upgrade in
+  -- 003_add_turn_receipts.sql (ALTER TABLE ... ADD COLUMN IF NOT EXISTS) — this
+  -- CREATE-only definition never reaches them (review !62 round 7, finding 6).
   client_turn_id TEXT
 );
 -- RETENTION (DO-313 review round 5): the store keeps the newest 100 rows

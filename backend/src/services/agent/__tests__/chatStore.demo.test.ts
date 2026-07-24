@@ -46,6 +46,7 @@ function makeHealthyPool() {
   const db = {
     sessions: [] as Array<{ id: string; user_id: string; created_at: number }>,
     messages: [] as MsgRow[],
+    receipts: [] as Array<{ client_turn_id: string; user_id: string; status: string }>,
   };
   let mintedSession = 0;
   let txn: MsgRow[] | null = null;
@@ -105,6 +106,26 @@ function makeHealthyPool() {
       }
 
       if (q.includes('UPDATE dashboard_studio_meta_data.chat_sessions')) return { rows: [] };
+
+      // Durable receipts (round 7). These tests never expect Postgres writes for
+      // demo idents, so this only matters for the real-mode identity's turns.
+      if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_turn_receipts')) {
+        const id = String(params[0]);
+        const answered = q.includes("'answered'");
+        const existing = db.receipts.find((r) => r.client_turn_id === id);
+        if (existing) {
+          if (q.includes('DO UPDATE')) existing.status = 'answered';
+        } else {
+          db.receipts.push({
+            client_turn_id: id, user_id: String(params[1]),
+            status: answered ? 'answered' : 'received',
+          });
+        }
+        return { rows: [] };
+      }
+      if (q.startsWith('DELETE FROM dashboard_studio_meta_data.chat_turn_receipts')) {
+        return { rows: [] };
+      }
 
       if (q.includes('FROM dashboard_studio_meta_data.chat_messages')) {
         const rows = db.messages

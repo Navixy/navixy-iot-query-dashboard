@@ -20,7 +20,7 @@ import { asyncHandler, CustomError } from '../middleware/errorHandler.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { logger } from '../utils/logger.js';
 import { agentService } from '../services/agent/index.js';
-import { loadHistory, appendTurns, tenantKeyFor } from '../services/agent/chatStore.js';
+import { loadHistory, appendTurns, getTurnStatus, tenantKeyFor } from '../services/agent/chatStore.js';
 import type { ChatIdentity } from '../services/agent/chatStore.js';
 import { validateDashboard } from '../services/agent/validateDashboard.js';
 import { envInt } from '../services/agent/artifactStore.js';
@@ -216,9 +216,15 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   // S3 object can therefore never 404 a conversation the user is re-reading.
   // AgentTurn is a discriminated union (§3.1), so the assistant turn is built per arm —
   // spreading turn.type/turn.result into one literal does not type-check.
+  //
+  // Stamp the reply with the ORIGINATING client_turn_id (review !62 round 7, finding
+  // 3): the client then matches the exact user↔reply pair instead of "any later
+  // assistant", so a concurrent turn's reply landing first cannot be mistaken for
+  // ours. Conditional spread keeps exactOptional types happy.
+  const idField = client_turn_id ? { client_turn_id } : {};
   const assistantTurn: AgentTurn = turn.type === 'result'
-    ? { role: 'assistant', type: 'result', content: turn.message, result: turn.result }
-    : { role: 'assistant', type: turn.type, content: turn.message, result: null };
+    ? { role: 'assistant', type: 'result', content: turn.message, result: turn.result, ...idField }
+    : { role: 'assistant', type: turn.type, content: turn.message, result: null, ...idField };
   await appendTurns(pool, ident, sessionId, [assistantTurn]);
 
   // The route stamps session_id. The service never sees it. The response is a bare
@@ -245,8 +251,38 @@ router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Respo
   // memory namespace, so demo reads must not surface the real user's persisted
   // transcript (or their degraded-mode buffer — review !62 round 2, Critical 1).
   const pool = req.user.demo ? null : (req.settingsPool ?? null);
-  const { sessionId, history, persisted } = await loadHistory(pool, ident, null);
-  return res.json({ session_id: sessionId, persisted, messages: history });
+  const { sessionId, history, persisted, supportsTurnIds } = await loadHistory(pool, ident, null);
+  // supports_turn_ids (review !62 round 7, finding 5a): an EXPLICIT capability so
+  // the client trusts id reconciliation from the server's own answer, not from
+  // inferring "some visible row has an id" (which breaks when only legacy rows show).
+  return res.json({
+    session_id: sessionId,
+    persisted,
+    supports_turn_ids: supportsTurnIds,
+    messages: history,
+  });
+}));
+
+// DURABLE per-turn status (review !62 round 7, finding 5b). The client calls this
+// during lost-response reconciliation when the turn's id is no longer in the capped
+// transcript — absence from the newest-100 window is not proof of non-delivery. Reads
+// the receipts table (kept outside that window), scoped to the auth user.
+router.get('/turn-status', asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  if (!req.user?.userId) throw new CustomError('User not authenticated', 401);
+  const raw = req.query.client_turn_id;
+  const clientTurnId = typeof raw === 'string' ? raw : '';
+  if (!clientTurnId) throw new CustomError('client_turn_id is required', 400);
+  if (clientTurnId.length > MAX_CLIENT_TURN_ID_LENGTH) {
+    throw new CustomError(`client_turn_id must be at most ${MAX_CLIENT_TURN_ID_LENGTH} characters`, 400);
+  }
+  const ident: ChatIdentity = {
+    tenantKey: tenantKeyFor(req.user.userDbUrl),
+    userId: req.user.userId,
+    demo: req.user.demo === true,
+  };
+  const pool = req.user.demo ? null : (req.settingsPool ?? null);
+  const { status, supported } = await getTurnStatus(pool, ident, clientTurnId);
+  return res.json({ status, supported });
 }));
 
 export default router;
