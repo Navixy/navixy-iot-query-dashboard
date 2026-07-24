@@ -482,6 +482,41 @@ interface ChatMessageRow {
   result: unknown;
 }
 
+/** SERIALIZE every writer on ONE session before it INSERTs and prunes (MR !61
+ *  round 6, note 56627). The round-5 prune is a read-modify-write — it computes a
+ *  DELETE boundary from a COUNT and then deletes — so under READ COMMITTED two
+ *  concurrent append/replay transactions each take their pre-INSERT snapshot
+ *  before the other's turn is visible, both compute the SAME boundary (the
+ *  MAX_TURNS-th newest seq) and delete the SAME single row while inserting two.
+ *  The second's DELETE blocks on the first's row lock, then re-checks its qual
+ *  against the now-deleted tuple WITHOUT re-running the boundary subquery — so it
+ *  removes nothing (rowCount 0) and the table settles at MAX_TURNS+1. The
+ *  reviewer reproduced exactly this on PostgreSQL 16 (start 100, two parallel
+ *  BEGIN/INSERT/prune, deleteA=1 deleteB=0 count=101); so did I, and this lock
+ *  closes it (count=100). Multiple browser tabs, or GET /session's replay racing
+ *  POST /chat's append, make it reachable.
+ *
+ *  A row lock on the ONE chat_sessions row (NOT the trailing session-touch
+ *  UPDATE, which lands after the prune) makes the second writer block at the TOP
+ *  of its transaction; its later per-statement snapshots then see the first's
+ *  committed INSERT, so its boundary is recomputed against the true count and the
+ *  bound stays strict. Applied on BOTH write paths. The row is guaranteed to
+ *  exist and be committed here: resolveSession created it before any append, and
+ *  the chat_messages -> chat_sessions foreign key could not otherwise be
+ *  satisfied. Deadlock-free: a user's writers all contend for their single
+ *  session row and each transaction locks only that one row — no lock-ordering
+ *  cycle. */
+async function lockSession(
+  client: PoolClient, userId: string, sessionId: string,
+): Promise<void> {
+  await client.query(
+    `SELECT 1 FROM dashboard_studio_meta_data.chat_sessions
+      WHERE id = $1 AND user_id = $2
+      FOR UPDATE`,
+    [sessionId, userId],
+  );
+}
+
 /** The ONE way a turn reaches chat_messages — direct append and buffered replay
  *  share it, so both carry the store-minted id (idempotence) and the entry-time
  *  created_at (order). Runs inside the caller's open transaction. */
@@ -525,6 +560,9 @@ async function insertEntry(
 async function pruneOldTurns(
   client: PoolClient, userId: string, sessionId: string,
 ): Promise<void> {
+  // Correct only because lockSession (called first in both write transactions)
+  // has serialized this session's writers — otherwise concurrent transactions
+  // compute this boundary from stale snapshots and the bound leaks (round 6).
   const pruned = await client.query(
     `DELETE FROM dashboard_studio_meta_data.chat_messages
       WHERE session_id = $1 AND user_id = $2
@@ -628,6 +666,10 @@ async function pgLoadHistory(
       if (buffered && buffered.entries.length > 0) {
         try {
           await client.query('BEGIN');
+          // Serialize this session's writers before draining + pruning, so a
+          // replay racing a concurrent append cannot compute the prune boundary
+          // from a stale count and overfill the table (round 6, note 56627).
+          await lockSession(client, userId, resolved);
           const replayedIds = await replayBufferedEntries(client, ident, resolved);
           // A drained outage buffer can push the session past MAX_TURNS just
           // like an append can — prune in the same transaction (round 5).
@@ -694,6 +736,10 @@ async function pgAppendTurns(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Serialize this session's writers before any INSERT + prune (round 6, note
+    // 56627): two concurrent appends must not each prune against a snapshot taken
+    // before the other's turn is visible, or the retention bound leaks by one.
+    await lockSession(client, userId, sessionId);
     // RECONCILIATION, write side: drain older buffered turns FIRST so a healed
     // transcript keeps its order — the user turn from a moment ago may sit in the
     // buffer while this assistant turn finds Postgres healthy again.

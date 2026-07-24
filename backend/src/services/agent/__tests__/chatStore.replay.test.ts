@@ -53,6 +53,9 @@ function makeScriptedPool() {
     failMessageInsert: false,
     failCommitOnceAfterApply: false,
   };
+  // Every normalized statement, in issue order — lets a test assert the LOCK →
+  // INSERT → prune ordering the concurrency fix depends on (MR !61 round 6).
+  const calls: string[] = [];
   let mintedSession = 0;
   let txn: MsgRow[] | null = null;
 
@@ -62,6 +65,16 @@ function makeScriptedPool() {
   const client = {
     async query(sql: string, params: unknown[] = []): Promise<{ rows: unknown[]; rowCount?: number }> {
       const q = sql.replace(/\s+/g, ' ').trim();
+      calls.push(q);
+
+      // Session row lock (round 6): a no-op read in the stub — the store ignores
+      // the result and uses it only to serialize concurrent writers on a real
+      // server. Matched before the plain chat_sessions lookups below so the
+      // trace records it distinctly.
+      if (q.includes('chat_sessions') && q.includes('FOR UPDATE')) {
+        const found = db.sessions.find((s) => s.id === params[0] && s.user_id === params[1]);
+        return { rows: found ? [{ '?column?': 1 }] : [] };
+      }
 
       if (q === 'BEGIN') { txn = []; return { rows: [] }; }
       if (q === 'COMMIT') {
@@ -159,7 +172,7 @@ function makeScriptedPool() {
   };
 
   const pool = { connect: async () => client } as unknown as Pool;
-  return { pool, db, script };
+  return { pool, db, script, calls };
 }
 
 afterEach(() => {
@@ -300,5 +313,66 @@ describe('chatStore — Postgres retention (MR !61 round 5)', () => {
     expect(db.messages).toHaveLength(100);
     expect(db.messages[0].content).toBe('pg-20');
     expect(history).toHaveLength(100);
+  });
+});
+
+// MR !61 round 6 (note 56627): round 5's prune is a read-modify-write — it derives
+// a DELETE boundary from a COUNT, then deletes. Under READ COMMITTED two concurrent
+// append/replay transactions each take their pre-INSERT snapshot before the other's
+// turn is visible, pick the SAME boundary and delete one row while inserting two, so
+// the table settles at MAX_TURNS+1. Reproduced on real PostgreSQL 16 (start 100, two
+// parallel BEGIN/INSERT/prune: deleteA=1, deleteB=0, count=101) and closed by a row
+// lock — SELECT … FOR UPDATE on the session — taken at the TOP of BOTH write
+// transactions, before any INSERT or prune, so the second writer blocks until the
+// first commits and re-counts against the true total.
+//
+// A genuine two-connection race needs a live server; this suite is a single-
+// connection protocol emulation BY DESIGN (see the file header and chatStore.ts's —
+// its jest suites run against stub pools, not a database). So the real concurrency is
+// covered by the MR's PG16 reproduction, and here we pin the MECHANISM the fix relies
+// on: the lock is issued, and issued BEFORE the first message INSERT and the prune,
+// on both write paths. Remove or reorder lockSession and both tests go red.
+describe('chatStore — per-session write serialization (MR !61 round 6)', () => {
+  const idxLock = (calls: string[]) =>
+    calls.findIndex((q) => q.includes('chat_sessions') && q.includes('FOR UPDATE'));
+  const idxBegin = (calls: string[]) => calls.indexOf('BEGIN');
+  const idxFirstInsert = (calls: string[]) =>
+    calls.findIndex((q) => q.startsWith('INSERT INTO dashboard_studio_meta_data.chat_messages'));
+  const idxPrune = (calls: string[]) =>
+    calls.findIndex((q) => q.startsWith('DELETE FROM dashboard_studio_meta_data.chat_messages'));
+
+  it('append path: locks the session (FOR UPDATE) before the message INSERT and the prune', async () => {
+    const { pool, calls } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    calls.length = 0; // isolate the append transaction from the initial load
+
+    await appendTurns(pool, ident('u1'), sessionId, [user('hello')]);
+
+    const begin = idxBegin(calls);
+    const lock = idxLock(calls);
+    expect(begin).toBeGreaterThanOrEqual(0); // the append opened a transaction
+    expect(lock).toBeGreaterThan(begin); // the lock is INSIDE it
+    expect(idxFirstInsert(calls)).toBeGreaterThan(lock); // ...before the INSERT
+    expect(idxPrune(calls)).toBeGreaterThan(lock); // ...and before the prune
+  });
+
+  it('replay path: the reconciliation transaction locks the session before draining and pruning', async () => {
+    const { pool, calls, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    // Buffer a turn through an outage so the next healthy load runs the replay txn.
+    script.failMessageInsert = true;
+    await appendTurns(pool, ident('u1'), sessionId, [user('buffered')]);
+    script.failMessageInsert = false;
+
+    calls.length = 0; // isolate the load-with-replay
+    await loadHistory(pool, ident('u1'), sessionId);
+
+    const begin = idxBegin(calls);
+    const lock = idxLock(calls);
+    expect(begin).toBeGreaterThanOrEqual(0); // replay opened a transaction
+    expect(lock).toBeGreaterThan(begin);
+    expect(idxFirstInsert(calls)).toBeGreaterThan(lock); // the replayed turn's INSERT
+    expect(idxPrune(calls)).toBeGreaterThan(lock);
   });
 });
