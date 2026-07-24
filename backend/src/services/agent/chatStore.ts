@@ -193,7 +193,16 @@ function memKey(ident: ChatIdentity): string {
  *  identity gives the same per-tenant granularity with NO URL — and therefore no
  *  password — anywhere in this module (B4-R5), and a recreated pool (password
  *  rotation) starts with a fresh probe, which is correct. */
-let probeCache = new WeakMap<Pool, { exists: boolean; checkedAt: number }>();
+/** What of the chat schema this tenant actually has. `tables` gates persistence
+ *  at all; `clientTurnId` gates the round-6 idempotency column, which a tenant on
+ *  an earlier 002 lacks — the store then persists WITHOUT it rather than
+ *  downgrading to in-memory (review !62 round 6). */
+interface ChatSchema {
+  tables: boolean;
+  clientTurnId: boolean;
+}
+
+let probeCache = new WeakMap<Pool, { schema: ChatSchema; checkedAt: number }>();
 
 /** Test-only: clears the in-memory sessions and the probe cache so suites are
  *  order-independent. Production never calls it. */
@@ -228,18 +237,18 @@ async function withTransientRetry<T>(label: string, op: () => Promise<T>): Promi
   throw lastError;
 }
 
-/** Probe BOTH tables — a half-applied migration must degrade, not half-work. Never
- *  throws: an unreachable settings DB is not "tables missing", so that failure
- *  degrades THIS request without being cached, and persistence resumes the moment
- *  the DB does (house precedent: getGlobalVariables degrades per request and caches
- *  success only). */
-async function chatTablesExist(pool: Pool): Promise<boolean> {
+/** Probe BOTH tables — a half-applied migration must degrade, not half-work — AND
+ *  the optional round-6 client_turn_id column. Never throws: an unreachable
+ *  settings DB is not "tables missing", so that failure degrades THIS request
+ *  without being cached, and persistence resumes the moment the DB does (house
+ *  precedent: getGlobalVariables degrades per request and caches success only). */
+async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
   const now = Date.now();
   const cached = probeCache.get(pool);
-  if (cached && now - cached.checkedAt < PROBE_TTL_MS) return cached.exists;
+  if (cached && now - cached.checkedAt < PROBE_TTL_MS) return cached.schema;
 
   try {
-    const exists = await withTransientRetry('chatStore.probe', async () => {
+    const schema = await withTransientRetry('chatStore.probe', async () => {
       const client = await pool.connect();
       try {
         const sessionsExist = await client.query(`
@@ -251,7 +260,7 @@ async function chatTablesExist(pool: Pool): Promise<boolean> {
         `);
         if (!sessionsExist.rows[0].exists) {
           logger.warn('chat_sessions table does not exist in dashboard_studio_meta_data schema');
-          return false;
+          return { tables: false, clientTurnId: false };
         }
 
         const messagesExist = await client.query(`
@@ -263,21 +272,34 @@ async function chatTablesExist(pool: Pool): Promise<boolean> {
         `);
         if (!messagesExist.rows[0].exists) {
           logger.warn('chat_messages table does not exist in dashboard_studio_meta_data schema');
-          return false;
+          return { tables: false, clientTurnId: false };
         }
 
-        return true;
+        // The idempotency column is OPTIONAL (review !62 round 6): a tenant on an
+        // earlier 002 has the tables but not this column. Persist WITHOUT it
+        // rather than let every write throw "column does not exist" — which the
+        // caller's try/catch would silently downgrade to in-memory, losing this
+        // tenant's persisted history.
+        const columnExists = await client.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.columns
+            WHERE table_schema = 'dashboard_studio_meta_data'
+            AND table_name = 'chat_messages'
+            AND column_name = 'client_turn_id'
+          )
+        `);
+        return { tables: true, clientTurnId: Boolean(columnExists.rows[0].exists) };
       } finally {
         client.release();
       }
     });
-    probeCache.set(pool, { exists, checkedAt: now });
-    return exists;
+    probeCache.set(pool, { schema, checkedAt: now });
+    return schema;
   } catch (error) {
-    logger.warn('chat tables probe failed; degrading to in-memory history', {
+    logger.warn('chat schema probe failed; degrading to in-memory history', {
       error: toErrorMeta(error).message,
     });
-    return false;
+    return { tables: false, clientTurnId: false };
   }
 }
 
@@ -480,6 +502,10 @@ interface ChatMessageRow {
   type: string | null;
   content: string;
   result: unknown;
+  /** Present only when the tenant's schema has the round-6 column AND the read
+   *  path selected it; absent/null on assistant turns, legacy rows and older
+   *  schemas. */
+  client_turn_id?: string | null;
 }
 
 /** SERIALIZE every writer on ONE session before it INSERTs and prunes (MR !61
@@ -522,6 +548,7 @@ async function lockSession(
  *  created_at (order). Runs inside the caller's open transaction. */
 async function insertEntry(
   client: PoolClient, userId: string, sessionId: string, entry: StoredTurn,
+  hasClientTurnId: boolean,
 ): Promise<void> {
   const { turn } = entry;
   const type = turn.role === 'assistant' ? turn.type ?? null : null;
@@ -535,6 +562,21 @@ async function insertEntry(
       sessionId,
       resultBytes: Buffer.byteLength(result),
     });
+  }
+  // client_turn_id rides on user turns only (review !62 round 6). The column
+  // exists only where the tenant applied the round-6 002 — probeChatSchema tells
+  // us — so branch the INSERT: on an older schema, write the legacy shape and let
+  // the turn carry no id in Postgres rather than fail the write.
+  const clientTurnId = turn.role === 'user' ? turn.client_turn_id ?? null : null;
+  if (hasClientTurnId) {
+    await client.query(
+      `INSERT INTO dashboard_studio_meta_data.chat_messages
+         (id, session_id, user_id, role, content, type, result, client_turn_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9 / 1000.0))
+       ON CONFLICT (id) DO NOTHING`,
+      [entry.id, sessionId, userId, turn.role, turn.content, type, result, clientTurnId, entry.at],
+    );
+    return;
   }
   await client.query(
     `INSERT INTO dashboard_studio_meta_data.chat_messages
@@ -588,13 +630,13 @@ async function pruneOldTurns(
  *  target a different (memory-minted) sessionId than the resolved one; D7's single
  *  dialogue per user makes the resolved session the right destination either way. */
 async function replayBufferedEntries(
-  client: PoolClient, ident: ChatIdentity, sessionId: string,
+  client: PoolClient, ident: ChatIdentity, sessionId: string, hasClientTurnId: boolean,
 ): Promise<string[]> {
   const session = memorySessions.get(memKey(ident));
   if (!session || session.entries.length === 0) return [];
   const snapshot = [...session.entries];
   for (const entry of snapshot) {
-    await insertEntry(client, ident.userId, sessionId, entry);
+    await insertEntry(client, ident.userId, sessionId, entry, hasClientTurnId);
   }
   logger.info('Replayed buffered chat turns into Postgres', {
     sessionId,
@@ -628,7 +670,11 @@ function clearReplayed(ident: ChatIdentity, replayedIds: string[]): void {
  *  assistant prose, i.e. the 'question' arm with `type` absent. */
 function rowToTurn(row: ChatMessageRow): AgentTurn {
   if (row.role === 'user') {
-    return { role: 'user', content: row.content };
+    // Carry client_turn_id when the row has one (round-6 schema). exactOptional
+    // types forbid an explicit `undefined`, so branch rather than spread a null.
+    return row.client_turn_id
+      ? { role: 'user', content: row.content, client_turn_id: row.client_turn_id }
+      : { role: 'user', content: row.content };
   }
   if (row.type === 'result' && row.result && typeof row.result === 'object') {
     return {
@@ -645,7 +691,7 @@ function rowToTurn(row: ChatMessageRow): AgentTurn {
 }
 
 async function pgLoadHistory(
-  pool: Pool, ident: ChatIdentity, sessionId: string | null,
+  pool: Pool, ident: ChatIdentity, sessionId: string | null, hasClientTurnId: boolean,
 ): Promise<ChatStoreResult> {
   const { userId } = ident;
   // Wrapped in the transient retry like getGlobalVariables' whole read path
@@ -670,7 +716,7 @@ async function pgLoadHistory(
           // replay racing a concurrent append cannot compute the prune boundary
           // from a stale count and overfill the table (round 6, note 56627).
           await lockSession(client, userId, resolved);
-          const replayedIds = await replayBufferedEntries(client, ident, resolved);
+          const replayedIds = await replayBufferedEntries(client, ident, resolved, hasClientTurnId);
           // A drained outage buffer can push the session past MAX_TURNS just
           // like an append can — prune in the same transaction (round 5).
           await pruneOldTurns(client, userId, resolved);
@@ -697,8 +743,13 @@ async function pgLoadHistory(
       // append, so insertion order IS conversation order — while timestamps can tie
       // within a millisecond (a replayed turn plus a fresh one) or step backwards
       // with the clock, and either would let a user/assistant pair flip on read.
+      // Select client_turn_id only where the column exists (probeChatSchema).
+      // Both column lists are fixed literals — no user input is interpolated.
+      const columns = hasClientTurnId
+        ? 'id, role, type, content, result, client_turn_id'
+        : 'id, role, type, content, result';
       const rows = await client.query(
-        `SELECT id, role, type, content, result
+        `SELECT ${columns}
            FROM dashboard_studio_meta_data.chat_messages
           WHERE session_id = $1 AND user_id = $2
           ORDER BY seq DESC
@@ -724,6 +775,7 @@ async function pgLoadHistory(
 
 async function pgAppendTurns(
   pool: Pool, ident: ChatIdentity, sessionId: string, entries: StoredTurn[],
+  hasClientTurnId: boolean,
 ): Promise<void> {
   const { userId } = ident;
   // A WRITE — deliberately NOT wrapped in withTransientRetry: the failure path
@@ -743,9 +795,9 @@ async function pgAppendTurns(
     // RECONCILIATION, write side: drain older buffered turns FIRST so a healed
     // transcript keeps its order — the user turn from a moment ago may sit in the
     // buffer while this assistant turn finds Postgres healthy again.
-    const replayedIds = await replayBufferedEntries(client, ident, sessionId);
+    const replayedIds = await replayBufferedEntries(client, ident, sessionId, hasClientTurnId);
     for (const entry of entries) {
-      await insertEntry(client, userId, sessionId, entry);
+      await insertEntry(client, userId, sessionId, entry, hasClientTurnId);
     }
     // Retention bound, atomic with the inserts above (round 5, note 56601).
     await pruneOldTurns(client, userId, sessionId);
@@ -781,8 +833,9 @@ export async function loadHistory(
   // session — or replay a demo buffer out of memory into their database.
   if (pool && !ident.demo) {
     try {
-      if (await chatTablesExist(pool)) {
-        return await pgLoadHistory(pool, ident, sessionId);
+      const schema = await probeChatSchema(pool);
+      if (schema.tables) {
+        return await pgLoadHistory(pool, ident, sessionId, schema.clientTurnId);
       }
     } catch (error) {
       logger.warn('chatStore.loadHistory degraded to in-memory history', {
@@ -835,8 +888,9 @@ export async function appendTurns(
   // turn must be structurally unable to reach chat_messages.
   if (pool && !ident.demo) {
     try {
-      if (await chatTablesExist(pool)) {
-        await pgAppendTurns(pool, ident, sessionId, entries);
+      const schema = await probeChatSchema(pool);
+      if (schema.tables) {
+        await pgAppendTurns(pool, ident, sessionId, entries, schema.clientTurnId);
         return;
       }
     } catch (error) {

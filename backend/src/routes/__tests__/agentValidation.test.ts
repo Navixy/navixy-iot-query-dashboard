@@ -54,6 +54,7 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
     expect(validateChatBody({ message: 'a'.repeat(MAX_MESSAGE_LENGTH) })).toEqual({
       session_id: null,
       message: 'a'.repeat(MAX_MESSAGE_LENGTH),
+      client_turn_id: null,
     });
   });
 
@@ -72,10 +73,15 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
   });
 
   it('normalizes an absent or null session_id to null', () => {
-    expect(validateChatBody({ message: 'hi' })).toEqual({ session_id: null, message: 'hi' });
+    expect(validateChatBody({ message: 'hi' })).toEqual({
+      session_id: null,
+      message: 'hi',
+      client_turn_id: null,
+    });
     expect(validateChatBody({ session_id: null, message: 'hi' })).toEqual({
       session_id: null,
       message: 'hi',
+      client_turn_id: null,
     });
   });
 
@@ -83,6 +89,7 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
     expect(validateChatBody({ session_id: 'abc-123', message: '  build me a dashboard  ' })).toEqual({
       session_id: 'abc-123',
       message: 'build me a dashboard',
+      client_turn_id: null,
     });
   });
 
@@ -94,5 +101,42 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
 
   it('pins MAX_MESSAGE_LENGTH at 4000 — MR 5\'s composer mirrors this constant', () => {
     expect(MAX_MESSAGE_LENGTH).toBe(4_000);
+  });
+
+  // client_turn_id (review !62 round 6): the idempotency id the client mints per send.
+  describe('client_turn_id', () => {
+    it('round-trips a valid client_turn_id untouched', () => {
+      expect(
+        validateChatBody({ message: 'hi', client_turn_id: '5f1e-abc' }).client_turn_id,
+      ).toBe('5f1e-abc');
+    });
+
+    it('normalizes an absent, null or empty client_turn_id to null', () => {
+      expect(validateChatBody({ message: 'hi' }).client_turn_id).toBeNull();
+      expect(validateChatBody({ message: 'hi', client_turn_id: null }).client_turn_id).toBeNull();
+      expect(validateChatBody({ message: 'hi', client_turn_id: '' }).client_turn_id).toBeNull();
+    });
+
+    it.each([
+      ['a number', 123],
+      ['an object', { id: 'x' }],
+      ['an array', ['x']],
+      ['a boolean', true],
+    ])('rejects a client_turn_id that is %s', (_label, client_turn_id) => {
+      expect400({ message: 'hi', client_turn_id }, 'client_turn_id must be a string');
+    });
+
+    it('rejects a client_turn_id over 100 chars and accepts one at the limit', () => {
+      expect400({ message: 'hi', client_turn_id: 'a'.repeat(101) }, 'at most');
+      expect(
+        validateChatBody({ message: 'hi', client_turn_id: 'a'.repeat(100) }).client_turn_id,
+      ).toHaveLength(100);
+    });
+
+    it('does NOT require a UUID shape — the server only stores and echoes it', () => {
+      expect(validateChatBody({ message: 'hi', client_turn_id: 'not-a-uuid' }).client_turn_id).toBe(
+        'not-a-uuid',
+      );
+    });
   });
 });

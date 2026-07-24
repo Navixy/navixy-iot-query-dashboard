@@ -29,6 +29,14 @@ export interface AgentChatRequest {
    *  unknown id silently yields a fresh session. It never 400s or 404s. */
   session_id?: string | null;
   message: string;
+  /** Client-minted idempotency id for THIS user turn (DO-313 review !62 round 6).
+   *  The browser mints a UUID per send; the server persists it on the user turn
+   *  and returns it in GET /session, so the client reconciles a lost HTTP
+   *  response by id — deterministic — instead of by fragile content/occurrence
+   *  counting, which cannot tell concurrent identical turns apart or survive the
+   *  100-turn cap sliding. Optional and free-form (the route caps length only);
+   *  an absent id degrades to the prior content-based reconciliation. */
+  client_turn_id?: string | null;
 }
 
 /** POST /api/agent/chat 200 body. Note: type:'error' arrives with HTTP 200.
@@ -54,9 +62,9 @@ export type AgentChatResponse =
  *  is produced, and persisted here. Preview, Apply, history load and page
  *  reload all read from here and NEVER re-fetch S3. See §3.4.6 and R28. */
 export type AgentTurn =
-  | { role: 'user'; type?: never; content: string; result?: never }
-  | { role: 'assistant'; type?: 'question' | 'error'; content: string; result?: null }
-  | { role: 'assistant'; type: 'result'; content: string; result: AgentChatResult };
+  | { role: 'user'; type?: never; content: string; result?: never; client_turn_id?: string }
+  | { role: 'assistant'; type?: 'question' | 'error'; content: string; result?: null; client_turn_id?: never }
+  | { role: 'assistant'; type: 'result'; content: string; result: AgentChatResult; client_turn_id?: never };
 
 /** GET /api/agent/session 200 body. */
 export interface AgentSessionResponse {

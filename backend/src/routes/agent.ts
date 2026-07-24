@@ -37,6 +37,9 @@ const router = Router();
 // deploy image — MR !61 review) — the same way bedrockAgent reads its own tuning knobs.
 const AGENT_TIMEOUT_MS = envInt(process.env.AGENT_TIMEOUT_MS, 180_000);
 export const MAX_MESSAGE_LENGTH = 4_000; // exported: the composer mirrors it (MR 5)
+// A client-minted UUID is 36 chars; cap generously but bound the free-form,
+// client-supplied value that lands in a TEXT column (review !62 round 6).
+const MAX_CLIENT_TURN_ID_LENGTH = 100;
 
 const chatLimiter = rateLimit({
   windowMs: 60_000,
@@ -67,7 +70,7 @@ const chatLimiter = rateLimit({
   message: { error: { code: 'RATE_LIMITED', message: 'Too many chat messages. Please wait a moment.' } },
 });
 
-export interface ChatBody { session_id: string | null; message: string }
+export interface ChatBody { session_id: string | null; message: string; client_turn_id: string | null }
 
 /** Throws CustomError(…, 400) — the ONLY things that 400 (§3.2). 400 < 500, so the
  *  message survives errorHandler (C7). Pure; no req, no res, no I/O. */
@@ -95,13 +98,34 @@ export function validateChatBody(body: unknown): ChatBody {
     throw new CustomError('session_id must be a string', 400);
   }
 
-  return { session_id: (b.session_id as string | null | undefined) ?? null, message };
+  // client_turn_id (review !62 round 6): optional, client-minted. Bound its length
+  // — it is free-form and lands in a TEXT column — but do NOT require a UUID shape;
+  // the server only stores and echoes it. An empty string means "none".
+  let clientTurnId: string | null = null;
+  if (b.client_turn_id !== undefined && b.client_turn_id !== null) {
+    if (typeof b.client_turn_id !== 'string') {
+      throw new CustomError('client_turn_id must be a string', 400);
+    }
+    if (b.client_turn_id.length > MAX_CLIENT_TURN_ID_LENGTH) {
+      throw new CustomError(
+        `client_turn_id must be at most ${MAX_CLIENT_TURN_ID_LENGTH} characters`,
+        400,
+      );
+    }
+    clientTurnId = b.client_turn_id || null;
+  }
+
+  return {
+    session_id: (b.session_id as string | null | undefined) ?? null,
+    message,
+    client_turn_id: clientTurnId,
+  };
 }
 
 router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user?.userId) throw new CustomError('User not authenticated', 401);
 
-  const { session_id, message } = validateChatBody(req.body);
+  const { session_id, message, client_turn_id } = validateChatBody(req.body);
 
   // Tenant-scoped identity for every piece of cross-tenant shared state (MR !61
   // review, Critical) — see ChatIdentity in chatStore.ts. userDbUrl is guaranteed
@@ -142,9 +166,13 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   const { sessionId, history } = await loadHistory(pool, ident, session_id);
 
   // Persist the user turn BEFORE calling the agent, so the transcript is coherent even
-  // when the turn ends in type:'error'.
+  // when the turn ends in type:'error'. Carry the client's idempotency id (review !62
+  // round 6) so GET /session can hand it back and the browser reconciles a lost
+  // response by id. Conditional spread keeps exactOptional types happy.
   await appendTurns(pool, ident, sessionId, [
-    { role: 'user', content: message },
+    client_turn_id
+      ? { role: 'user', content: message, client_turn_id }
+      : { role: 'user', content: message },
   ]);
 
   // --- THE ROUTE OWNS THE DEADLINE (D21). One place; the mock inherits it for free; the

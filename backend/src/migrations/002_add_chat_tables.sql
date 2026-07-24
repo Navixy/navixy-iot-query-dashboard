@@ -55,7 +55,19 @@ CREATE TABLE IF NOT EXISTS dashboard_studio_meta_data.chat_messages (
   -- WHEN the turn entered the store (the application supplies it), not when this row
   -- was written: a turn buffered through a Postgres outage keeps its truthful time on
   -- replay. Display metadata only — ordering uses seq.
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Client-minted idempotency id for USER turns (DO-313 review !62 round 6). The
+  -- browser sends a UUID per turn; GET /api/agent/session returns it so the client
+  -- reconciles a lost POST response by id, not by fragile content/occurrence
+  -- matching. NULL for assistant turns and for legacy rows. NOT unique — the row
+  -- `id` above already dedups a replayed INSERT; this is read-side match data only.
+  --
+  -- BACKWARD COMPATIBLE: the backend probes information_schema.columns for this
+  -- column and, when a tenant applied an EARLIER 002 without it, keeps persisting
+  -- (writing NULL, reading it as absent) rather than downgrading to in-memory. A
+  -- tenant on that older schema can add it live with:
+  --   ALTER TABLE dashboard_studio_meta_data.chat_messages ADD COLUMN client_turn_id TEXT;
+  client_turn_id TEXT
 );
 -- RETENTION (DO-313 review round 5): the store keeps the newest 100 rows
 -- (MAX_TURNS, chatStore.ts) per session — exactly what GET /api/agent/session can

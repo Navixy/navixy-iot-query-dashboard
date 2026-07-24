@@ -36,6 +36,7 @@ interface MsgRow {
   content: string;
   type: string | null;
   result: string | null;
+  client_turn_id: string | null;
   at: number;
 }
 
@@ -58,6 +59,8 @@ function makeHealthyPool() {
       if (q === 'COMMIT') { db.messages.push(...(txn ?? [])); txn = null; return { rows: [] }; }
       if (q === 'ROLLBACK') { txn = null; return { rows: [] }; }
 
+      // Column probe (review !62 round 6) — matched before the tables probe.
+      if (q.includes('information_schema.columns')) return { rows: [{ exists: true }] };
       if (q.includes('information_schema.tables')) return { rows: [{ exists: true }] };
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_sessions')) {
@@ -83,12 +86,16 @@ function makeHealthyPool() {
       }
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_messages')) {
+        // With the round-6 client_turn_id column present (this pool probes it as
+        // existing), the INSERT carries 9 params — (…, result, client_turn_id, at).
+        const withColumn = params.length === 9;
         const row: MsgRow = {
           id: String(params[0]), session_id: String(params[1]), user_id: String(params[2]),
           role: String(params[3]), content: String(params[4]),
           type: params[5] === null ? null : String(params[5]),
           result: params[6] === null ? null : String(params[6]),
-          at: Number(params[7]),
+          client_turn_id: withColumn && params[7] !== null ? String(params[7]) : null,
+          at: Number(withColumn ? params[8] : params[7]),
         };
         if (db.messages.some((m) => m.id === row.id) || (txn ?? []).some((m) => m.id === row.id)) {
           return { rows: [] };

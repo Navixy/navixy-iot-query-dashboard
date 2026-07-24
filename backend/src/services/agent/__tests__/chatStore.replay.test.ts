@@ -19,6 +19,9 @@ import type { AgentTurn } from '../types.js';
 const ident = (userId: string, tenantKey = 'tenant-1') => ({ tenantKey, userId, demo: false });
 
 const user = (content: string): AgentTurn => ({ role: 'user', content });
+const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+  role: 'user', content, client_turn_id,
+});
 const question = (content: string): AgentTurn => ({
   role: 'assistant', type: 'question', content, result: null,
 });
@@ -31,11 +34,16 @@ interface MsgRow {
   content: string;
   type: string | null;
   result: string | null;
+  client_turn_id: string | null;
   at: number; // created_at, ms
 }
 
 interface Script {
   tablesExist: boolean;
+  /** Whether the round-6 client_turn_id column exists on chat_messages. Tenants on
+   *  an earlier 002 have the tables but not the column; the store must keep
+   *  persisting without it. */
+  clientTurnIdColumn: boolean;
   /** Every chat_messages INSERT throws while true. */
   failMessageInsert: boolean;
   /** Emulates an in-doubt COMMIT once: the server APPLIES the transaction, but the
@@ -50,6 +58,7 @@ function makeScriptedPool() {
   };
   const script: Script = {
     tablesExist: true,
+    clientTurnIdColumn: true,
     failMessageInsert: false,
     failCommitOnceAfterApply: false,
   };
@@ -89,6 +98,11 @@ function makeScriptedPool() {
       }
       if (q === 'ROLLBACK') { txn = null; return { rows: [] }; }
 
+      // Matched before the tables probe: the column probe is a distinct
+      // information_schema query (review !62 round 6).
+      if (q.includes('information_schema.columns')) {
+        return { rows: [{ exists: script.clientTurnIdColumn }] };
+      }
       if (q.includes('information_schema.tables')) {
         return { rows: [{ exists: script.tablesExist }] };
       }
@@ -114,10 +128,13 @@ function makeScriptedPool() {
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_messages')) {
         if (script.failMessageInsert) throw new Error('message insert refused (scripted)');
-        // The store-minted shape: (id, session, user, role, content, type, result, at).
-        // A regression to letting the DATABASE mint ids/timestamps must fail loudly —
-        // it would silently break replay idempotence and ordering.
-        if (params.length !== 8) {
+        // Two store-minted shapes (review !62 round 6): WITH the client_turn_id
+        // column, 9 params (id, session, user, role, content, type, result,
+        // client_turn_id, at); WITHOUT it, the legacy 8 (…, result, at). A
+        // regression to letting the DATABASE mint ids/timestamps must still fail
+        // loudly — it would break replay idempotence and ordering.
+        const withColumn = params.length === 9;
+        if (params.length !== 8 && params.length !== 9) {
           throw new Error(`unexpected chat_messages INSERT shape: ${params.length} params`);
         }
         const row: MsgRow = {
@@ -125,7 +142,8 @@ function makeScriptedPool() {
           role: String(params[3]), content: String(params[4]),
           type: params[5] === null ? null : String(params[5]),
           result: params[6] === null ? null : String(params[6]),
-          at: Number(params[7]),
+          client_turn_id: withColumn && params[7] !== null ? String(params[7]) : null,
+          at: Number(withColumn ? params[8] : params[7]),
         };
         if (idTaken(row.id)) return { rows: [] }; // ON CONFLICT (id) DO NOTHING
         (txn ?? db.messages).push(row);
@@ -155,6 +173,8 @@ function makeScriptedPool() {
 
       if (q.includes('FROM dashboard_studio_meta_data.chat_messages')) {
         // ORDER BY seq DESC LIMIT n — seq is insertion order, so: last n, newest first.
+        // The read selects client_turn_id only where the column exists (round 6).
+        const selectsTurnId = q.includes('client_turn_id');
         const rows = applied()
           .filter((m) => m.session_id === params[0] && m.user_id === params[1])
           .slice(-Number(params[2]))
@@ -162,6 +182,7 @@ function makeScriptedPool() {
           .map((m) => ({
             id: m.id, role: m.role, type: m.type, content: m.content,
             result: m.result === null ? null : JSON.parse(m.result),
+            ...(selectsTurnId ? { client_turn_id: m.client_turn_id } : {}),
           }));
         return { rows };
       }
@@ -374,5 +395,62 @@ describe('chatStore — per-session write serialization (MR !61 round 6)', () =>
     expect(lock).toBeGreaterThan(begin);
     expect(idxFirstInsert(calls)).toBeGreaterThan(lock); // the replayed turn's INSERT
     expect(idxPrune(calls)).toBeGreaterThan(lock);
+  });
+});
+
+describe('chatStore — client_turn_id idempotency id (review !62 round 6)', () => {
+  it('round-trips a user turn client_turn_id through Postgres when the column exists', async () => {
+    const { pool, db } = makeScriptedPool(); // clientTurnIdColumn defaults to true
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('build a dashboard', 'turn-abc')]);
+
+    const reloaded = await loadHistory(pool, ident('u1'), sessionId);
+    expect(reloaded.persisted).toBe(true);
+    // The id survives the persist → read round trip, so the client can reconcile by it.
+    expect(reloaded.history).toEqual([userWithId('build a dashboard', 'turn-abc')]);
+    // Persisted in the column, not merely echoed.
+    expect(db.messages[0].client_turn_id).toBe('turn-abc');
+  });
+
+  it('keeps persisting (without the id) when the tenant is on an older schema lacking the column', async () => {
+    const { pool, db, script } = makeScriptedPool();
+    script.clientTurnIdColumn = false; // tables exist, the round-6 column does not
+
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('still works', 'turn-xyz')]);
+
+    const reloaded = await loadHistory(pool, ident('u1'), sessionId);
+    // Crucially it did NOT downgrade to in-memory — history stays persisted.
+    expect(reloaded.persisted).toBe(true);
+    // The turn is there; the id is simply not carried on the older schema.
+    expect(reloaded.history).toEqual([user('still works')]);
+    expect(db.messages).toHaveLength(1);
+    expect(db.messages[0].client_turn_id).toBeNull();
+  });
+
+  it('never stamps a client_turn_id on an assistant turn', async () => {
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('q', 'tid-1'), question('a')]);
+
+    const assistantRow = db.messages.find((m) => m.role === 'assistant');
+    expect(assistantRow?.client_turn_id).toBeNull();
+    const userRow = db.messages.find((m) => m.role === 'user');
+    expect(userRow?.client_turn_id).toBe('tid-1');
+  });
+
+  it('carries client_turn_id through a buffered replay into Postgres', async () => {
+    const { pool, db, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    // The write fails, so the turn (with its id) is buffered in memory...
+    script.failMessageInsert = true;
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('buffered turn', 'tid-replay')]);
+    script.failMessageInsert = false;
+
+    // ...and replays into Postgres on the next healthy load, id intact.
+    const reloaded = await loadHistory(pool, ident('u1'), sessionId);
+    expect(reloaded.history).toEqual([userWithId('buffered turn', 'tid-replay')]);
+    expect(db.messages[0].client_turn_id).toBe('tid-replay');
   });
 });
