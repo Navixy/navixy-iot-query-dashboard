@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   appendUncertainNotice,
+  applyReceiptToDelivery,
   classifyTurnDelivery,
   countMatchingUserTurns,
   locksComposerAwaitingReply,
   reconcileOutcome,
+  sessionAwaitsReply,
   UNCERTAIN_DELIVERY_NOTICE,
 } from '../turnDelivery';
 import type { AgentTurn, ChatBubble } from '@/types/agent';
@@ -21,58 +23,49 @@ const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
 const assistant = (content: string): AgentTurn => ({
   role: 'assistant', type: 'question', content, result: null,
 });
+const assistantWithId = (content: string, client_turn_id: string): AgentTurn => ({
+  role: 'assistant', type: 'question', content, result: null, client_turn_id,
+});
 const assistantError = (content: string): AgentTurn => ({
   role: 'assistant', type: 'error', content, result: null,
 });
 
-// The content fallback (no id available): clientTurnId is null AND no history
-// turn carries one, so classifyTurnDelivery uses content + occurrence baseline.
-describe('classifyTurnDelivery — content fallback when no id is available (review !62 rounds 3–4)', () => {
+// The content fallback: supportsTurnIds is FALSE (older 002), so classifyTurnDelivery
+// uses content + occurrence baseline regardless of any id.
+describe('classifyTurnDelivery — content fallback when the server does not support ids (review !62 rounds 3–4)', () => {
   it('completed: the sent message sits in the transcript with an assistant turn after it', () => {
     const history = [user('old'), assistant('old reply'), user('probe'), assistant('built it')];
-    expect(classifyTurnDelivery(history, 'probe', null)).toBe('completed');
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('completed');
   });
 
   it('received: the sent message is the last turn — server got it, no reply yet', () => {
     const history = [user('old'), assistant('old reply'), user('probe')];
-    expect(classifyTurnDelivery(history, 'probe', null)).toBe('received');
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('received');
   });
 
   it('lost: the sent message never reached the transcript', () => {
     const history = [user('old'), assistant('old reply')];
-    expect(classifyTurnDelivery(history, 'probe', null)).toBe('lost');
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('lost');
   });
 
   it('lost on an empty transcript', () => {
-    expect(classifyTurnDelivery([], 'probe', null)).toBe('lost');
+    expect(classifyTurnDelivery([], 'probe', null, false)).toBe('lost');
   });
 
   it('a persisted in-band error turn counts as the answer — completed, not received', () => {
     const history = [user('probe'), assistantError('validation failed')];
-    expect(classifyTurnDelivery(history, 'probe', null)).toBe('completed');
-  });
-
-  it('turns from a concurrent tab after ours still classify ours as completed', () => {
-    const history = [
-      user('probe'), assistant('built it'),
-      user('other tab prompt'), assistant('other tab reply'),
-    ];
-    expect(classifyTurnDelivery(history, 'probe', null)).toBe('completed');
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('completed');
   });
 
   it('an assistant-only tail does not match a user message (role matters)', () => {
     const history = [user('old'), assistant('probe')];
-    expect(classifyTurnDelivery(history, 'probe', null)).toBe('lost');
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('lost');
   });
 
   describe('send-time occurrence baseline (review !62 round 4, Important 2)', () => {
     it('a repeated prompt whose SECOND send is lost is classified lost, not absorbed by the first', () => {
-      // The user already sent "refresh" once (answered). They send it again and
-      // THAT POST is lost, so the server transcript still holds exactly one
-      // "refresh". With a baseline of 1, one occurrence is NOT a new one → lost,
-      // so the draft comes back instead of the new command vanishing.
       const history = [user('refresh'), assistant('done'), user('other'), assistant('ok')];
-      expect(classifyTurnDelivery(history, 'refresh', null, 1)).toBe('lost');
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 1)).toBe('lost');
     });
 
     it('the same repeated prompt is completed when the server DID record the new occurrence', () => {
@@ -80,67 +73,64 @@ describe('classifyTurnDelivery — content fallback when no id is available (rev
         user('refresh'), assistant('done'),
         user('refresh'), assistant('done again'),
       ];
-      expect(classifyTurnDelivery(history, 'refresh', null, 1)).toBe('completed');
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 1)).toBe('completed');
     });
 
     it('received: the new repeated occurrence landed but has no reply yet', () => {
       const history = [user('refresh'), assistant('done'), user('refresh')];
-      expect(classifyTurnDelivery(history, 'refresh', null, 1)).toBe('received');
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 1)).toBe('received');
     });
 
     it('a baseline larger than the matches present is still lost (window may have slid)', () => {
       const history = [user('refresh'), assistant('done')];
-      expect(classifyTurnDelivery(history, 'refresh', null, 2)).toBe('lost');
-    });
-
-    it('completed-vs-received keys off the NEWEST matching user turn, not the oldest', () => {
-      // baseline 1: the newest "refresh" (index 2) is ours; it has a reply after.
-      const history = [user('refresh'), user('refresh'), assistant('answer to the 2nd')];
-      expect(classifyTurnDelivery(history, 'refresh', null, 1)).toBe('completed');
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 2)).toBe('lost');
     });
   });
 });
 
-// The PRIMARY path (review !62 round 6): a client_turn_id is present AND the
-// server round-trips ids, so matching is deterministic — content and baseline are
-// ignored entirely.
-describe('classifyTurnDelivery — deterministic id match (review !62 round 6, findings 4/5)', () => {
-  it('completed: our id is in the transcript with an assistant turn after it', () => {
-    const history = [userWithId('build', 'tid-1'), assistant('built it')];
-    expect(classifyTurnDelivery(history, 'build', 'tid-1')).toBe('completed');
+// The PRIMARY path (review !62 round 7): supports_turn_ids is TRUE, so matching is
+// deterministic by the exact user↔reply pair — content and baseline are ignored.
+describe('classifyTurnDelivery — exact-pair id match (review !62 round 7, findings 3/5a)', () => {
+  it('completed: an ASSISTANT turn carries our id', () => {
+    const history = [userWithId('build', 'tid-1'), assistantWithId('built it', 'tid-1')];
+    expect(classifyTurnDelivery(history, 'build', 'tid-1', true)).toBe('completed');
   });
 
-  it('received: our id is present with no assistant after it — agent may still be working', () => {
+  it('received: our user id is present but no assistant carries it yet', () => {
     const history = [userWithId('build', 'tid-1')];
-    expect(classifyTurnDelivery(history, 'build', 'tid-1')).toBe('received');
+    expect(classifyTurnDelivery(history, 'build', 'tid-1', true)).toBe('received');
   });
 
-  it('lost: the server round-trips ids (others are present) but not ours', () => {
-    const history = [userWithId('earlier', 'tid-0'), assistant('done')];
-    expect(classifyTurnDelivery(history, 'build', 'tid-missing')).toBe('lost');
+  it('lost: the server supports ids but neither a user nor an assistant carries ours', () => {
+    const history = [userWithId('earlier', 'tid-0'), assistantWithId('done', 'tid-0')];
+    expect(classifyTurnDelivery(history, 'build', 'tid-missing', true)).toBe('lost');
   });
 
-  it('a concurrent tab\'s identical prompt does NOT absorb ours — the id disambiguates', () => {
-    // Content matching would call this completed (an identical "refresh" with a
-    // reply after it). By id, ours (tid-mine) never landed → lost, so the draft
-    // is safely restored instead of silently dropped.
-    const history = [userWithId('refresh', 'tid-other'), assistant('other tab reply')];
-    expect(classifyTurnDelivery(history, 'refresh', 'tid-mine')).toBe('lost');
-  });
-
-  it('our reply is matched even when a concurrent identical prompt lands after ours', () => {
+  it('finding 3: a concurrent turn\'s reply landing FIRST does not complete ours', () => {
+    // [user A, user B, reply B] — the old "any assistant after our user" rule
+    // returned completed for A while A was still running. Matching the exact PAIR,
+    // A has no reply carrying tid-A yet → received.
     const history = [
-      userWithId('refresh', 'tid-mine'), assistant('our reply'),
-      userWithId('refresh', 'tid-other'),
+      userWithId('build A', 'tid-A'),
+      userWithId('build B', 'tid-B'), assistantWithId('reply B', 'tid-B'),
     ];
-    expect(classifyTurnDelivery(history, 'refresh', 'tid-mine')).toBe('completed');
+    expect(classifyTurnDelivery(history, 'build A', 'tid-A', true)).toBe('received');
   });
 
-  it('falls back to content when the transcript carries NO ids (older schema)', () => {
-    // We sent an id, but the server (older 002) did not persist any — so no user
-    // turn has one. Trust content instead of calling a delivered turn lost.
+  it('our reply is matched even interleaved among concurrent turns', () => {
+    const history = [
+      userWithId('refresh', 'tid-mine'),
+      userWithId('refresh', 'tid-other'), assistantWithId('other reply', 'tid-other'),
+      assistantWithId('our reply', 'tid-mine'),
+    ];
+    expect(classifyTurnDelivery(history, 'refresh', 'tid-mine', true)).toBe('completed');
+  });
+
+  it('finding 5a: capability comes from the FLAG, not a visible id — no id support → content fallback', () => {
+    // We sent an id, but supports_turn_ids is false (older 002). Trust content
+    // instead of calling a delivered turn lost.
     const history = [user('build'), assistant('built it')];
-    expect(classifyTurnDelivery(history, 'build', 'tid-1')).toBe('completed');
+    expect(classifyTurnDelivery(history, 'build', 'tid-1', false)).toBe('completed');
   });
 });
 
@@ -160,6 +150,44 @@ describe('locksComposerAwaitingReply (review !62 round 6, Important 4)', () => {
 
   it('does NOT lock when the turn provably never arrived (confirmed-lost)', () => {
     expect(locksComposerAwaitingReply('confirmed-lost', 'lost')).toBe(false);
+  });
+});
+
+describe('applyReceiptToDelivery — durable receipt reconfirmation (review !62 round 7, finding 5b)', () => {
+  it('upgrades a lost verdict to completed when the receipt says answered', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'answered', supported: true })).toBe('completed');
+  });
+
+  it('upgrades a lost verdict to received when the receipt says received', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'received', supported: true })).toBe('received');
+  });
+
+  it('keeps lost when a SUPPORTED receipt is unknown — genuinely never delivered', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'unknown', supported: true })).toBe('lost');
+  });
+
+  it('leaves the transcript verdict untouched when receipts are unsupported', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'unknown', supported: false })).toBe('lost');
+    expect(applyReceiptToDelivery('lost', null)).toBe('lost');
+  });
+
+  it('never reconsiders a positive verdict (a receipt cannot un-happen a delivery)', () => {
+    expect(applyReceiptToDelivery('completed', { status: 'unknown', supported: true })).toBe('completed');
+    expect(applyReceiptToDelivery('received', { status: 'unknown', supported: true })).toBe('received');
+  });
+});
+
+describe('sessionAwaitsReply — server-derived lock (review !62 round 7, finding 4)', () => {
+  it('true when the newest turn is a user turn (a turn is still in flight)', () => {
+    expect(sessionAwaitsReply([user('a'), assistant('b'), user('c')])).toBe(true);
+  });
+
+  it('false when the newest turn is an assistant reply', () => {
+    expect(sessionAwaitsReply([user('a'), assistant('b')])).toBe(false);
+  });
+
+  it('false on an empty transcript', () => {
+    expect(sessionAwaitsReply([])).toBe(false);
   });
 });
 

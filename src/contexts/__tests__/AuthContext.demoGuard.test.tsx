@@ -1,15 +1,13 @@
 /**
  * @vitest-environment jsdom
  *
- * The demo destructive callers must carry the same session-liveness predicate
- * that round 5 added to the demoStorage primitives (review !62 round 6, Critical
- * 2). The predicate existed and was tested, but only initializeDemoStorage (the
- * JWT-restore path) passed it. The PRIMARY destructive callers — signInDemo and
- * reseedDemoData — still cleared and reseeded the singleton IndexedDB without
- * it, so a delayed run could resume after a sign-out/sign-in and clobber the new
- * identity's store. These tests pin that both callers now pass a predicate AND
- * that the predicate reports staleness once a later auth transition supersedes
- * the run.
+ * The demo destructive callers must guard their IndexedDB work with an
+ * ORIGIN-WIDE ownership token (review !62 round 7, finding 1), not the tab-local
+ * generation ref round 6 used — that could not see a concurrent demo sign-in in
+ * another tab. These pin that signInDemo CLAIMS a token and passes it, that
+ * reseedDemoData asserts the CURRENT token, and that a superseded run (the
+ * destructive op returning false) is PROPAGATED so the caller aborts its
+ * continuation instead of resurrecting/reloading the successor.
  *
  * jsdom is scoped to this file via the pragma above.
  */
@@ -21,8 +19,10 @@ import { demoStorageService } from '@/services/demoStorage';
 
 vi.mock('@/services/demoStorage', () => ({
   demoStorageService: {
-    clearAllData: vi.fn().mockResolvedValue(undefined),
-    seedFromBackend: vi.fn().mockResolvedValue(undefined),
+    claimDemoOwnership: vi.fn().mockResolvedValue('owner-1'),
+    readDemoOwner: vi.fn().mockResolvedValue('owner-1'),
+    clearAllData: vi.fn().mockResolvedValue(true),
+    seedFromBackend: vi.fn().mockResolvedValue(true),
     isSeeded: vi.fn().mockResolvedValue(false),
   },
 }));
@@ -34,9 +34,6 @@ vi.mock('@/services/demoApi', () => ({
 vi.mock('@/lib/queryClient', () => ({ queryClient: { clear: vi.fn() } }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }));
 
-// A single fetch stub covering the demo login flow: POST /login, the four
-// read-only data fetches, and the demo-user DELETE. Shapes match what
-// signInDemo/reseedDemoData destructure.
 function stubFetch() {
   global.fetch = vi.fn(async (url: RequestInfo | URL) => {
     const u = String(url);
@@ -63,83 +60,110 @@ function stubFetch() {
 interface Ctx {
   signInDemo: ReturnType<typeof useAuth>['signInDemo'];
   reseedDemoData: ReturnType<typeof useAuth>['reseedDemoData'];
+  clearDemoData: ReturnType<typeof useAuth>['clearDemoData'];
   signOut: ReturnType<typeof useAuth>['signOut'];
-  user: ReturnType<typeof useAuth>['user'];
 }
 let ctx: Ctx;
 function Grab() {
   const c = useAuth();
-  ctx = { signInDemo: c.signInDemo, reseedDemoData: c.reseedDemoData, signOut: c.signOut, user: c.user };
+  ctx = {
+    signInDemo: c.signInDemo, reseedDemoData: c.reseedDemoData,
+    clearDemoData: c.clearDemoData, signOut: c.signOut,
+  };
   return null;
 }
 function mount() {
-  // createElement rather than JSX: vitest.config.ts wires no React JSX runtime,
-  // and this keeps the test independent of that config.
   render(createElement(AuthProvider, null, createElement(Grab)));
 }
+
+const CREDS = ['demo@navixy.io', 'admin', 'iot-url', 'user-url'] as const;
 
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
-  vi.mocked(demoStorageService.clearAllData).mockResolvedValue(undefined);
-  vi.mocked(demoStorageService.seedFromBackend).mockResolvedValue(undefined);
+  vi.mocked(demoStorageService.claimDemoOwnership).mockResolvedValue('owner-1');
+  vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-1');
+  vi.mocked(demoStorageService.clearAllData).mockResolvedValue(true);
+  vi.mocked(demoStorageService.seedFromBackend).mockResolvedValue(true);
   vi.mocked(demoStorageService.isSeeded).mockResolvedValue(false);
   stubFetch();
 });
 afterEach(() => cleanup());
 
-describe('signInDemo — destructive IndexedDB work is guarded by a liveness predicate (review !62 round 6, Critical 2)', () => {
-  it('passes a predicate to both clearAllData and seedFromBackend', async () => {
+describe('signInDemo — origin-wide ownership token (review !62 round 7, finding 1)', () => {
+  it('claims a token and passes it to both clearAllData and seedFromBackend', async () => {
     mount();
     await act(async () => {
-      await ctx.signInDemo('demo@navixy.io', 'admin', 'iot-url', 'user-url');
+      await ctx.signInDemo(...CREDS);
     });
-    expect(demoStorageService.clearAllData).toHaveBeenCalledWith(expect.any(Function));
+    expect(demoStorageService.claimDemoOwnership).toHaveBeenCalled();
+    expect(demoStorageService.clearAllData).toHaveBeenCalledWith('owner-1');
     expect(demoStorageService.seedFromBackend).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'u1' }),
-      expect.any(Function),
+      'owner-1',
     );
   });
 
-  it('the predicate reports stale once a later sign-out supersedes the attempt', async () => {
+  it('returns an error when the seed is superseded (ownership moved on)', async () => {
+    vi.mocked(demoStorageService.seedFromBackend).mockResolvedValue(false);
     mount();
+    let result: { error: Error | null } | undefined;
     await act(async () => {
-      await ctx.signInDemo('demo@navixy.io', 'admin', 'iot-url', 'user-url');
+      result = await ctx.signInDemo(...CREDS);
     });
-    const seedArgs = vi.mocked(demoStorageService.seedFromBackend).mock.calls[0];
-    const isStale = seedArgs[1] as () => boolean;
-    // Same session that seeded → not stale.
-    expect(isStale()).toBe(false);
-    // A later explicit transition bumps the auth generation → stale.
-    await act(async () => {
-      await ctx.signOut();
-    });
-    expect(isStale()).toBe(true);
+    expect(result?.error).toBeInstanceOf(Error);
   });
 });
 
-describe('reseedDemoData — destructive reseed is guarded too (review !62 round 6, Critical 2)', () => {
-  it('passes a predicate to seedFromBackend and it goes stale on sign-out', async () => {
+describe('reseedDemoData — asserts current ownership (review !62 round 7, finding 1)', () => {
+  it('reads the current owner and passes it to the seed', async () => {
     mount();
-    // Establish an authenticated demo session first (reseed requires token+user).
     await act(async () => {
-      await ctx.signInDemo('demo@navixy.io', 'admin', 'iot-url', 'user-url');
+      await ctx.signInDemo(...CREDS); // establish an authenticated demo session
     });
     vi.mocked(demoStorageService.seedFromBackend).mockClear();
 
     await act(async () => {
       await ctx.reseedDemoData();
     });
+    expect(demoStorageService.readDemoOwner).toHaveBeenCalled();
     expect(demoStorageService.seedFromBackend).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'u1' }),
-      expect.any(Function),
+      'owner-1',
     );
+  });
 
-    const isStale = vi.mocked(demoStorageService.seedFromBackend).mock.calls[0][1] as () => boolean;
-    expect(isStale()).toBe(false);
+  it('returns an error (so Settings does NOT reload) when the seed is superseded', async () => {
+    mount();
     await act(async () => {
-      await ctx.signOut();
+      await ctx.signInDemo(...CREDS);
     });
-    expect(isStale()).toBe(true);
+    vi.mocked(demoStorageService.seedFromBackend).mockResolvedValue(false);
+    let result: { error: Error | null } | undefined;
+    await act(async () => {
+      result = await ctx.reseedDemoData();
+    });
+    expect(result?.error).toBeInstanceOf(Error);
+  });
+});
+
+describe('clearDemoData — propagates the abort (review !62 round 7, finding 1)', () => {
+  it('reports { aborted: true } when the clear was superseded, so DemoBanner skips sign-out', async () => {
+    vi.mocked(demoStorageService.clearAllData).mockResolvedValue(false);
+    mount();
+    let result: { aborted: boolean } | undefined;
+    await act(async () => {
+      result = await ctx.clearDemoData();
+    });
+    expect(result).toEqual({ aborted: true });
+  });
+
+  it('reports { aborted: false } on a normal clear', async () => {
+    mount();
+    let result: { aborted: boolean } | undefined;
+    await act(async () => {
+      result = await ctx.clearDemoData();
+    });
+    expect(result).toEqual({ aborted: false });
   });
 });

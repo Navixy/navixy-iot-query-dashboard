@@ -12,7 +12,7 @@ import {
   useAgentSession,
   type AgentChatMutationContext,
 } from '@/hooks/use-agent-chat';
-import { getAuthSessionId } from '@/lib/authSession';
+import { getAuthSessionId, getAuthToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
@@ -20,9 +20,11 @@ import { EmptyState } from '@/components/ai-chat/EmptyState';
 import { trimHistoryOverlap } from '@/components/ai-chat/historyOverlap';
 import {
   appendUncertainNotice,
+  applyReceiptToDelivery,
   classifyTurnDelivery,
   locksComposerAwaitingReply,
   reconcileOutcome,
+  sessionAwaitsReply,
   type TurnDelivery,
 } from '@/components/ai-chat/turnDelivery';
 import type {
@@ -122,18 +124,45 @@ const AiChat = () => {
 
   // A delivered-but-unanswered turn ('received') or one reconciliation could not
   // confirm ('uncertain') leaves the composer LOCKED (review !62 round 6,
-  // Important 4): the first turn may still be running on the stateful agent, and
-  // a second POST would race it and interleave the transcript. Mount-local, so a
-  // page reload — which re-reads the session and observes the reply if it landed
-  // — is the explicit way out. See locksComposerAwaitingReply.
+  // Important 4). Mount-local — it covers THIS mount, chiefly the uncertain case
+  // whose turn the server may not even show. See locksComposerAwaitingReply.
   const [awaitingServerReply, setAwaitingServerReply] = useState(false);
+
+  // SERVER-DERIVED lock that SURVIVES a remount (review !62 round 7, finding 4):
+  // the round-6 mount-local flag reset on navigate-away, and a 'received' turn's
+  // mutation was removed, so the composer re-enabled while the first stateful
+  // invocation was still running. The route appends the assistant AFTER the agent
+  // call, so a transcript whose newest turn is a USER turn means a turn is still
+  // in flight — derive the lock from that persisted state instead. A fresh mount
+  // re-reads it from GET /session, so the lock cannot be lost by navigating away.
+  const serverAwaitingReply = sessionAwaitsReply(sessionQuery.data?.messages ?? []);
 
   const isChatPending =
     pendingChatTurns.length > 0 ||
     chat.isPending ||
     reconcilingCount > 0 ||
     unhandledFailedTurns > 0 ||
-    awaitingServerReply;
+    awaitingServerReply ||
+    serverAwaitingReply;
+
+  // While the server shows an unanswered turn, POLL until its reply lands (finding
+  // 4: "retain/poll the received turn until its matching assistant row exists").
+  // Bounded past the 190 s transport ceiling; stops the moment the reply arrives
+  // (serverAwaitingReply flips false) or the page unmounts.
+  const refetchSession = sessionQuery.refetch;
+  useEffect(() => {
+    if (!serverAwaitingReply) return;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      if (attempts > 48) {
+        clearInterval(timer);
+        return;
+      }
+      void refetchSession();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [serverAwaitingReply, refetchSession]);
 
   // D13: the SERVER is authoritative. Seeded from the session query, then
   // OVERWRITTEN from every single response — including error responses, which
@@ -225,6 +254,9 @@ const AiChat = () => {
           // turn absent — an early 'lost' that later FAILED probes never
           // re-confirmed is the overtake race, i.e. uncertain (round 5, Important 3).
           let lastGetSucceeded = false;
+          // Whether the server round-trips ids (finding 5a), taken from the last
+          // successful GET rather than inferred from a visible row.
+          let supportsTurnIds = false;
           const backoffMs = [0, 700, 1400];
           for (let attempt = 0; attempt < backoffMs.length; attempt++) {
             if (backoffMs[attempt] > 0) {
@@ -242,14 +274,31 @@ const AiChat = () => {
             lastGetSucceeded = response?.data != null;
             if (!response?.data) continue; // this GET failed; keep the last good one
             authoritative = response.data;
+            supportsTurnIds = response.data.supports_turn_ids === true;
             delivery = classifyTurnDelivery(
               response.data.messages,
               failed.message,
               failed.clientTurnId,
+              supportsTurnIds,
               failed.priorSameContentUserTurns,
             );
             if (delivery !== 'lost') break; // delivered — stop polling
             // 'lost' on a SUCCESSFUL GET may still be the overtake race; poll again.
+          }
+
+          // DURABLE RECEIPT RECONFIRMATION (review !62 round 7, finding 5b): on the
+          // id path a 'lost' only means "not in the capped transcript" — the turn's
+          // rows can be evicted by 100 newer ones while its mutation persists
+          // (gcTime: Infinity). Confirm against the receipt, which lives outside
+          // that window, before trusting 'lost'. supported:false (older schema)
+          // leaves the transcript verdict untouched.
+          if (delivery === 'lost' && lastGetSucceeded && supportsTurnIds && failed.clientTurnId) {
+            const receipt = await apiService.getAgentTurnStatus(failed.clientTurnId).catch(() => null);
+            if (!failureHandlingAliveRef.current) {
+              handledFailedTurnsRef.current.delete(failed.mutationId);
+              return;
+            }
+            delivery = applyReceiptToDelivery(delivery, receipt?.data ?? null);
           }
 
           const outcome = reconcileOutcome(authoritative !== null, delivery, lastGetSucceeded);
@@ -378,7 +427,9 @@ const AiChat = () => {
     setComposerValue('');
     setLiveBubbles((prev) => [...prev, { id: nextLiveId(), role: 'user', text: message }]);
     chat.mutate(
-      { session_id: sessionIdRef.current, message, client_turn_id: clientTurnId },
+      // authToken is captured at send and BOUND to this request (finding 2), so a
+      // cross-tab sign-in cannot swap the Authorization header before the POST.
+      { session_id: sessionIdRef.current, message, client_turn_id: clientTurnId, authToken: getAuthToken() },
       {
         // This mutate-level callback updates THIS mount's transcript and is
         // skipped if the page unmounts mid-turn — liveBubbles die with the

@@ -67,6 +67,12 @@ class DemoDatabase extends Dexie {
   globalVariables!: Table<DemoGlobalVariable, string>;
   metadata!: Table<DemoMetadata, string>;
   chartCatalog!: Table<{ id: string; schemaVersion: string; groups: unknown[] }, string>;
+  // Singleton owner token (review !62 round 7, finding 1): the ORIGIN-WIDE holder
+  // of this per-origin singleton DB. Every tab shares this IndexedDB, so a sign-in
+  // in another tab writes a new token here that THIS tab's destructive
+  // transactions can see — which the tab-local React ref round 6 used could not.
+  // Deliberately NOT cleared by clearAllData, so it survives across clears/seeds.
+  owner!: Table<{ id: string; token: string }, string>;
 
   constructor() {
     super('NavixyDemoDatabase');
@@ -86,7 +92,29 @@ class DemoDatabase extends Dexie {
       metadata: 'id, key',
       chartCatalog: 'id'
     });
+
+    // v3: origin-wide demo-ownership token (review !62 round 7, finding 1). Adding
+    // a store is a pure Dexie upgrade — the store starts empty; no data migrates.
+    this.version(3).stores({
+      sections: 'id, name, sortOrder, userId, isDeleted',
+      reports: 'id, title, sectionId, sortOrder, userId, isDeleted',
+      globalVariables: 'id, label',
+      metadata: 'id, key',
+      chartCatalog: 'id',
+      owner: 'id'
+    });
   }
+}
+
+const OWNER_KEY = 'current';
+
+/** Mint an origin-wide ownership token. randomUUID needs a secure context
+ *  (localhost + the https iframe host qualify); the fallback only needs
+ *  uniqueness per claim on this origin. */
+function mintOwnerToken(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 // Singleton instance
@@ -116,21 +144,46 @@ export class DemoStorageService {
   }
 
   // ==========================================
+  // Origin-wide demo ownership (review !62 round 7, finding 1)
+  // ==========================================
+
+  /**
+   * Claim ownership of the singleton demo DB for a NEW sign-in and return the
+   * minted token. Every destructive call made on behalf of this sign-in passes
+   * the token back as `expectedOwner`; a later sign-in — in THIS tab or ANY other
+   * tab on the origin — claims a new token, so those calls abort in-transaction
+   * instead of clobbering the successor's data. Origin-wide because the token
+   * lives in IndexedDB, not a per-tab React ref.
+   */
+  async claimDemoOwnership(): Promise<string> {
+    const token = mintOwnerToken();
+    await getDb().owner.put({ id: OWNER_KEY, token });
+    return token;
+  }
+
+  /** The current origin-wide owner token, or undefined if none has been claimed.
+   *  reseed/clear read this to pass themselves as the expected owner. */
+  async readDemoOwner(): Promise<string | undefined> {
+    return (await getDb().owner.get(OWNER_KEY))?.token;
+  }
+
+  // ==========================================
   // Initialization & Data Seeding
   // ==========================================
 
   /**
    * Seed the demo database with data from the backend.
    *
-   * `shouldAbort` (review !62 round 5, Critical 2) is checked INSIDE each
-   * destructive transaction — the internal clear and the bulk write — not only
-   * before them. IndexedDB is a per-origin SINGLETON and serializes read/write
-   * transactions on overlapping stores, so a check that runs as the first
-   * statement of the transaction body cannot be overtaken: a demo init whose
-   * identity was superseded by a sign-out/sign-in mid-flight aborts the clear
-   * and the write instead of wiping or replacing the CURRENT identity's data.
-   * A guard placed only before the call leaves the awaits inside these
-   * operations as an open interleaving window.
+   * `expectedOwner` (review !62 round 7, finding 1) is the ORIGIN-WIDE ownership
+   * token this caller holds; it is re-read from IndexedDB INSIDE each destructive
+   * transaction — the internal clear and the bulk write — and the operation aborts
+   * if ownership has moved to a newer sign-in in this or any other tab. IndexedDB
+   * is a per-origin SINGLETON and serializes read/write transactions on
+   * overlapping stores, so the in-transaction check cannot be overtaken. Omit
+   * expectedOwner for an unconditional seed (legacy callers).
+   *
+   * Returns true if seeded, false if it ABORTED because ownership moved on — the
+   * caller must propagate that so its continuation (a page reload) does not run.
    */
   async seedFromBackend(data: {
     sections: Record<string, unknown>[];
@@ -138,7 +191,7 @@ export class DemoStorageService {
     globalVariables: Record<string, unknown>[];
     chartCatalog?: { schemaVersion?: string; groups?: unknown[] } | null;
     userId: string;
-  }, shouldAbort?: () => boolean): Promise<void> {
+  }, expectedOwner?: string): Promise<boolean> {
     console.log('[DemoStorage] seedFromBackend called with:', {
       sectionsCount: data.sections?.length ?? 0,
       reportsCount: data.reports?.length ?? 0,
@@ -174,9 +227,13 @@ export class DemoStorageService {
     const database = getDb();
 
     // Clear existing data first (should already be cleared, but double-check).
-    // Pass the abort predicate through so this internal clear is guarded too.
+    // Pass the ownership token through so this internal clear is guarded too; if it
+    // aborts, ownership has moved on and we must not seed either.
     console.log('[DemoStorage] Clearing existing data before seeding...');
-    await this.clearAllData(shouldAbort);
+    if (!(await this.clearAllData(expectedOwner))) {
+      console.log('[DemoStorage] Seed aborted: ownership moved on before the clear');
+      return false;
+    }
 
     // Seed sections
     const sections = data.sections.map(s => ({
@@ -257,13 +314,16 @@ export class DemoStorageService {
     console.log('[DemoStorage] Starting bulk insert to IndexedDB...');
     let aborted = false;
     try {
-      await database.transaction('rw', [database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
-        // Identity guard INSIDE the write transaction (review !62 round 5,
-        // Critical 2): if this run was superseded while it fetched, do not
-        // overwrite the current identity's freshly-seeded store.
-        if (shouldAbort?.()) {
-          aborted = true;
-          return;
+      await database.transaction('rw', [database.owner, database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+        // Ownership guard INSIDE the write transaction (review !62 round 7, finding
+        // 1): if a newer sign-in (any tab) claimed ownership while this run
+        // fetched, do not overwrite the successor's freshly-seeded store.
+        if (expectedOwner !== undefined) {
+          const current = await database.owner.get(OWNER_KEY);
+          if (current?.token !== expectedOwner) {
+            aborted = true;
+            return;
+          }
         }
         if (sections.length > 0) {
           console.log('[DemoStorage] Inserting', sections.length, 'sections...');
@@ -299,7 +359,7 @@ export class DemoStorageService {
     // untouched and do not run the mismatch verification against it.
     if (aborted) {
       console.log('[DemoStorage] Seed superseded before write; left current identity data intact');
-      return;
+      return false;
     }
 
     // Verify data was inserted correctly
@@ -319,6 +379,7 @@ export class DemoStorageService {
     if (insertedReports !== reports.length) {
       console.error('[DemoStorage] MISMATCH: Expected', reports.length, 'reports but found', insertedReports, 'in IndexedDB');
     }
+    return true;
   }
 
   /**
@@ -333,14 +394,19 @@ export class DemoStorageService {
   /**
    * Clear all demo data.
    *
-   * `shouldAbort` (review !62 round 5, Critical 2) is checked as the FIRST
-   * statement inside the destructive transaction, not merely before it: the
-   * counts above are awaited reads, an interleaving window a superseded run
-   * could resume through and wipe the current identity's store. IndexedDB
-   * serializes overlapping-store transactions, so the in-transaction check
-   * cannot be overtaken once the transaction body runs.
+   * `expectedOwner` (review !62 round 7, finding 1) is the ORIGIN-WIDE ownership
+   * token this caller holds. It is re-read from IndexedDB as the FIRST statement
+   * inside the destructive transaction and compared there — not via a tab-local
+   * ref — so a sign-in in ANOTHER tab that claimed a new token aborts this clear
+   * instead of wiping the successor's data. IndexedDB serializes overlapping-store
+   * transactions, so the in-transaction check cannot be overtaken. Omit
+   * expectedOwner for an unconditional clear (legacy callers).
+   *
+   * Returns true if the data was cleared, false if the transaction ABORTED because
+   * ownership had moved on — the caller must propagate that so its continuation
+   * (a sign-out, a page reload) does not run on the successor's behalf.
    */
-  async clearAllData(shouldAbort?: () => boolean): Promise<void> {
+  async clearAllData(expectedOwner?: string): Promise<boolean> {
     const database = getDb();
 
     // Log what we're about to delete
@@ -354,18 +420,25 @@ export class DemoStorageService {
       globalVariables: existingGlobalVars
     });
 
-    await database.transaction('rw', [database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
-      if (shouldAbort?.()) {
-        console.log('[DemoStorage] Clear superseded before destructive transaction; aborting');
-        return;
+    let aborted = false;
+    await database.transaction('rw', [database.owner, database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+      if (expectedOwner !== undefined) {
+        const current = await database.owner.get(OWNER_KEY);
+        if (current?.token !== expectedOwner) {
+          console.log('[DemoStorage] Clear superseded: ownership moved to another sign-in; aborting');
+          aborted = true;
+          return;
+        }
       }
       await database.sections.clear();
       await database.reports.clear();
       await database.globalVariables.clear();
       await database.metadata.clear();
       await database.chartCatalog.clear();
+      // owner is intentionally NOT cleared — it identifies the current holder.
     });
-    
+    if (aborted) return false;
+
     // Verify everything is cleared
     const afterReports = await database.reports.count();
     const afterSections = await database.sections.count();
@@ -373,6 +446,7 @@ export class DemoStorageService {
       reportsAfterClear: afterReports,
       sectionsAfterClear: afterSections
     });
+    return true;
   }
 
   // ==========================================

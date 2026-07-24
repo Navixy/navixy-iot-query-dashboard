@@ -64,10 +64,14 @@ export type AgentChatResponse =
  *  s3:// URL. The artifact is fetched exactly once, at the moment the turn
  *  is produced, and persisted here. Preview, Apply, history load and page
  *  reload all read from here and NEVER re-fetch S3. See §3.4.6 and R28. */
+//  `client_turn_id` (review !62 round 7, finding 3): the ORIGINATING user turn's
+//  id, carried on the user turn AND stamped onto its assistant/error reply, so the
+//  client matches the exact user↔reply PAIR (see classifyTurnDelivery), never "any
+//  later assistant". NULL on legacy rows and any turn sent without an id.
 export type AgentTurn =
   | { role: 'user'; type?: never; content: string; result?: never; client_turn_id?: string }
-  | { role: 'assistant'; type?: 'question' | 'error'; content: string; result?: null; client_turn_id?: never }
-  | { role: 'assistant'; type: 'result'; content: string; result: AgentChatResult; client_turn_id?: never };
+  | { role: 'assistant'; type?: 'question' | 'error'; content: string; result?: null; client_turn_id?: string }
+  | { role: 'assistant'; type: 'result'; content: string; result: AgentChatResult; client_turn_id?: string };
 
 /** GET /api/agent/session 200 body. */
 export interface AgentSessionResponse {
@@ -77,7 +81,22 @@ export interface AgentSessionResponse {
    *  line of copy; it never disables anything. NOTE (D19): it says nothing about
    *  the AGENT's memory, which Bedrock holds server-side either way. */
   persisted: boolean;
+  /** EXPLICIT capability (review !62 round 7, finding 5a): whether these turns
+   *  round-trip client_turn_id. When true the client trusts id reconciliation
+   *  from THIS flag rather than inferring it from a visible row; false only on an
+   *  older 002 without the column. Absent on legacy responses (treat as false). */
+  supports_turn_ids?: boolean;
   messages: AgentTurn[];
+}
+
+/** GET /api/agent/turn-status?client_turn_id=… 200 body (review !62 round 7,
+ *  finding 5b): a durable per-turn receipt lookup so a delivered turn evicted from
+ *  the capped transcript is still confirmable. */
+export interface AgentTurnStatusResponse {
+  status: 'received' | 'answered' | 'unknown';
+  /** false for demo / older-schema tenants — then 'unknown' is uninformative and
+   *  the client keeps its transcript fallback. */
+  supported: boolean;
 }
 
 /**
