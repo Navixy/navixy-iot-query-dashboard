@@ -5,7 +5,7 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
-import { getAuthSessionId } from '@/lib/authSession';
+import { getAuthSessionId, getAuthToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { countMatchingUserTurns } from '@/components/ai-chat/turnDelivery';
 import type {
@@ -94,12 +94,25 @@ export async function fetchAgentSession(): Promise<AgentSessionResponse> {
  *  (ensureQueryData dedups onto the in-flight GET — no extra round-trip in the
  *  common case) to capture the true pre-send transcript before the POST fires.
  *  A failed read leaves the baseline 0 — the acknowledged residual a stable
- *  client turn id would close (see classifyTurnDelivery). */
+ *  client turn id would close (see classifyTurnDelivery).
+ *
+ *  REJECT-BEFORE-POST (review !62 round 6, Critical 1): making this async opened
+ *  a window where the awaited read spans a sign-out/sign-in. api.ts's
+ *  getAuthHeaders reads localStorage.auth_token at REQUEST time, so if the turn
+ *  were allowed to proceed after the identity flipped, mutationFn would POST it
+ *  under the NEW identity's token — A's prompt sent as B. queryClient.clear()
+ *  cannot cancel an executing mutation, and settleChatTurnIntoSessionCache runs
+ *  too late (the cross-identity write already happened server-side). So after
+ *  the await we re-check both the epoch (catches same-tab sign-out/in) and the
+ *  token (catches a cross-tab origin-wide swap that leaves this tab's epoch
+ *  intact); on any change we THROW. A rejected onMutate makes TanStack skip
+ *  mutationFn entirely — the POST never fires under the wrong identity. */
 export async function createAgentChatContext(
   queryClient: QueryClient,
   message: string,
 ): Promise<AgentChatMutationContext> {
   const authSessionAtSend = getAuthSessionId();
+  const tokenAtSend = getAuthToken();
   const sessionKey = agentSessionQueryKey(authSessionAtSend);
   let snapshotAtSend =
     queryClient.getQueryData<AgentSessionResponse>(sessionKey) ?? null;
@@ -113,6 +126,13 @@ export async function createAgentChatContext(
         retry: false,
       })
       .catch(() => null);
+  }
+  // The identity that will actually authorize the POST must still be the one
+  // that composed this turn — see the block comment above.
+  if (getAuthSessionId() !== authSessionAtSend || getAuthToken() !== tokenAtSend) {
+    throw new Error(
+      'Auth session changed before the message was sent; the turn was not delivered under a different identity.',
+    );
   }
   return {
     authSessionAtSend,

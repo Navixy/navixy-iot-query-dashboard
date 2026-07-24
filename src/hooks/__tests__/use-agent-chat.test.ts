@@ -83,6 +83,36 @@ describe('createAgentChatContext — send-time occurrence baseline (review !62 r
     expect(context.snapshotAtSend).toBeNull();
     expect(context.priorSameContentUserTurns).toBe(0);
   });
+
+  it('rejects before POST when the auth session changes during the baseline read (review !62 round 6, Critical 1)', async () => {
+    // The composer is usable while the initial GET is in flight, so the awaited
+    // ensureQueryData below can span a sign-out/sign-in. api.ts reads
+    // localStorage.auth_token at REQUEST time, so if mutationFn were allowed to
+    // run after the identity flipped it would POST A's prompt under B's token.
+    // onMutate must reject FIRST — TanStack never calls mutationFn when it does.
+    beginAuthSession(); // A
+    const client = new QueryClient(); // empty cache → forces the awaited read
+    vi.mocked(apiService.getAgentSession).mockImplementation(async () => {
+      // A signs out and B signs in WHILE the baseline GET is in flight.
+      endAuthSession();
+      beginAuthSession(); // B
+      return { data: session([]) };
+    });
+
+    await expect(createAgentChatContext(client, 'A prompt')).rejects.toThrow(/session/i);
+  });
+
+  it('does not reject when the identity is stable across the baseline read', async () => {
+    // The guard must fire ONLY on an actual identity change — a normal send
+    // whose baseline read resolves under the same epoch proceeds to mutationFn.
+    beginAuthSession();
+    const client = new QueryClient();
+    vi.mocked(apiService.getAgentSession).mockResolvedValue({
+      data: session([user('hi'), assistant('hello')]),
+    });
+    const context = await createAgentChatContext(client, 'next');
+    expect(context.priorSameContentUserTurns).toBe(0);
+  });
 });
 
 describe('settleChatTurnIntoSessionCache — guarded write', () => {
