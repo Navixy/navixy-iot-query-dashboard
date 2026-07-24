@@ -281,30 +281,53 @@ const AiChat = () => {
               },
             ]);
           } else {
-            // UNCERTAIN (review !62 round 4, Important 1a): no GET ever
-            // succeeded — the network is down, and we CANNOT tell "never sent"
-            // from "sent, still processing, response lost". Do NOT restore the
-            // draft: an automatic retry could double-feed a turn the server may
-            // have taken. No data is lost — the user's own message is still the
-            // optimistic bubble above; the composer just stays empty so the
-            // re-send is a deliberate choice after the page reconciles.
-            setLiveBubbles((prev) => [
-              ...prev,
-              {
-                id: nextLiveId(),
-                role: 'assistant',
-                text: "We couldn't reach the server to confirm your last message was delivered. Reload the page to check before sending it again.",
-                isError: true,
-              },
-            ]);
+            // UNCERTAIN (review !62 round 4 Imp. 1a; round 5 Imp. 3): no GET
+            // ever succeeded, OR an early 'lost' that later failed probes never
+            // re-confirmed. We CANNOT tell "never sent" from "sent, still
+            // processing, response lost". Do NOT restore the draft: an automatic
+            // retry could double-feed a turn the server may have taken.
+            //
+            // The message must still SURVIVE (round 5, Critical 1). liveBubbles
+            // is mount-local, so on a REMOUNT the optimistic user bubble died
+            // with the previous mount and the text would be visible NOWHERE.
+            // Re-materialize it from the failed mutation (which outlives the
+            // mount) unless this mount already shows it, and KEEP the mutation in
+            // the cache below so both the text and a later authoritative re-check
+            // survive further remounts. Shown as a transcript bubble, not a
+            // composer draft — preserved without becoming a one-click resend.
+            setLiveBubbles((prev) => {
+              const lastUser = [...prev].reverse().find((b) => b.role === 'user');
+              const restored: ChatBubble[] =
+                lastUser?.text === failed.message
+                  ? []
+                  : [{ id: nextLiveId(), role: 'user', text: failed.message }];
+              return [
+                ...prev,
+                ...restored,
+                {
+                  id: nextLiveId(),
+                  role: 'assistant',
+                  text: "We couldn't reach the server to confirm your last message was delivered. Reload the page to check before sending it again.",
+                  isError: true,
+                },
+              ];
+            });
           }
 
-          // Handled — REMOVE it so a later mount does not surface it again.
-          const mutationCache = queryClient.getMutationCache();
-          const mutation = mutationCache
-            .getAll()
-            .find((m) => m.mutationId === failed.mutationId);
-          if (mutation) mutationCache.remove(mutation);
+          // Handled — REMOVE it so a later mount does not surface it again. The
+          // UNCERTAIN outcome is the deliberate exception: it KEEPS the mutation
+          // so the message text and the pending re-check survive further
+          // remounts (round 5, Critical 1). A later mount whose network has
+          // recovered then reconciles it authoritatively; until then each mount
+          // re-materializes the message from it. gcTime evicts it if it never
+          // resolves, so it cannot accumulate forever.
+          if (outcome !== 'uncertain') {
+            const mutationCache = queryClient.getMutationCache();
+            const mutation = mutationCache
+              .getAll()
+              .find((m) => m.mutationId === failed.mutationId);
+            if (mutation) mutationCache.remove(mutation);
+          }
         } finally {
           setReconcilingCount((c) => c - 1);
         }
