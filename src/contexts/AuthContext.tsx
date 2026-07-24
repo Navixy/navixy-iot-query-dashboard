@@ -426,10 +426,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   ): Promise<{ error: Error | null }> => {
     try {
       console.log('[AuthContext] Starting demo sign-in...', { email, role });
-      
+
+      // Claim a new auth generation UP FRONT (review !62 round 6, Critical 2):
+      // the clear + seed below mutate the per-origin SINGLETON IndexedDB across
+      // several awaits. A later sign-in/out — or a concurrent demo sign-in —
+      // bumps the generation, and every stage here (the destructive IndexedDB
+      // ops AND the final session establishment) re-checks it so a superseded
+      // attempt neither clobbers the new identity's store nor re-establishes a
+      // session it no longer owns. Round 5 added this predicate to demoStorage
+      // but only initializeDemoStorage passed it; signInDemo (the primary demo
+      // path) still cleared and seeded unguarded. The generation was previously
+      // bumped only just before setUser — too late to protect the clear/seed.
+      const attemptGeneration = (authGenerationRef.current += 1);
+      const isStale = () => authGenerationRef.current !== attemptGeneration;
+
       // IMPORTANT: Clear IndexedDB first to remove any leftovers from previous sessions
       console.log('[AuthContext] Clearing IndexedDB before demo login...');
-      await demoStorageService.clearAllData();
+      if (isStale()) return { error: new Error('Demo sign-in superseded before it started') };
+      await demoStorageService.clearAllData(isStale);
       console.log('[AuthContext] IndexedDB cleared successfully');
 
       // First, authenticate with demo flag to get the token and initial access
@@ -531,13 +545,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Seed the demo database
       console.log('[AuthContext] Seeding IndexedDB with fetched data...');
+      if (isStale()) return { error: new Error('Demo sign-in superseded before seeding') };
       await demoStorageService.seedFromBackend({
         sections,
         reports,
         globalVariables,
         chartCatalog,
         userId
-      });
+      }, isStale);
 
       // Delete the temporary demo user from the database
       // This cleans up the user record since all data is now in IndexedDB
@@ -558,13 +573,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.warn('[AuthContext] Error deleting demo user:', deleteError);
       }
 
+      // A newer sign-in/out or concurrent demo attempt took over while we
+      // seeded — do not resurrect this attempt's identity over theirs (review
+      // !62 round 6, Critical 2). Checked immediately before the SYNCHRONOUS
+      // state writes below, so nothing can interleave between guard and writes.
+      if (isStale()) {
+        return { error: new Error('Demo sign-in was superseded before it completed') };
+      }
+
       // Enable demo mode
       setDemoMode(true);
       setDemoUserId(userId);
       setDemoModeState(true);
 
-      // Set user and token
-      authGenerationRef.current += 1; // same reason as signIn
+      // Set user and token. The auth generation was already bumped up front (see
+      // the top of this function), which also outruns any in-flight verifyToken.
       setUser(loginData.user);
       setToken(authToken);
       // Same rule as signIn: every sign-in mints a new auth-session epoch.
@@ -625,7 +648,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * Clear all demo data from IndexedDB
    */
   const clearDemoData = async () => {
-    await demoStorageService.clearAllData();
+    // Even this deliberate clear is a destructive caller (review !62 round 6,
+    // Critical 2): guard it so a sign-out/sign-in landing during the wipe cannot
+    // clear the NEW identity's singleton store.
+    const generation = authGenerationRef.current;
+    await demoStorageService.clearAllData(() => authGenerationRef.current !== generation);
     console.log('[AuthContext] Demo data cleared');
   };
 
@@ -637,6 +664,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!token || !user) {
       return { error: new Error('Not authenticated') };
     }
+
+    // Capture the generation so a sign-out/sign-in landing mid-reseed aborts the
+    // destructive seed before it wipes the singleton store and writes this (now
+    // former) identity's tenant data over the new one (review !62 round 6,
+    // Critical 2). A reseed is not an auth transition, so capture WITHOUT
+    // bumping — only signIn/signOut move the generation.
+    const reseedGeneration = authGenerationRef.current;
+    const isStale = () => authGenerationRef.current !== reseedGeneration;
 
     try {
       // Fetch all data in parallel from the backend
@@ -679,13 +714,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       // Reseed the demo database (this clears existing data first)
+      if (isStale()) {
+        return { error: new Error('Reseed was superseded by a sign-in change') };
+      }
       await demoStorageService.seedFromBackend({
         sections,
         reports,
         globalVariables,
         chartCatalog,
         userId: user.id
-      });
+      }, isStale);
 
       console.log('[AuthContext] Demo data reseeded from backend', {
         sections: sections.length,
