@@ -17,7 +17,11 @@ import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
 import { EmptyState } from '@/components/ai-chat/EmptyState';
 import { trimHistoryOverlap } from '@/components/ai-chat/historyOverlap';
-import { classifyTurnDelivery, type TurnDelivery } from '@/components/ai-chat/turnDelivery';
+import {
+  classifyTurnDelivery,
+  reconcileOutcome,
+  type TurnDelivery,
+} from '@/components/ai-chat/turnDelivery';
 import type {
   AgentChatRequest,
   AgentSessionResponse,
@@ -198,6 +202,11 @@ const AiChat = () => {
           // (round 4, Important 1a/1b).
           let authoritative: AgentSessionResponse | null = null;
           let delivery: TurnDelivery = 'lost';
+          // Whether the MOST RECENT poll attempt returned data. A 'lost' verdict
+          // is only trustworthy if the last probe succeeded and still showed the
+          // turn absent — an early 'lost' that later FAILED probes never
+          // re-confirmed is the overtake race, i.e. uncertain (round 5, Important 3).
+          let lastGetSucceeded = false;
           const backoffMs = [0, 700, 1400];
           for (let attempt = 0; attempt < backoffMs.length; attempt++) {
             if (backoffMs[attempt] > 0) {
@@ -212,6 +221,7 @@ const AiChat = () => {
               handledFailedTurnsRef.current.delete(failed.mutationId);
               return;
             }
+            lastGetSucceeded = response?.data != null;
             if (!response?.data) continue; // this GET failed; keep the last good one
             authoritative = response.data;
             delivery = classifyTurnDelivery(
@@ -223,7 +233,8 @@ const AiChat = () => {
             // 'lost' on a SUCCESSFUL GET may still be the overtake race; poll again.
           }
 
-          if (authoritative && delivery !== 'lost') {
+          const outcome = reconcileOutcome(authoritative !== null, delivery, lastGetSucceeded);
+          if (authoritative && outcome === 'delivered') {
             // The server HAS the turn. Render server truth wholesale: the
             // authoritative transcript replaces both sources (older client-only
             // error bubbles vanish with it). NO draft restore — the message is
@@ -251,9 +262,11 @@ const AiChat = () => {
                   ]
                 : [],
             );
-          } else if (authoritative) {
-            // Every successful GET agreed the turn is ABSENT, even after the
-            // poll closed the overtake window: it never reached the server.
+          } else if (authoritative && outcome === 'confirmed-lost') {
+            // The MOST RECENT successful GET agreed the turn is ABSENT, after the
+            // poll closed the overtake window: it never reached the server. (An
+            // early absence that later failed probes could not re-confirm is
+            // NOT this branch — it falls through to uncertain, round 5 Imp. 3.)
             // Now it is safe to give the message back (the send cleared the
             // composer optimistically; a 429/network drop must not destroy a
             // carefully-typed request). The guard keeps anything typed since.

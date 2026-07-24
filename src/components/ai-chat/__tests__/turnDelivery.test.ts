@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyTurnDelivery, countMatchingUserTurns } from '../turnDelivery';
+import { classifyTurnDelivery, countMatchingUserTurns, reconcileOutcome } from '../turnDelivery';
 import type { AgentTurn } from '@/types/agent';
 
 const user = (content: string): AgentTurn => ({ role: 'user', content });
@@ -81,6 +81,30 @@ describe('classifyTurnDelivery — lost-response triage (review !62 rounds 3–4
       const history = [user('refresh'), user('refresh'), assistant('answer to the 2nd')];
       expect(classifyTurnDelivery(history, 'refresh', 1)).toBe('completed');
     });
+  });
+});
+
+describe('reconcileOutcome — trusting a poll verdict (review !62 round 5, Important 3)', () => {
+  it('delivered: a positive verdict is trusted whenever any GET saw it', () => {
+    expect(reconcileOutcome(true, 'completed', true)).toBe('delivered');
+    expect(reconcileOutcome(true, 'received', true)).toBe('delivered');
+    // Even if the very last probe then failed, a turn seen delivered cannot un-happen.
+    expect(reconcileOutcome(true, 'completed', false)).toBe('delivered');
+  });
+
+  it('confirmed-lost: the MOST RECENT probe succeeded and still showed the turn absent', () => {
+    expect(reconcileOutcome(true, 'lost', true)).toBe('confirmed-lost');
+  });
+
+  it('uncertain: an early "lost" that later FAILED probes never re-confirmed (the overtake race)', () => {
+    // First GET overtook the backend appendTurns and read the turn absent; the
+    // two later polls failed, so the absence was never re-confirmed after the
+    // overtake window. Restoring the draft here could double-feed the agent.
+    expect(reconcileOutcome(true, 'lost', false)).toBe('uncertain');
+  });
+
+  it('uncertain: no GET ever succeeded', () => {
+    expect(reconcileOutcome(false, 'lost', false)).toBe('uncertain');
   });
 });
 

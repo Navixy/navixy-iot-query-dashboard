@@ -79,3 +79,37 @@ export function classifyTurnDelivery(
   }
   return 'received';
 }
+
+/** What the failed-turn reconciler should DO once its bounded poll has run. */
+export type ReconcileOutcome =
+  /** The server has the turn (completed/received): render server truth, no draft. */
+  | 'delivered'
+  /** The turn provably never reached the server: safe to restore the draft. */
+  | 'confirmed-lost'
+  /** We could not confirm either way: preserve the message, do NOT restore the
+   *  draft (an auto-retry might double-feed a turn the server did take). */
+  | 'uncertain';
+
+/**
+ * Turns the poll's results into the reconcile branch to take.
+ *
+ * A POSITIVE delivery (completed/received) is trustworthy whenever any GET saw
+ * it — it cannot un-happen. A 'lost' verdict is the subtle one: the route does
+ * loadHistory BEFORE it appends the user turn, so the FIRST GET can overtake an
+ * in-flight POST and read the turn as absent. The bounded poll re-checks to
+ * close that window — but only if the later probes actually SUCCEED. If an early
+ * GET said 'lost' and every later probe then FAILED, the absence was never
+ * re-confirmed after the overtake window and the true state is UNCERTAIN, not
+ * lost — restoring the draft there would invite re-sending a turn the server may
+ * have taken (review !62 round 5, Important 3). So 'lost' is only trusted when
+ * the MOST RECENT probe succeeded and still showed the turn missing.
+ */
+export function reconcileOutcome(
+  anyGetSucceeded: boolean,
+  delivery: TurnDelivery,
+  lastGetSucceeded: boolean,
+): ReconcileOutcome {
+  if (anyGetSucceeded && delivery !== 'lost') return 'delivered';
+  if (anyGetSucceeded && delivery === 'lost' && lastGetSucceeded) return 'confirmed-lost';
+  return 'uncertain';
+}
