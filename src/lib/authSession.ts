@@ -45,3 +45,15 @@ export function endAuthSession(): void {
 export function getAuthSessionId(): string | null {
   return currentAuthSessionId;
 }
+
+/**
+ * The bearer token the API layer will actually send: api.ts reads this SAME
+ * localStorage key at request time (getAuthHeaders). Captured at send time and
+ * re-compared after any await so a turn is never POSTed under a token that
+ * replaced the sender's mid-flight — a cross-tab sign-in swaps this origin-wide
+ * value without moving this tab's epoch (review !62 round 6, Critical 1). Guarded
+ * for non-browser contexts (node-env unit tests) where localStorage is absent.
+ */
+export function getAuthToken(): string | null {
+  return typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
+}
