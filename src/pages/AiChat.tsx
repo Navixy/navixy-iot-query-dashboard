@@ -24,7 +24,9 @@ import {
   classifyTurnDelivery,
   locksComposerAwaitingReply,
   reconcileOutcome,
+  reconcileReceiptOutcome,
   sessionAwaitsReply,
+  type ReconcileOutcome,
   type TurnDelivery,
 } from '@/components/ai-chat/turnDelivery';
 import type {
@@ -33,6 +35,18 @@ import type {
   AgentTurn,
   ChatBubble,
 } from '@/types/agent';
+
+/**
+ * How recent a failed turn must be for a `supported + 'unknown'` receipt to be
+ * trusted as CONFIRMED non-delivery (review !62 round 8, finding 3). The backend
+ * prunes chat_turn_receipts older than 7 days (chatStore.pruneOldReceipts), but a
+ * failed mutation lives on gcTime: Infinity — so past that window an 'unknown'
+ * could just mean the receipt was pruned, not that the turn was lost. Kept well
+ * under the server's 7-day prune (with margin for clock skew / prune timing); a
+ * turn reconciled beyond it degrades to 'uncertain' rather than restoring a draft
+ * that might re-feed a turn the agent already took. MUST stay < the server prune.
+ */
+const RECEIPT_RETENTION_SAFETY_MS = 6 * 24 * 60 * 60 * 1000; // 6 days
 
 /**
  * One renderer, two sources: rehydrated history turns and live turns both
@@ -107,6 +121,10 @@ const AiChat = () => {
       priorSameContentUserTurns:
         (mutation.state.context as AgentChatMutationContext | undefined)
           ?.priorSameContentUserTurns ?? 0,
+      // When the turn was submitted (review !62 round 8, finding 3): a durable
+      // receipt is only trusted as proof of loss while it is guaranteed to still
+      // exist — see RECEIPT_RETENTION_SAFETY_MS.
+      submittedAt: mutation.state.submittedAt,
     }),
   });
   const handledFailedTurnsRef = useRef<Set<number>>(new Set());
@@ -286,22 +304,32 @@ const AiChat = () => {
             // 'lost' on a SUCCESSFUL GET may still be the overtake race; poll again.
           }
 
-          // DURABLE RECEIPT RECONFIRMATION (review !62 round 7, finding 5b): on the
-          // id path a 'lost' only means "not in the capped transcript" — the turn's
-          // rows can be evicted by 100 newer ones while its mutation persists
-          // (gcTime: Infinity). Confirm against the receipt, which lives outside
-          // that window, before trusting 'lost'. supported:false (older schema)
-          // leaves the transcript verdict untouched.
+          // DURABLE RECEIPT RECONFIRMATION (review !62 round 7 finding 5b; round 8
+          // finding 3): on the id path a 'lost' only means "not in the capped
+          // transcript" — the turn's rows can be evicted by 100 newer ones while
+          // its mutation persists (gcTime: Infinity). The receipt lives outside
+          // that window and is the ONLY authority, so 'lost' must be PROVEN.
+          // reconcileReceiptOutcome yields 'confirmed-lost' ONLY on a supported+
+          // unknown receipt within the retention window; an UNAVAILABLE (lookup
+          // failed), UNSUPPORTED (older schema / demo) or EXPIRED receipt is NOT
+          // proof of loss and yields 'uncertain', never a resendable draft.
+          let outcome: ReconcileOutcome;
           if (delivery === 'lost' && lastGetSucceeded && supportsTurnIds && failed.clientTurnId) {
             const receipt = await apiService.getAgentTurnStatus(failed.clientTurnId).catch(() => null);
             if (!failureHandlingAliveRef.current) {
               handledFailedTurnsRef.current.delete(failed.mutationId);
               return;
             }
-            delivery = applyReceiptToDelivery(delivery, receipt?.data ?? null);
+            const receiptData = receipt?.data ?? null;
+            const withinRetentionWindow =
+              Date.now() - failed.submittedAt < RECEIPT_RETENTION_SAFETY_MS;
+            outcome = reconcileReceiptOutcome(receiptData, withinRetentionWindow);
+            // Fold the receipt into `delivery` too so the rendering below (the
+            // 'received' notice, the composer lock) reflects a receipt upgrade.
+            delivery = applyReceiptToDelivery(delivery, receiptData);
+          } else {
+            outcome = reconcileOutcome(authoritative !== null, delivery, lastGetSucceeded);
           }
-
-          const outcome = reconcileOutcome(authoritative !== null, delivery, lastGetSucceeded);
           // Lock the composer if this turn may still be running on the agent
           // ('received') or its fate is unknown ('uncertain') — a second POST now
           // would race it (review !62 round 6, Important 4). Sticky once set: only
