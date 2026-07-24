@@ -44,62 +44,68 @@ export function countMatchingUserTurns(history: AgentTurn[], content: string): n
 
 /**
  * Classifies what happened to a chat turn whose HTTP RESPONSE was lost
- * (review !62 rounds 3–4). POST /chat is not idempotent: the server persists
+ * (review !62 rounds 3–6). POST /chat is not idempotent: the server persists
  * the user turn at receipt and the assistant turn after the agent finishes,
  * and the agent's memory is stateful (D19). A transport error therefore does
  * NOT mean the turn failed — the server may have processed it completely with
- * only the response dying. An authoritative GET /session tells the states
- * apart, but ONLY relative to a SEND-TIME BASELINE.
+ * only the response dying. An authoritative GET /session tells the states apart.
  *
- * `priorOccurrences` is how many user turns with this exact content the client
- * already knew about at send time (from the session-cache snapshot). Without
- * it, a repeated prompt is silent data loss (review !62 round 4, Important 2):
- * if the user successfully sent "refresh this dashboard" earlier and sends it
- * again, and THAT second POST is genuinely lost, the OLD identical turn matches
- * and the attempt is wrongly called 'completed' — the failed mutation is
- * dropped, the draft is not restored, and the new command vanishes. Requiring a
- * match STRICTLY BEYOND the baseline means only a turn the server added THIS
- * time counts as delivery.
+ * PRIMARY: MATCH BY client_turn_id (review !62 round 6, findings 4/5 — the fix
+ * the reviewer asked for across rounds 3–6). The browser mints a UUID per send;
+ * the server persists it on the user turn and returns it here. Matching by that
+ * id is DETERMINISTIC: it identifies THIS exact send, so concurrent identical
+ * turns from another tab, a repeated prompt, and the sliding 100-turn cap are
+ * all unambiguous — none of which content counting can resolve. The id is
+ * trusted only when the server actually round-trips ids: if ANY user turn in the
+ * transcript carries one, the server persists them, so the ABSENCE of ours is
+ * proof the send never landed. If NO user turn carries one (a tenant on an older
+ * 002 without the column, or a pre-feature transcript), fall through.
  *
- * - 'completed' — a new occurrence exists AND an assistant turn follows the
- *   newest matching user turn. The turn SUCCEEDED; render server truth. Never
- *   restore the draft here: it would invite re-sending a message the agent
- *   already consumed (R20).
- * - 'received' — a new occurrence exists with no assistant after it yet: the
- *   server got it and the agent may still be working (it keeps processing
- *   after a client disconnect). Do not restore the draft.
- * - 'lost' — no occurrence beyond the baseline: the server transcript does not
- *   contain this send. Retrying is safe; the caller restores the draft — but
- *   ONLY on a SUCCESSFUL, settled GET, never on a failed or in-flight one
- *   (that ambiguity is the caller's 'uncertain' path, not 'lost').
+ * FALLBACK: content + a SEND-TIME occurrence baseline. `priorOccurrences` is how
+ * many user turns with this exact content the client already knew about at send
+ * time. Without it a repeated prompt is silent data loss (round 4, Important 2):
+ * a genuinely-lost re-send of "refresh" would match the OLD identical turn and be
+ * called 'completed'. Requiring a match STRICTLY BEYOND the baseline means only a
+ * turn the server added THIS time counts. This path keeps its documented residual
+ * (the cap can evict an old identical turn as ours lands, degrading to a safe
+ * draft restore) — but it now only runs where no id is available; with the id the
+ * residual is closed.
+ *
+ * - 'completed' — the turn is present AND an assistant turn follows it. Succeeded;
+ *   render server truth. Never restore the draft (would re-feed the agent, R20).
+ * - 'received' — the turn is present with no assistant after it yet: the server
+ *   got it and the agent may still be working. Do not restore the draft; the
+ *   caller keeps the composer locked (Important 4).
+ * - 'lost' — the turn is absent: retrying is safe and the caller restores the
+ *   draft, but ONLY on a SUCCESSFUL settled GET (else it is 'uncertain').
  *
  * An assistant turn of any type counts, including type:'error': an in-band
- * failure the server persisted IS the turn's outcome. Completed-vs-received
- * looks after the NEWEST matching user turn — our just-sent turn is the newest
- * of its content, so an assistant after it is its answer even if a concurrent
- * tab appended around it.
- *
- * RESIDUAL EDGE (no client turn id exists — that is the real fix, deferred):
- * the newest-MAX_TURNS window can evict an OLD identical turn exactly as ours
- * is appended, leaving the count equal to the baseline; the turn is then called
- * 'lost' though it was delivered. That degrades to a draft restore (safe-ish:
- * text preserved, a double-feed only on an explicit manual resend), never to
- * silent loss. Requires the transcript within ~2 of the 100 cap AND a prior
- * identical turn old enough to slide — narrow, and strictly better than the
- * newest-match rule it replaces.
+ * failure the server persisted IS the turn's outcome.
  */
 export function classifyTurnDelivery(
   history: AgentTurn[],
   sentMessage: string,
+  clientTurnId: string | null,
   priorOccurrences = 0,
 ): TurnDelivery {
-  // Indices of every matching user turn, oldest-first.
+  // PRIMARY — deterministic id match, when the server round-trips ids.
+  if (clientTurnId && history.some((t) => t.role === 'user' && t.client_turn_id)) {
+    const idx = history.findIndex(
+      (t) => t.role === 'user' && t.client_turn_id === clientTurnId,
+    );
+    if (idx === -1) return 'lost';
+    for (let j = idx + 1; j < history.length; j++) {
+      if (history[j].role === 'assistant') return 'completed';
+    }
+    return 'received';
+  }
+
+  // FALLBACK — content + send-time occurrence baseline (no id support).
   const matches: number[] = [];
   for (let i = 0; i < history.length; i++) {
     const turn = history[i];
     if (turn.role === 'user' && turn.content === sentMessage) matches.push(i);
   }
-  // No occurrence beyond what we already knew at send time → not delivered.
   if (matches.length <= priorOccurrences) return 'lost';
 
   const newestMatch = matches[matches.length - 1];
@@ -141,4 +147,22 @@ export function reconcileOutcome(
   if (anyGetSucceeded && delivery !== 'lost') return 'delivered';
   if (anyGetSucceeded && delivery === 'lost' && lastGetSucceeded) return 'confirmed-lost';
   return 'uncertain';
+}
+
+/**
+ * After reconciliation, must the composer STAY LOCKED (review !62 round 6,
+ * Important 4)? A turn that reached the server but has no assistant reply yet
+ * ('received'), or one we could not confirm ('uncertain'), may still be running
+ * on the STATEFUL agent — a second POST now would race that invocation and
+ * interleave the transcript out of order. Only 'completed' (the reply is already
+ * present) and 'confirmed-lost' (never arrived, so the draft is restored for a
+ * clean retry) are safe to unlock. Reloading the page re-observes the session and
+ * is the explicit way out of the lock.
+ */
+export function locksComposerAwaitingReply(
+  outcome: ReconcileOutcome,
+  delivery: TurnDelivery,
+): boolean {
+  if (outcome === 'uncertain') return true;
+  return outcome === 'delivered' && delivery === 'received';
 }
