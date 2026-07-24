@@ -16,6 +16,7 @@ import { createElement } from 'react';
 import { act, cleanup, render } from '@testing-library/react';
 import { AuthProvider, useAuth } from '../AuthContext';
 import { demoStorageService } from '@/services/demoStorage';
+import { endAuthSession } from '@/lib/authSession';
 
 vi.mock('@/services/demoStorage', () => ({
   demoStorageService: {
@@ -80,6 +81,7 @@ const CREDS = ['demo@navixy.io', 'admin', 'iot-url', 'user-url'] as const;
 
 beforeEach(() => {
   localStorage.clear();
+  endAuthSession(); // reset the tab-scoped anchors between tests (round 8, finding 2)
   vi.clearAllMocks();
   vi.mocked(demoStorageService.claimDemoOwnership).mockResolvedValue('owner-1');
   vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-1');
@@ -115,18 +117,23 @@ describe('signInDemo — origin-wide ownership token (review !62 round 7, findin
   });
 });
 
-describe('reseedDemoData — asserts current ownership (review !62 round 7, finding 1)', () => {
-  it('reads the current owner and passes it to the seed', async () => {
+describe('reseedDemoData — asserts THIS TAB\'s owner anchor (review !62 round 8, finding 2)', () => {
+  it('passes the token this tab claimed at sign-in, NOT a fresh readDemoOwner', async () => {
     mount();
     await act(async () => {
-      await ctx.signInDemo(...CREDS); // establish an authenticated demo session
+      await ctx.signInDemo(...CREDS); // anchors this tab to 'owner-1'
     });
+    // signInDemo reads the owner once (its own post-seed supersession check);
+    // clear that history so the assertion below measures reseed alone.
+    vi.mocked(demoStorageService.readDemoOwner).mockClear();
     vi.mocked(demoStorageService.seedFromBackend).mockClear();
 
     await act(async () => {
       await ctx.reseedDemoData();
     });
-    expect(demoStorageService.readDemoOwner).toHaveBeenCalled();
+    // The fix: reseed asserts the tab's OWN anchor, so it never re-reads the
+    // current owner (which for a stale tab would be the successor's token).
+    expect(demoStorageService.readDemoOwner).not.toHaveBeenCalled();
     expect(demoStorageService.seedFromBackend).toHaveBeenCalledWith(
       expect.objectContaining({ userId: 'u1' }),
       'owner-1',
@@ -165,5 +172,48 @@ describe('clearDemoData — propagates the abort (review !62 round 7, finding 1)
       result = await ctx.clearDemoData();
     });
     expect(result).toEqual({ aborted: false });
+  });
+});
+
+describe('a superseded tab asserts its OWN anchor (review !62 round 8, finding 2)', () => {
+  it('clearDemoData passes the tab\'s claimed token, not the successor\'s, and propagates the abort', async () => {
+    mount();
+    await act(async () => {
+      await ctx.signInDemo(...CREDS); // this tab anchored to 'owner-1'
+    });
+    // A newer demo sign-in (another tab) is now the owner; the singleton store's
+    // in-transaction guard aborts a clear that does not hold the CURRENT token.
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-successor');
+    vi.mocked(demoStorageService.clearAllData).mockResolvedValue(false);
+    vi.mocked(demoStorageService.clearAllData).mockClear();
+
+    let result: { aborted: boolean } | undefined;
+    await act(async () => {
+      result = await ctx.clearDemoData();
+    });
+    // The fix: it asserts the tab's OWN anchor ('owner-1'), never re-reading the
+    // successor's current token — so the storage guard can and does abort.
+    expect(demoStorageService.clearAllData).toHaveBeenCalledWith('owner-1');
+    expect(result).toEqual({ aborted: true });
+  });
+
+  it('reseedDemoData passes the tab\'s claimed token and errors when superseded', async () => {
+    mount();
+    await act(async () => {
+      await ctx.signInDemo(...CREDS);
+    });
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-successor');
+    vi.mocked(demoStorageService.seedFromBackend).mockResolvedValue(false);
+    vi.mocked(demoStorageService.seedFromBackend).mockClear();
+
+    let result: { error: Error | null } | undefined;
+    await act(async () => {
+      result = await ctx.reseedDemoData();
+    });
+    expect(demoStorageService.seedFromBackend).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'u1' }),
+      'owner-1',
+    );
+    expect(result?.error).toBeInstanceOf(Error);
   });
 });
