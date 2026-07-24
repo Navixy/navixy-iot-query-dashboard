@@ -1,6 +1,35 @@
-import type { AgentTurn } from '@/types/agent';
+import type { AgentTurn, ChatBubble } from '@/types/agent';
 
 export type TurnDelivery = 'completed' | 'received' | 'lost';
+
+/** Shown when reconciliation could not confirm a lost turn either way. */
+export const UNCERTAIN_DELIVERY_NOTICE =
+  "We couldn't reach the server to confirm your last message was delivered. Reload the page to check before sending it again.";
+
+/**
+ * Builds the transcript for the UNCERTAIN reconcile outcome (review !62 round 5,
+ * Critical 1). The optimistic user bubble is mount-local, so on a REMOUNT it is
+ * gone and the message would be visible nowhere; re-materialize it from the
+ * failed mutation (which outlives the mount). On the ORIGINAL mount the bubble
+ * is already the last user turn — do not add a second copy. Either way append
+ * the uncertain notice. The message is shown as a transcript bubble, never
+ * restored to the composer, so it is preserved without becoming a one-click
+ * resend of a turn the server may have taken.
+ */
+export function appendUncertainNotice(
+  prev: ChatBubble[],
+  message: string,
+  makeId: () => string,
+): ChatBubble[] {
+  const lastUser = [...prev].reverse().find((b) => b.role === 'user');
+  const restored: ChatBubble[] =
+    lastUser?.text === message ? [] : [{ id: makeId(), role: 'user', text: message }];
+  return [
+    ...prev,
+    ...restored,
+    { id: makeId(), role: 'assistant', text: UNCERTAIN_DELIVERY_NOTICE, isError: true },
+  ];
+}
 
 /** Number of USER turns in `history` whose content is exactly `content`. The
  *  send-time value is the reconciliation baseline below; the reconcile-time
