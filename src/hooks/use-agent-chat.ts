@@ -71,15 +71,49 @@ export interface AgentChatMutationContext {
   priorSameContentUserTurns: number;
 }
 
+/** The GET /session fetcher, shared by the session query and the baseline
+ *  read below so both throw on response.error identically. */
+export async function fetchAgentSession(): Promise<AgentSessionResponse> {
+  const response = await apiService.getAgentSession();
+  if (response.error) {
+    throw new Error(response.error.message);
+  }
+  return response.data!;
+}
+
 /** onMutate body, exported for tests. Receives the turn's message so it can
- *  record the send-time occurrence baseline for that exact content. */
-export function createAgentChatContext(
+ *  record the send-time occurrence baseline for that exact content.
+ *
+ *  ASYNC because the baseline must be AUTHORITATIVE (review !62 round 5,
+ *  Important 4): the composer is usable while the initial GET is still in
+ *  flight, so a turn can be sent before the session cache exists. Baselining
+ *  against an empty cache (0) there is unsound — if this send is lost and the
+ *  server already holds an identical earlier turn, the reconciler would see
+ *  that old occurrence and call the lost send 'completed', silently dropping
+ *  it. When the snapshot is absent we therefore AWAIT the session read
+ *  (ensureQueryData dedups onto the in-flight GET — no extra round-trip in the
+ *  common case) to capture the true pre-send transcript before the POST fires.
+ *  A failed read leaves the baseline 0 — the acknowledged residual a stable
+ *  client turn id would close (see classifyTurnDelivery). */
+export async function createAgentChatContext(
   queryClient: QueryClient,
   message: string,
-): AgentChatMutationContext {
+): Promise<AgentChatMutationContext> {
   const authSessionAtSend = getAuthSessionId();
-  const snapshotAtSend =
-    queryClient.getQueryData<AgentSessionResponse>(agentSessionQueryKey(authSessionAtSend)) ?? null;
+  const sessionKey = agentSessionQueryKey(authSessionAtSend);
+  let snapshotAtSend =
+    queryClient.getQueryData<AgentSessionResponse>(sessionKey) ?? null;
+  if (snapshotAtSend === null && authSessionAtSend !== null) {
+    snapshotAtSend = await queryClient
+      // retry:false so a wedged read cannot delay the POST behind three backoffs
+      // — it matches useAgentSession's own retry policy.
+      .ensureQueryData<AgentSessionResponse>({
+        queryKey: sessionKey,
+        queryFn: fetchAgentSession,
+        retry: false,
+      })
+      .catch(() => null);
+  }
   return {
     authSessionAtSend,
     snapshotAtSend,
@@ -148,13 +182,7 @@ export function useAgentSession() {
     // Without an authenticated session there is no identity to scope by and no
     // token worth spending a 401 on — the page redirects to /login anyway.
     enabled: !!user && authSessionId !== null,
-    queryFn: async () => {
-      const response = await apiService.getAgentSession();
-      if (response.error) {
-        throw new Error(response.error.message);
-      }
-      return response.data!;
-    },
+    queryFn: fetchAgentSession,
     // retry: false — for a DIFFERENT reason than the mutation's below: a failed
     // session read must not delay a usable page by three retries. The page is
     // fully functional without history (the composer never gates on this query
