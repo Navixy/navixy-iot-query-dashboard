@@ -3,7 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { demoStorageService } from '@/services/demoStorage';
 import { isDemoMode, setDemoMode, setDemoUserId } from '@/services/demoApi';
 import { queryClient } from '@/lib/queryClient';
-import { beginAuthSession, endAuthSession, getAuthSessionId } from '@/lib/authSession';
+import {
+  beginAuthSession,
+  endAuthSession,
+  getAuthSessionId,
+  getTabSessionToken,
+  isForeignAuthChange,
+} from '@/lib/authSession';
 import type { ChartCatalog } from '@/types/chart-catalog';
 
 /**
@@ -155,8 +161,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             // KEEP the epoch across a refreshUser() re-verify of the same
             // session — regenerating it here would invalidate the guards of a
             // chat turn in flight during a routine profile refresh. Mint one
-            // only when none exists yet (initial restore from localStorage).
-            setAuthSessionId(getAuthSessionId() ?? beginAuthSession());
+            // only when none exists yet (initial restore from localStorage),
+            // anchoring the tab to the token it restored (round 8, finding 1).
+            setAuthSessionId(getAuthSessionId() ?? beginAuthSession(tokenToVerify));
             if (data.preferences) setServerPreferences(data.preferences);
             
             // If JWT has demo flag and we're not already in demo mode, initialize demo mode
@@ -409,8 +416,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(data.user);
         setToken(data.token);
         // A fresh login is a NEW auth session even for the same human — the
-        // epoch is what keeps caches of consecutive sign-ins apart.
-        setAuthSessionId(beginAuthSession());
+        // epoch is what keeps caches of consecutive sign-ins apart. Anchor the
+        // tab to the token it just stored (round 8, finding 1).
+        setAuthSessionId(beginAuthSession(data.token));
         if (data.preferences) setServerPreferences(data.preferences);
         localStorage.setItem('auth_token', data.token);
         navigate('/app');
@@ -606,8 +614,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // the top of this function), which also outruns any in-flight verifyToken.
       setUser(loginData.user);
       setToken(authToken);
-      // Same rule as signIn: every sign-in mints a new auth-session epoch.
-      setAuthSessionId(beginAuthSession());
+      // Same rule as signIn: every sign-in mints a new auth-session epoch,
+      // anchored to the token it just stored (round 8, finding 1).
+      setAuthSessionId(beginAuthSession(authToken));
       if (loginData.preferences) setServerPreferences(loginData.preferences);
       localStorage.setItem('auth_token', authToken);
 
@@ -626,16 +635,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const signOut = async () => {
-    // Outrun any in-flight verifyToken: sign-out is an explicit transition and
-    // no verification result from before it may apply afterwards.
+  /**
+   * Tear down THIS tab's authenticated presence. Shared by the explicit sign-out
+   * and the cross-tab stale-session ender (review !62 round 8, finding 1).
+   *
+   * `clearStoredToken` is the ONLY difference between the two callers:
+   * - sign-out (true) removes localStorage.auth_token — this human is leaving.
+   * - a stale-tab end (false) must NOT touch localStorage: a DIFFERENT identity
+   *   now owns that origin-wide token (they wrote it from another tab); removing
+   *   it would sign the successor out too. This tab just drops its own in-memory
+   *   session and redirects.
+   */
+  const teardownTabSession = ({ clearStoredToken }: { clearStoredToken: boolean }) => {
+    // Outrun any in-flight verifyToken: an explicit or forced transition means no
+    // verification result from before it may apply afterwards.
     authGenerationRef.current += 1;
-    localStorage.removeItem('auth_token');
+    if (clearStoredToken) {
+      localStorage.removeItem('auth_token');
+    }
     setToken(null);
     setUser(null);
     setServerPreferences(null);
 
-    // Clear demo mode on sign out
+    // Clear demo mode on the way out.
     setDemoMode(false);
     setDemoModeState(false);
 
@@ -644,6 +666,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // when the request settles, potentially after the next user signed in.
     // With the epoch already gone, those callbacks compare epochs, mismatch,
     // and drop themselves instead of writing into the next identity's cache.
+    // dropAuthSession also drops the tab session token (round 8, finding 1), so a
+    // late send cannot bind a torn-down tab's identity.
     dropAuthSession();
 
     // The QueryClient is a module singleton that outlives this session. Cached
@@ -653,6 +677,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     navigate('/login');
   };
+
+  const signOut = async () => {
+    teardownTabSession({ clearStoredToken: true });
+  };
+
+  // CROSS-TAB TENANT ISOLATION (review !62 round 8, finding 1). localStorage is
+  // ORIGIN-WIDE: a sign-in (or sign-out) in ANOTHER tab overwrites auth_token
+  // while this tab's epoch and rendered user never move. Left unhandled, this
+  // tab's chat GET/reconcile/poll/status — all authorized via the shared
+  // getAuthHeaders — would fetch the SUCCESSOR's transcript and render it under
+  // this identity's cache key, and a send would POST this tab's prompt under the
+  // successor's token. The standard multi-tab fix: when the shared token diverges
+  // from the one THIS tab authenticated with, this tab's identity is void — end
+  // its session (without clearing the successor's token) and redirect. The
+  // originating tab does NOT receive its own storage event, so this never fires
+  // for this tab's own sign-in/out.
+  useEffect(() => {
+    const onAuthTokenChanged = (event: StorageEvent) => {
+      if (event.key !== 'auth_token') return;
+      if (!isForeignAuthChange(getTabSessionToken(), event.newValue)) return;
+      teardownTabSession({ clearStoredToken: false });
+    };
+    window.addEventListener('storage', onAuthTokenChanged);
+    return () => window.removeEventListener('storage', onAuthTokenChanged);
+    // teardownTabSession closes over stable setters, refs, navigate and the
+    // module singleton queryClient — bind the listener once, like the mount
+    // effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const refreshUser = async () => {
     if (token) {

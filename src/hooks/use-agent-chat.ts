@@ -5,7 +5,7 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
-import { getAuthSessionId, getAuthToken } from '@/lib/authSession';
+import { getAuthSessionId, getAuthToken, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { countMatchingUserTurns } from '@/components/ai-chat/turnDelivery';
 import type {
@@ -112,7 +112,12 @@ export async function createAgentChatContext(
   message: string,
 ): Promise<AgentChatMutationContext> {
   const authSessionAtSend = getAuthSessionId();
-  const tokenAtSend = getAuthToken();
+  // The token THIS TAB authenticated with — the fixed anchor the POST binds to
+  // (round 8, finding 1), NOT a fresh localStorage read. A tab that was already
+  // stale when the user hit send (another tab swapped the origin-wide token
+  // before the send began) reads the successor's token from localStorage but its
+  // anchor is still its own; comparing the two below catches that.
+  const tabTokenAtSend = getTabSessionToken();
   const sessionKey = agentSessionQueryKey(authSessionAtSend);
   let snapshotAtSend =
     queryClient.getQueryData<AgentSessionResponse>(sessionKey) ?? null;
@@ -127,9 +132,16 @@ export async function createAgentChatContext(
       })
       .catch(() => null);
   }
-  // The identity that will actually authorize the POST must still be the one
-  // that composed this turn — see the block comment above.
-  if (getAuthSessionId() !== authSessionAtSend || getAuthToken() !== tokenAtSend) {
+  // The identity that will authorize the POST must still be the one that composed
+  // this turn (review !62 round 6 Critical 1; round 8 finding 1). The epoch check
+  // catches a same-tab sign-out/in; the token check catches a cross-tab swap —
+  // localStorage diverging from this tab's anchor means the tab is stale (already
+  // or mid-await). Skipped only for a null anchor (headless callers / no session),
+  // where the epoch check alone applies.
+  if (
+    getAuthSessionId() !== authSessionAtSend ||
+    (tabTokenAtSend !== null && getAuthToken() !== tabTokenAtSend)
+  ) {
     throw new Error(
       'Auth session changed before the message was sent; the turn was not delivered under a different identity.',
     );
@@ -263,6 +275,14 @@ export function useAgentChatMutation() {
   return useMutation<AgentChatResponse, Error, AgentChatVariables, AgentChatMutationContext>({
     mutationKey: agentChatMutationKey(authSessionId),
     mutationFn: async ({ authToken, ...params }) => {
+      // BOUND-NULL REJECTS, never falls back (review !62 round 8, finding 1). The
+      // send binds this tab's own token; a null here means the tab has no valid
+      // identity (signed out / torn down by the cross-tab ender). Falling back to
+      // getAuthHeaders' localStorage read is exactly the leak — it would POST
+      // under whatever origin-wide token a successor left there. Fail instead.
+      if (authToken === null) {
+        throw new Error('Not signed in; the message was not sent.');
+      }
       // authToken is split off here so it is bound to the Authorization header and
       // never serialized into the body (finding 2).
       const response = await apiService.agentChat(params, authToken);
