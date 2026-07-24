@@ -150,10 +150,16 @@ const AiChat = () => {
   // the round-6 mount-local flag reset on navigate-away, and a 'received' turn's
   // mutation was removed, so the composer re-enabled while the first stateful
   // invocation was still running. The route appends the assistant AFTER the agent
-  // call, so a transcript whose newest turn is a USER turn means a turn is still
-  // in flight — derive the lock from that persisted state instead. A fresh mount
-  // re-reads it from GET /session, so the lock cannot be lost by navigating away.
-  const serverAwaitingReply = sessionAwaitsReply(sessionQuery.data?.messages ?? []);
+  // call, so a transcript that still owes a reply means a turn is in flight —
+  // derive the lock from that persisted state instead. A fresh mount re-reads it
+  // from GET /session, so the lock cannot be lost by navigating away. Passing the
+  // capability lets it catch the interleaved `[user A, user B, assistant B]` case
+  // where A is still running though the newest turn is an assistant (round 8,
+  // finding 4).
+  const serverAwaitingReply = sessionAwaitsReply(
+    sessionQuery.data?.messages ?? [],
+    sessionQuery.data?.supports_turn_ids === true,
+  );
 
   const isChatPending =
     pendingChatTurns.length > 0 ||
