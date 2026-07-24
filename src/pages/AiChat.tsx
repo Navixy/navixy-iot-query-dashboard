@@ -12,7 +12,7 @@ import {
   useAgentSession,
   type AgentChatMutationContext,
 } from '@/hooks/use-agent-chat';
-import { getAuthSessionId, getAuthToken } from '@/lib/authSession';
+import { getAuthSessionId, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
 import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
@@ -427,9 +427,12 @@ const AiChat = () => {
     setComposerValue('');
     setLiveBubbles((prev) => [...prev, { id: nextLiveId(), role: 'user', text: message }]);
     chat.mutate(
-      // authToken is captured at send and BOUND to this request (finding 2), so a
-      // cross-tab sign-in cannot swap the Authorization header before the POST.
-      { session_id: sessionIdRef.current, message, client_turn_id: clientTurnId, authToken: getAuthToken() },
+      // Bind THIS TAB's own token (round 8, finding 1), not a fresh localStorage
+      // read: a tab already stale from a cross-tab sign-in would otherwise read
+      // and POST under the successor's token. onMutate rejects if this anchor has
+      // diverged from localStorage, and mutationFn rejects a null anchor rather
+      // than falling back to shared storage. authToken never reaches the body.
+      { session_id: sessionIdRef.current, message, client_turn_id: clientTurnId, authToken: getTabSessionToken() },
       {
         // This mutate-level callback updates THIS mount's transcript and is
         // skipped if the page unmounts mid-turn — liveBubbles die with the
