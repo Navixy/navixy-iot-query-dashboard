@@ -39,6 +39,18 @@ let currentAuthSessionId: string | null = null;
  */
 let tabSessionToken: string | null = null;
 
+/**
+ * The ORIGIN-WIDE demo-ownership token THIS TAB claimed at its demo sign-in
+ * (review !62 round 8, finding 2). The demo IndexedDB is a per-origin singleton
+ * guarded by an owner token; a destructive op (clear/reseed) must assert the
+ * token THIS TAB claimed, not re-read the CURRENT owner — a stale tab that
+ * re-reads finds the SUCCESSOR's token and passes its own guard as the successor,
+ * wiping their store. Captured here, tab-scoped, dropped at sign-out. Kept
+ * separate from beginAuthSession because the claim happens BEFORE the epoch is
+ * minted (up front, before the login POST).
+ */
+let demoOwnerToken: string | null = null;
+
 export function beginAuthSession(token: string | null = null): string {
   // randomUUID needs a secure context. localhost and the https iframe host both
   // qualify, but a plain-http deploy must not crash sign-in over a cache-scoping
@@ -56,6 +68,20 @@ export function beginAuthSession(token: string | null = null): string {
 export function endAuthSession(): void {
   currentAuthSessionId = null;
   tabSessionToken = null;
+  demoOwnerToken = null;
+}
+
+/** Record the demo-ownership token THIS TAB claimed (review !62 round 8, finding
+ *  2). Set right after claimDemoOwnership at demo sign-in; cleared by a normal
+ *  (non-demo) sign-in and by endAuthSession. */
+export function setDemoOwnerToken(token: string | null): void {
+  demoOwnerToken = token;
+}
+
+/** The demo-ownership token THIS TAB claimed — what clear/reseed must assert so a
+ *  stale tab cannot act as the successor (review !62 round 8, finding 2). */
+export function getDemoOwnerToken(): string | null {
+  return demoOwnerToken;
 }
 
 export function getAuthSessionId(): string | null {

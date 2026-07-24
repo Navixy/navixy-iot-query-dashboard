@@ -7,8 +7,10 @@ import {
   beginAuthSession,
   endAuthSession,
   getAuthSessionId,
+  getDemoOwnerToken,
   getTabSessionToken,
   isForeignAuthChange,
+  setDemoOwnerToken,
 } from '@/lib/authSession';
 import type { ChartCatalog } from '@/types/chart-catalog';
 
@@ -274,6 +276,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // isStale generation could not see that. isStale still guards the read-only
       // fetch stages against a superseded verifyToken.
       const owner = await demoStorageService.claimDemoOwnership();
+      // ANCHOR the claimed owner to THIS TAB (review !62 round 8, finding 2) so a
+      // later clear/reseed asserts what this tab claimed, not the current owner.
+      setDemoOwnerToken(owner);
 
       // First, clear IndexedDB to ensure fresh data — but only if this run still
       // owns the session. A stale run here would wipe the new identity's store.
@@ -386,6 +391,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Ensure demo mode is disabled for normal sign-in
       setDemoMode(false);
       setDemoModeState(false);
+      // A non-demo sign-in owns no demo store (review !62 round 8, finding 2) —
+      // drop any owner anchor a prior demo session left on this tab.
+      setDemoOwnerToken(null);
 
       const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: 'POST',
@@ -461,6 +469,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // transaction.
       authGenerationRef.current += 1;
       const owner = await demoStorageService.claimDemoOwnership();
+      // ANCHOR the claimed owner to THIS TAB (review !62 round 8, finding 2): a
+      // later clear/reseed asserts THIS token, so a tab superseded by another
+      // demo sign-in cannot pass its guard as the successor.
+      setDemoOwnerToken(owner);
 
       // IMPORTANT: Clear IndexedDB first to remove any leftovers from previous sessions
       console.log('[AuthContext] Clearing IndexedDB before demo login...');
@@ -717,11 +729,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * Clear all demo data from IndexedDB
    */
   const clearDemoData = async (): Promise<{ aborted: boolean }> => {
-    // Guard this deliberate clear by the CURRENT origin-wide owner (review !62
-    // round 7, finding 1): if a newer sign-in (any tab) has taken over the demo
-    // DB, the clear aborts rather than wiping the successor's store. The result is
-    // PROPAGATED so the caller (DemoBanner) does not then sign the successor out.
-    const owner = await demoStorageService.readDemoOwner();
+    // Assert the owner token THIS TAB claimed at sign-in (review !62 round 8,
+    // finding 2), NOT the current owner. Re-reading the current owner made the
+    // guard a no-op for a stale tab: it would read the SUCCESSOR's token and pass
+    // clearAllData's in-transaction check as the successor, wiping their store.
+    // With the tab's own anchor, clearAllData aborts when ownership has moved on.
+    // Undefined (no demo session on this tab) keeps the legacy unconditional clear.
+    const owner = getDemoOwnerToken() ?? undefined;
     const cleared = await demoStorageService.clearAllData(owner);
     console.log('[AuthContext] Demo data cleared', { cleared });
     return { aborted: !cleared };
@@ -736,12 +750,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { error: new Error('Not authenticated') };
     }
 
-    // Read the CURRENT origin-wide owner (review !62 round 7, finding 1): a reseed
-    // is not a new sign-in, so it does not claim ownership — it asserts it still
-    // holds it. If a sign-in (any tab) claims a new token mid-reseed, the seed
-    // aborts before it wipes the singleton store and writes this (now former)
-    // identity's data over the successor's.
-    const owner = await demoStorageService.readDemoOwner();
+    // Assert the owner token THIS TAB claimed at sign-in (review !62 round 8,
+    // finding 2), NOT the current owner. A reseed does not claim ownership — it
+    // asserts the tab still holds it. Re-reading the current owner let a stale tab
+    // pass as the successor and overwrite their store with this former identity's
+    // data; the tab's own anchor makes seedFromBackend abort when ownership moved.
+    const owner = getDemoOwnerToken() ?? undefined;
 
     try {
       // Fetch all data in parallel from the backend
