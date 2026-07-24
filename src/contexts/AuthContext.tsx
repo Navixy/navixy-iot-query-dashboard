@@ -265,7 +265,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       console.log('[AuthContext] Clearing IndexedDB before initializing demo storage...');
-      await demoStorageService.clearAllData();
+      // Pass isStale INTO the clear (review !62 round 5, Critical 2): the guard
+      // above only covers up to the first await — clearAllData re-checks inside
+      // its destructive transaction so a run superseded mid-clear cannot wipe
+      // the new identity's singleton store.
+      await demoStorageService.clearAllData(isStale);
 
       const [sectionsRes, reportsRes, globalVarsRes, chartCatalogRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/sections`, { headers }).catch(() => null),
@@ -304,13 +308,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[AuthContext] Demo init superseded before seed; aborting');
         return;
       }
+      // isStale is passed INTO the seed too: seedFromBackend does its own clear
+      // and a multi-step write, each re-checked inside its transaction so a
+      // superseded run cannot replace the new identity's data (round 5, Crit. 2).
       await demoStorageService.seedFromBackend({
         sections,
         reports,
         globalVariables,
         chartCatalog,
         userId
-      });
+      }, isStale);
 
       // Delete the temporary demo user from the database
       // This cleans up the user record since all data is now in IndexedDB

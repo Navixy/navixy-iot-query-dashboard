@@ -120,7 +120,17 @@ export class DemoStorageService {
   // ==========================================
 
   /**
-   * Seed the demo database with data from the backend
+   * Seed the demo database with data from the backend.
+   *
+   * `shouldAbort` (review !62 round 5, Critical 2) is checked INSIDE each
+   * destructive transaction — the internal clear and the bulk write — not only
+   * before them. IndexedDB is a per-origin SINGLETON and serializes read/write
+   * transactions on overlapping stores, so a check that runs as the first
+   * statement of the transaction body cannot be overtaken: a demo init whose
+   * identity was superseded by a sign-out/sign-in mid-flight aborts the clear
+   * and the write instead of wiping or replacing the CURRENT identity's data.
+   * A guard placed only before the call leaves the awaits inside these
+   * operations as an open interleaving window.
    */
   async seedFromBackend(data: {
     sections: Record<string, unknown>[];
@@ -128,7 +138,7 @@ export class DemoStorageService {
     globalVariables: Record<string, unknown>[];
     chartCatalog?: { schemaVersion?: string; groups?: unknown[] } | null;
     userId: string;
-  }): Promise<void> {
+  }, shouldAbort?: () => boolean): Promise<void> {
     console.log('[DemoStorage] seedFromBackend called with:', {
       sectionsCount: data.sections?.length ?? 0,
       reportsCount: data.reports?.length ?? 0,
@@ -162,10 +172,11 @@ export class DemoStorageService {
     }
 
     const database = getDb();
-    
-    // Clear existing data first (should already be cleared, but double-check)
+
+    // Clear existing data first (should already be cleared, but double-check).
+    // Pass the abort predicate through so this internal clear is guarded too.
     console.log('[DemoStorage] Clearing existing data before seeding...');
-    await this.clearAllData();
+    await this.clearAllData(shouldAbort);
 
     // Seed sections
     const sections = data.sections.map(s => ({
@@ -244,8 +255,16 @@ export class DemoStorageService {
 
     // Bulk insert all data
     console.log('[DemoStorage] Starting bulk insert to IndexedDB...');
+    let aborted = false;
     try {
       await database.transaction('rw', [database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+        // Identity guard INSIDE the write transaction (review !62 round 5,
+        // Critical 2): if this run was superseded while it fetched, do not
+        // overwrite the current identity's freshly-seeded store.
+        if (shouldAbort?.()) {
+          aborted = true;
+          return;
+        }
         if (sections.length > 0) {
           console.log('[DemoStorage] Inserting', sections.length, 'sections...');
           await database.sections.bulkAdd(sections);
@@ -274,6 +293,13 @@ export class DemoStorageService {
     } catch (error) {
       console.error('[DemoStorage] Bulk insert failed:', error);
       throw error;
+    }
+
+    // The write was skipped because a newer identity took over — leave its data
+    // untouched and do not run the mismatch verification against it.
+    if (aborted) {
+      console.log('[DemoStorage] Seed superseded before write; left current identity data intact');
+      return;
     }
 
     // Verify data was inserted correctly
@@ -305,16 +331,23 @@ export class DemoStorageService {
   }
 
   /**
-   * Clear all demo data
+   * Clear all demo data.
+   *
+   * `shouldAbort` (review !62 round 5, Critical 2) is checked as the FIRST
+   * statement inside the destructive transaction, not merely before it: the
+   * counts above are awaited reads, an interleaving window a superseded run
+   * could resume through and wipe the current identity's store. IndexedDB
+   * serializes overlapping-store transactions, so the in-transaction check
+   * cannot be overtaken once the transaction body runs.
    */
-  async clearAllData(): Promise<void> {
+  async clearAllData(shouldAbort?: () => boolean): Promise<void> {
     const database = getDb();
-    
+
     // Log what we're about to delete
     const existingReports = await database.reports.count();
     const existingSections = await database.sections.count();
     const existingGlobalVars = await database.globalVariables.count();
-    
+
     console.log('[DemoStorage] Clearing all data. Current counts:', {
       reports: existingReports,
       sections: existingSections,
@@ -322,6 +355,10 @@ export class DemoStorageService {
     });
 
     await database.transaction('rw', [database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+      if (shouldAbort?.()) {
+        console.log('[DemoStorage] Clear superseded before destructive transaction; aborting');
+        return;
+      }
       await database.sections.clear();
       await database.reports.clear();
       await database.globalVariables.clear();
