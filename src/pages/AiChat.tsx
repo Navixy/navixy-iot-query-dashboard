@@ -18,6 +18,7 @@ import { ChatTranscript } from '@/components/ai-chat/ChatTranscript';
 import { EmptyState } from '@/components/ai-chat/EmptyState';
 import { trimHistoryOverlap } from '@/components/ai-chat/historyOverlap';
 import {
+  appendUncertainNotice,
   classifyTurnDelivery,
   reconcileOutcome,
   type TurnDelivery,
@@ -290,28 +291,13 @@ const AiChat = () => {
             // The message must still SURVIVE (round 5, Critical 1). liveBubbles
             // is mount-local, so on a REMOUNT the optimistic user bubble died
             // with the previous mount and the text would be visible NOWHERE.
-            // Re-materialize it from the failed mutation (which outlives the
-            // mount) unless this mount already shows it, and KEEP the mutation in
-            // the cache below so both the text and a later authoritative re-check
-            // survive further remounts. Shown as a transcript bubble, not a
-            // composer draft — preserved without becoming a one-click resend.
-            setLiveBubbles((prev) => {
-              const lastUser = [...prev].reverse().find((b) => b.role === 'user');
-              const restored: ChatBubble[] =
-                lastUser?.text === failed.message
-                  ? []
-                  : [{ id: nextLiveId(), role: 'user', text: failed.message }];
-              return [
-                ...prev,
-                ...restored,
-                {
-                  id: nextLiveId(),
-                  role: 'assistant',
-                  text: "We couldn't reach the server to confirm your last message was delivered. Reload the page to check before sending it again.",
-                  isError: true,
-                },
-              ];
-            });
+            // appendUncertainNotice re-materializes it from the failed mutation
+            // (deduped against the optimistic bubble on the original mount); the
+            // mutation is KEPT in the cache below so both the text and a later
+            // authoritative re-check survive further remounts. Shown as a
+            // transcript bubble, not a composer draft — preserved without
+            // becoming a one-click resend.
+            setLiveBubbles((prev) => appendUncertainNotice(prev, failed.message, nextLiveId));
           }
 
           // Handled — REMOVE it so a later mount does not surface it again. The

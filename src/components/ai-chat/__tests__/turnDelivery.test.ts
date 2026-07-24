@@ -1,6 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { classifyTurnDelivery, countMatchingUserTurns, reconcileOutcome } from '../turnDelivery';
-import type { AgentTurn } from '@/types/agent';
+import {
+  appendUncertainNotice,
+  classifyTurnDelivery,
+  countMatchingUserTurns,
+  reconcileOutcome,
+  UNCERTAIN_DELIVERY_NOTICE,
+} from '../turnDelivery';
+import type { AgentTurn, ChatBubble } from '@/types/agent';
+
+const seqId = () => {
+  let n = 0;
+  return () => `id-${n++}`;
+};
 
 const user = (content: string): AgentTurn => ({ role: 'user', content });
 const assistant = (content: string): AgentTurn => ({
@@ -105,6 +116,36 @@ describe('reconcileOutcome — trusting a poll verdict (review !62 round 5, Impo
 
   it('uncertain: no GET ever succeeded', () => {
     expect(reconcileOutcome(false, 'lost', false)).toBe('uncertain');
+  });
+});
+
+describe('appendUncertainNotice — preserve the prompt across remount (review !62 round 5, Critical 1)', () => {
+  it('re-materializes the message on a REMOUNT (empty transcript), then the notice', () => {
+    const out = appendUncertainNotice([], 'my careful prompt', seqId());
+    expect(out.map((b) => [b.role, b.text])).toEqual([
+      ['user', 'my careful prompt'],
+      ['assistant', UNCERTAIN_DELIVERY_NOTICE],
+    ]);
+    expect(out[1].isError).toBe(true);
+  });
+
+  it('does NOT duplicate the message on the ORIGINAL mount (optimistic bubble already last)', () => {
+    const prev: ChatBubble[] = [{ id: 'a', role: 'user', text: 'my careful prompt' }];
+    const out = appendUncertainNotice(prev, 'my careful prompt', seqId());
+    expect(out.filter((b) => b.role === 'user')).toHaveLength(1);
+    expect(out.map((b) => b.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('re-adds when the last user bubble is a DIFFERENT message', () => {
+    const prev: ChatBubble[] = [
+      { id: 'a', role: 'user', text: 'older prompt' },
+      { id: 'b', role: 'assistant', text: 'reply' },
+    ];
+    const out = appendUncertainNotice(prev, 'my careful prompt', seqId());
+    expect(out.filter((b) => b.role === 'user').map((b) => b.text)).toEqual([
+      'older prompt',
+      'my careful prompt',
+    ]);
   });
 });
 
