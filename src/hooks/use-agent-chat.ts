@@ -191,6 +191,29 @@ export function settleChatTurnIntoSessionCache(
 }
 
 /**
+ * Drop SETTLED-SUCCESS chat mutations from the cache. With gcTime: Infinity on
+ * the mutation (review !62 round 6, Important 3 — so a KEPT uncertain turn is
+ * never garbage-collected out from under a later mount), a succeeded turn would
+ * otherwise linger until sign-out. Its result is already in the session cache
+ * and the transcript, so it is safe to remove; only unresolved turns (pending,
+ * or a kept-uncertain error) then persist. Failed turns are removed by the
+ * reconciler (AiChat) except the deliberate uncertain exception, and sign-out
+ * clears the whole cache — this closes the remaining success case.
+ */
+export function pruneSettledChatMutations(
+  queryClient: QueryClient,
+  authSessionId: string | null,
+): void {
+  const cache = queryClient.getMutationCache();
+  for (const mutation of cache.findAll({
+    mutationKey: agentChatMutationKey(authSessionId),
+    status: 'success',
+  })) {
+    cache.remove(mutation);
+  }
+}
+
+/**
  * Loads the agent chat session: the server-authoritative session_id, the
  * persistence flag and the rehydrated transcript (DO-313).
  */
@@ -248,6 +271,16 @@ export function useAgentChatMutation() {
     // agent's server-side conversation memory and double-appending the
     // transcript (R20).
     retry: false,
+    // gcTime: Infinity (review !62 round 6, Important 3): the reconciler KEEPS a
+    // failed turn whose delivery is uncertain so its message and pending
+    // re-check survive remounts. But useMutationState only SUBSCRIBES to the
+    // cache — it attaches no mutation observer — so once the page unmounts the
+    // kept mutation is unobserved and TanStack's default 5-minute gcTime evicts
+    // it, silently losing the message if GET is still unavailable. Infinity
+    // disables that timer; removal is explicit instead — the reconciler removes
+    // resolved failures, pruneSettledChatMutations removes succeeded turns, and
+    // sign-out's queryClient.clear() drops the rest.
+    gcTime: Infinity,
     // Fail fast when offline instead of pausing (review !62): the default
     // 'online' mode holds the mutation in isPending with no request in flight
     // — the typing indicator runs forever, the 190 s transport ceiling never

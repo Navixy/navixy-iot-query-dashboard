@@ -4,6 +4,7 @@ import {
   agentChatMutationKey,
   agentSessionQueryKey,
   createAgentChatContext,
+  pruneSettledChatMutations,
   settleChatTurnIntoSessionCache,
 } from '../use-agent-chat';
 import { beginAuthSession, endAuthSession } from '@/lib/authSession';
@@ -233,6 +234,59 @@ describe('settleChatTurnIntoSessionCache — guarded write', () => {
 
     expect(client.getQueryCache().getAll()).toHaveLength(0);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+describe('pruneSettledChatMutations — success cleanup under gcTime: Infinity (review !62 round 6, Important 3)', () => {
+  it('removes succeeded turns but keeps pending and kept-uncertain (error) ones', async () => {
+    const epoch = beginAuthSession();
+    const client = new QueryClient();
+
+    // A succeeded turn.
+    const okObserver = new MutationObserver(client, {
+      mutationKey: agentChatMutationKey(epoch),
+      mutationFn: async () => reply('done'),
+    });
+    okObserver.subscribe(() => {});
+    await okObserver.mutate({ session_id: null, message: 'ok turn' });
+
+    // A failed turn the reconciler would KEEP as uncertain.
+    const errObserver = new MutationObserver(client, {
+      mutationKey: agentChatMutationKey(epoch),
+      retry: false,
+      networkMode: 'always',
+      mutationFn: async () => {
+        throw new Error('lost');
+      },
+    });
+    errObserver.subscribe(() => {});
+    await errObserver.mutate({ session_id: null, message: 'err turn' }).catch(() => undefined);
+
+    expect(client.getMutationCache().findAll({ status: 'success' })).toHaveLength(1);
+
+    pruneSettledChatMutations(client, epoch);
+
+    // The succeeded turn is gone; the kept-uncertain error survives for re-check.
+    expect(client.getMutationCache().findAll({ status: 'success' })).toHaveLength(0);
+    expect(client.getMutationCache().findAll({ status: 'error' })).toHaveLength(1);
+  });
+
+  it('only prunes the CURRENT epoch — another sign-in\'s successes are untouched', async () => {
+    const epochA = beginAuthSession();
+    const client = new QueryClient();
+    const obsA = new MutationObserver(client, {
+      mutationKey: agentChatMutationKey(epochA),
+      mutationFn: async () => reply('a done'),
+    });
+    obsA.subscribe(() => {});
+    await obsA.mutate({ session_id: null, message: 'a turn' });
+
+    // Prune a DIFFERENT epoch — A's success must remain.
+    pruneSettledChatMutations(client, 'another-epoch');
+    expect(client.getMutationCache().findAll({ status: 'success' })).toHaveLength(1);
+
+    pruneSettledChatMutations(client, epochA);
+    expect(client.getMutationCache().findAll({ status: 'success' })).toHaveLength(0);
   });
 });
 
