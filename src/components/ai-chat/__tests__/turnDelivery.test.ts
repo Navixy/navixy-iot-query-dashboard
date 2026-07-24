@@ -208,7 +208,7 @@ describe('reconcileReceiptOutcome — an unavailable receipt is NOT proof of los
   });
 });
 
-describe('sessionAwaitsReply — server-derived lock (review !62 round 7, finding 4)', () => {
+describe('sessionAwaitsReply — server-derived lock (review !62 round 7 finding 4; round 8 finding 4)', () => {
   it('true when the newest turn is a user turn (a turn is still in flight)', () => {
     expect(sessionAwaitsReply([user('a'), assistant('b'), user('c')])).toBe(true);
   });
@@ -219,6 +219,39 @@ describe('sessionAwaitsReply — server-derived lock (review !62 round 7, findin
 
   it('false on an empty transcript', () => {
     expect(sessionAwaitsReply([])).toBe(false);
+  });
+
+  describe('interleaved concurrency by id (review !62 round 8, finding 4)', () => {
+    it('true for [user A, user B, assistant B] — A is unanswered though the newest turn is an assistant', () => {
+      const messages = [
+        userWithId('a', 'id-A'),
+        userWithId('b', 'id-B'),
+        assistantWithId('b reply', 'id-B'),
+      ];
+      // The round-7 newest-turn test alone returned false here (the bug).
+      expect(sessionAwaitsReply(messages, false)).toBe(false);
+      expect(sessionAwaitsReply(messages, true)).toBe(true);
+    });
+
+    it('false when every user id has a matching assistant reply', () => {
+      const messages = [
+        userWithId('a', 'id-A'),
+        assistantWithId('a reply', 'id-A'),
+        userWithId('b', 'id-B'),
+        assistantWithId('b reply', 'id-B'),
+      ];
+      expect(sessionAwaitsReply(messages, true)).toBe(false);
+    });
+
+    it('still true via the newest-turn test when the tail is an unanswered user turn', () => {
+      expect(sessionAwaitsReply([userWithId('a', 'id-A')], true)).toBe(true);
+    });
+
+    it('id-less legacy rows fall back to the newest-turn test (no false positives)', () => {
+      // A supported transcript can still carry legacy id-less rows; an answered
+      // id-less pair must not read as awaiting.
+      expect(sessionAwaitsReply([user('a'), assistant('b')], true)).toBe(false);
+    });
   });
 });
 

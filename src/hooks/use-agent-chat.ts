@@ -7,7 +7,7 @@ import {
 import { useAuth } from '@/contexts/AuthContext';
 import { getAuthSessionId, getAuthToken, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
-import { countMatchingUserTurns } from '@/components/ai-chat/turnDelivery';
+import { countMatchingUserTurns, sessionAwaitsReply } from '@/components/ai-chat/turnDelivery';
 import type {
   AgentChatRequest,
   AgentChatResponse,
@@ -121,7 +121,8 @@ export async function createAgentChatContext(
   const sessionKey = agentSessionQueryKey(authSessionAtSend);
   let snapshotAtSend =
     queryClient.getQueryData<AgentSessionResponse>(sessionKey) ?? null;
-  if (snapshotAtSend === null && authSessionAtSend !== null) {
+  const awaitedSessionRead = snapshotAtSend === null && authSessionAtSend !== null;
+  if (awaitedSessionRead) {
     snapshotAtSend = await queryClient
       // retry:false so a wedged read cannot delay the POST behind three backoffs
       // — it matches useAgentSession's own retry policy.
@@ -131,6 +132,24 @@ export async function createAgentChatContext(
         retry: false,
       })
       .catch(() => null);
+  }
+  // RELOAD-WINDOW GUARD (review !62 round 8, finding 4). The composer is usable
+  // before the initial GET resolves — gating it on the session read would brick
+  // the page for any tenant whose read fails (B5-R5) — so serverAwaitingReply has
+  // not computed yet and a fast send can race an in-flight turn on the stateful
+  // agent. When we had to AWAIT the read (empty cache: a fresh mount or reload)
+  // and it now shows a turn STILL awaiting a reply, reject the send. A CACHED
+  // snapshot is NOT this window: the component already derived serverAwaitingReply
+  // from it and locked the composer, so a normal send after a user-tail turn is
+  // unaffected. A FAILED read (snapshot null) also proceeds — preserving B5-R5.
+  if (
+    awaitedSessionRead &&
+    snapshotAtSend &&
+    sessionAwaitsReply(snapshotAtSend.messages, snapshotAtSend.supports_turn_ids === true)
+  ) {
+    throw new Error(
+      'A previous message is still awaiting a reply. Reload the page before sending again.',
+    );
   }
   // The identity that will authorize the POST must still be the one that composed
   // this turn (review !62 round 6 Critical 1; round 8 finding 1). The epoch check

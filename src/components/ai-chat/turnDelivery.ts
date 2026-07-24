@@ -220,12 +220,33 @@ export function reconcileReceiptOutcome(
 }
 
 /**
- * True when the persisted transcript's NEWEST turn is a USER turn — a turn is
- * still in flight, because the route appends the assistant reply only AFTER the
- * agent call (review !62 round 7, finding 4). Deriving the composer lock from this
- * SERVER state (re-read from GET /session on every mount) is what makes it survive
- * a route remount, which the round-6 mount-local flag did not.
+ * True when the persisted transcript still owes a reply — a turn is in flight,
+ * because the route appends the assistant reply only AFTER the agent call
+ * (review !62 round 7 finding 4; round 8 finding 4). Deriving the composer lock
+ * from this SERVER state (re-read from GET /session on every mount) is what makes
+ * it survive a route remount, which the round-6 mount-local flag did not.
+ *
+ * Two conditions, because the newest-turn test alone was unsound under CONCURRENCY
+ * (round 8): with two turns in flight the transcript can read `[user A, user B,
+ * assistant B]` — B answered first — whose NEWEST turn is an assistant, yet A is
+ * still running. So when the server round-trips ids, also PAIR them: any user turn
+ * whose client_turn_id has no matching assistant reply is unanswered. The reply is
+ * stamped with the originating user turn's id (finding 3), so an unmatched user id
+ * is an in-flight turn. Legacy/id-less rows fall back to the newest-turn test.
  */
-export function sessionAwaitsReply(messages: AgentTurn[]): boolean {
-  return messages.length > 0 && messages[messages.length - 1].role === 'user';
+export function sessionAwaitsReply(messages: AgentTurn[], supportsTurnIds = false): boolean {
+  if (messages.length === 0) return false;
+  // Newest turn is a user turn → its reply has not been appended yet. Covers the
+  // simple case and the id-less tail (older 002 rows).
+  if (messages[messages.length - 1].role === 'user') return true;
+  if (!supportsTurnIds) return false;
+  // Interleaved concurrency: is there a user turn whose id was never answered?
+  const answered = new Set(
+    messages
+      .filter((m) => m.role === 'assistant' && m.client_turn_id)
+      .map((m) => m.client_turn_id),
+  );
+  return messages.some(
+    (m) => m.role === 'user' && m.client_turn_id != null && !answered.has(m.client_turn_id),
+  );
 }

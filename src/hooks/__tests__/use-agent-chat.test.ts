@@ -114,6 +114,42 @@ describe('createAgentChatContext — send-time occurrence baseline (review !62 r
     const context = await createAgentChatContext(client, 'next');
     expect(context.priorSameContentUserTurns).toBe(0);
   });
+
+  it('rejects during the reload window when the awaited probe shows a turn still awaiting a reply (review !62 round 8, finding 4)', async () => {
+    // Full reload: the composer was usable before the GET resolved, so this send
+    // raced an in-flight turn. The awaited probe reveals an unanswered user turn
+    // — reject rather than double-feed the stateful agent.
+    beginAuthSession();
+    const client = new QueryClient(); // empty → forces the awaited read
+    vi.mocked(apiService.getAgentSession).mockResolvedValue({
+      data: session([user('earlier prompt')]), // newest turn is unanswered
+    });
+    await expect(createAgentChatContext(client, 'second prompt')).rejects.toThrow(
+      /awaiting a reply/i,
+    );
+  });
+
+  it('does NOT reject when the awaited probe shows the session idle', async () => {
+    beginAuthSession();
+    const client = new QueryClient();
+    vi.mocked(apiService.getAgentSession).mockResolvedValue({
+      data: session([user('hi'), assistant('hello')]),
+    });
+    await expect(createAgentChatContext(client, 'next')).resolves.toBeTruthy();
+  });
+
+  it('does NOT reject a CACHED awaiting snapshot — not the reload window (the component already locked)', async () => {
+    // A user-tail turn already in cache is not the awaited-read window; the send
+    // there is gated by serverAwaitingReply, not this guard. No reject, no read.
+    const epoch = beginAuthSession();
+    const client = new QueryClient();
+    client.setQueryData(
+      agentSessionQueryKey(epoch),
+      session([user('a'), assistant('b'), user('c')]),
+    );
+    await expect(createAgentChatContext(client, 'd')).resolves.toBeTruthy();
+    expect(apiService.getAgentSession).not.toHaveBeenCalled();
+  });
 });
 
 describe('settleChatTurnIntoSessionCache — guarded write', () => {
