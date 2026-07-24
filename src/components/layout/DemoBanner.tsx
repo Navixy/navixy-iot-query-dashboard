@@ -40,8 +40,14 @@ export function DemoBanner({ onDismiss }: DemoBannerProps) {
   const handleClearData = async () => {
     setIsClearing(true);
     try {
-      await clearDemoData();
-      await signOut();
+      const { aborted } = await clearDemoData();
+      // Only sign out if the clear actually ran. If it aborted, a newer sign-in
+      // (this tab or another) now owns the demo data — signing out here would sign
+      // that successor out on a stale continuation's behalf (review !62 round 7,
+      // finding 1).
+      if (!aborted) {
+        await signOut();
+      }
     } catch (error) {
       console.error('Failed to clear demo data:', error);
     } finally {

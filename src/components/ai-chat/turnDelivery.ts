@@ -86,18 +86,24 @@ export function classifyTurnDelivery(
   history: AgentTurn[],
   sentMessage: string,
   clientTurnId: string | null,
+  supportsTurnIds: boolean,
   priorOccurrences = 0,
 ): TurnDelivery {
-  // PRIMARY — deterministic id match, when the server round-trips ids.
-  if (clientTurnId && history.some((t) => t.role === 'user' && t.client_turn_id)) {
-    const idx = history.findIndex(
-      (t) => t.role === 'user' && t.client_turn_id === clientTurnId,
-    );
-    if (idx === -1) return 'lost';
-    for (let j = idx + 1; j < history.length; j++) {
-      if (history[j].role === 'assistant') return 'completed';
+  // PRIMARY — exact-pair id match, trusted from the EXPLICIT capability flag
+  // (finding 5a), not inferred from a visible row.
+  if (clientTurnId && supportsTurnIds) {
+    // Completion = an ASSISTANT turn stamped with OUR id (finding 3) — never "any
+    // later assistant", which mis-attributed a concurrent turn's reply.
+    if (history.some((t) => t.role === 'assistant' && t.client_turn_id === clientTurnId)) {
+      return 'completed';
     }
-    return 'received';
+    // Our user turn present, no matching reply yet → received; absent from THIS
+    // transcript → lost, which the caller reconfirms against the durable receipt
+    // before trusting (finding 5b — the row can be evicted by 100 newer turns).
+    if (history.some((t) => t.role === 'user' && t.client_turn_id === clientTurnId)) {
+      return 'received';
+    }
+    return 'lost';
   }
 
   // FALLBACK — content + send-time occurrence baseline (no id support).
@@ -165,4 +171,34 @@ export function locksComposerAwaitingReply(
 ): boolean {
   if (outcome === 'uncertain') return true;
   return outcome === 'delivered' && delivery === 'received';
+}
+
+/**
+ * Fold a DURABLE-RECEIPT lookup into a poll's delivery verdict (review !62 round
+ * 7, finding 5b). Only a 'lost' verdict is reconsidered — a positive delivery
+ * already saw the turn, and a receipt cannot un-happen it. On the id path a 'lost'
+ * only means "not in THIS capped transcript"; the receipt lives outside that
+ * window, so it is authoritative. `supported: false` (older schema / demo) leaves
+ * the transcript verdict untouched, and an unknown-but-supported receipt confirms
+ * the turn genuinely never reached the server.
+ */
+export function applyReceiptToDelivery(
+  delivery: TurnDelivery,
+  receipt: { status: 'received' | 'answered' | 'unknown'; supported: boolean } | null,
+): TurnDelivery {
+  if (delivery !== 'lost' || !receipt?.supported) return delivery;
+  if (receipt.status === 'answered') return 'completed';
+  if (receipt.status === 'received') return 'received';
+  return 'lost';
+}
+
+/**
+ * True when the persisted transcript's NEWEST turn is a USER turn — a turn is
+ * still in flight, because the route appends the assistant reply only AFTER the
+ * agent call (review !62 round 7, finding 4). Deriving the composer lock from this
+ * SERVER state (re-read from GET /session on every mount) is what makes it survive
+ * a route remount, which the round-6 mount-local flag did not.
+ */
+export function sessionAwaitsReply(messages: AgentTurn[]): boolean {
+  return messages.length > 0 && messages[messages.length - 1].role === 'user';
 }

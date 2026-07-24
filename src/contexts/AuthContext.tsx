@@ -51,7 +51,10 @@ interface AuthContextType {
   signInDemo: (email: string, role: 'admin' | 'editor' | 'viewer', iotDbUrl: string, userDbUrl: string) => Promise<{ error: Error | null }>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
-  clearDemoData: () => Promise<void>;
+  /** Resolves { aborted: true } when the clear did NOT run because demo ownership
+   *  moved to a newer sign-in (review !62 round 7, finding 1); the caller must not
+   *  then run a sign-out/reload on the successor's behalf. */
+  clearDemoData: () => Promise<{ aborted: boolean }>;
   reseedDemoData: () => Promise<{ error: Error | null }>;
 }
 
@@ -258,6 +261,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         'Content-Type': 'application/json',
       };
 
+      // Claim ORIGIN-WIDE demo ownership up front (review !62 round 7, finding 1):
+      // the token lives in IndexedDB, so a sign-in in another tab that claims a new
+      // token aborts this run's destructive transactions cross-tab — the tab-local
+      // isStale generation could not see that. isStale still guards the read-only
+      // fetch stages against a superseded verifyToken.
+      const owner = await demoStorageService.claimDemoOwnership();
+
       // First, clear IndexedDB to ensure fresh data — but only if this run still
       // owns the session. A stale run here would wipe the new identity's store.
       if (isStale()) {
@@ -265,11 +275,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       console.log('[AuthContext] Clearing IndexedDB before initializing demo storage...');
-      // Pass isStale INTO the clear (review !62 round 5, Critical 2): the guard
-      // above only covers up to the first await — clearAllData re-checks inside
-      // its destructive transaction so a run superseded mid-clear cannot wipe
-      // the new identity's singleton store.
-      await demoStorageService.clearAllData(isStale);
+      // Pass the ownership token INTO the clear (review !62 round 7): clearAllData
+      // re-reads the owner inside its destructive transaction so a run whose
+      // ownership moved on cannot wipe the new identity's singleton store.
+      if (!(await demoStorageService.clearAllData(owner))) {
+        console.log('[AuthContext] Demo init clear aborted: ownership moved on');
+        return;
+      }
 
       const [sectionsRes, reportsRes, globalVarsRes, chartCatalogRes] = await Promise.all([
         fetch(`${API_BASE_URL}/api/sections`, { headers }).catch(() => null),
@@ -308,16 +320,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[AuthContext] Demo init superseded before seed; aborting');
         return;
       }
-      // isStale is passed INTO the seed too: seedFromBackend does its own clear
-      // and a multi-step write, each re-checked inside its transaction so a
-      // superseded run cannot replace the new identity's data (round 5, Crit. 2).
-      await demoStorageService.seedFromBackend({
+      // The ownership token is passed INTO the seed too: seedFromBackend does its
+      // own clear and a multi-step write, each re-reading the owner inside its
+      // transaction so a run whose ownership moved on cannot replace the new
+      // identity's data (review !62 round 7, finding 1).
+      if (!(await demoStorageService.seedFromBackend({
         sections,
         reports,
         globalVariables,
         chartCatalog,
         userId
-      }, isStale);
+      }, owner))) {
+        console.log('[AuthContext] Demo init seed aborted: ownership moved on');
+        return;
+      }
 
       // Delete the temporary demo user from the database
       // This cleans up the user record since all data is now in IndexedDB
@@ -427,23 +443,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       console.log('[AuthContext] Starting demo sign-in...', { email, role });
 
-      // Claim a new auth generation UP FRONT (review !62 round 6, Critical 2):
-      // the clear + seed below mutate the per-origin SINGLETON IndexedDB across
-      // several awaits. A later sign-in/out — or a concurrent demo sign-in —
-      // bumps the generation, and every stage here (the destructive IndexedDB
-      // ops AND the final session establishment) re-checks it so a superseded
-      // attempt neither clobbers the new identity's store nor re-establishes a
-      // session it no longer owns. Round 5 added this predicate to demoStorage
-      // but only initializeDemoStorage passed it; signInDemo (the primary demo
-      // path) still cleared and seeded unguarded. The generation was previously
-      // bumped only just before setUser — too late to protect the clear/seed.
-      const attemptGeneration = (authGenerationRef.current += 1);
-      const isStale = () => authGenerationRef.current !== attemptGeneration;
+      // Bump the auth generation UP FRONT so a later sign-in outruns any in-flight
+      // verifyToken of an older token (round 3 reason). The DESTRUCTIVE IndexedDB
+      // ops below are now guarded by an ORIGIN-WIDE ownership token instead of this
+      // tab-local counter (review !62 round 7, finding 1): round 6's generation was
+      // per-tab, so a concurrent demo sign-in in ANOTHER tab could not be seen as
+      // stale and its late seed clobbered the singleton store. The token lives in
+      // IndexedDB, shared across tabs, and is re-read inside each destructive
+      // transaction.
+      authGenerationRef.current += 1;
+      const owner = await demoStorageService.claimDemoOwnership();
 
       // IMPORTANT: Clear IndexedDB first to remove any leftovers from previous sessions
       console.log('[AuthContext] Clearing IndexedDB before demo login...');
-      if (isStale()) return { error: new Error('Demo sign-in superseded before it started') };
-      await demoStorageService.clearAllData(isStale);
+      if (!(await demoStorageService.clearAllData(owner))) {
+        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
+      }
       console.log('[AuthContext] IndexedDB cleared successfully');
 
       // First, authenticate with demo flag to get the token and initial access
@@ -545,14 +560,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Seed the demo database
       console.log('[AuthContext] Seeding IndexedDB with fetched data...');
-      if (isStale()) return { error: new Error('Demo sign-in superseded before seeding') };
-      await demoStorageService.seedFromBackend({
+      if (!(await demoStorageService.seedFromBackend({
         sections,
         reports,
         globalVariables,
         chartCatalog,
         userId
-      }, isStale);
+      }, owner))) {
+        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
+      }
 
       // Delete the temporary demo user from the database
       // This cleans up the user record since all data is now in IndexedDB
@@ -573,12 +589,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.warn('[AuthContext] Error deleting demo user:', deleteError);
       }
 
-      // A newer sign-in/out or concurrent demo attempt took over while we
-      // seeded — do not resurrect this attempt's identity over theirs (review
-      // !62 round 6, Critical 2). Checked immediately before the SYNCHRONOUS
-      // state writes below, so nothing can interleave between guard and writes.
-      if (isStale()) {
-        return { error: new Error('Demo sign-in was superseded before it completed') };
+      // A newer sign-in (this tab or another) claimed ownership while we seeded —
+      // do not resurrect this attempt's identity over theirs (review !62 round 7,
+      // finding 1). The read resolves a microtask before the SYNCHRONOUS state
+      // writes below, so no cross-tab storage event can interleave between them.
+      if ((await demoStorageService.readDemoOwner()) !== owner) {
+        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
       }
 
       // Enable demo mode
@@ -647,13 +663,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   /**
    * Clear all demo data from IndexedDB
    */
-  const clearDemoData = async () => {
-    // Even this deliberate clear is a destructive caller (review !62 round 6,
-    // Critical 2): guard it so a sign-out/sign-in landing during the wipe cannot
-    // clear the NEW identity's singleton store.
-    const generation = authGenerationRef.current;
-    await demoStorageService.clearAllData(() => authGenerationRef.current !== generation);
-    console.log('[AuthContext] Demo data cleared');
+  const clearDemoData = async (): Promise<{ aborted: boolean }> => {
+    // Guard this deliberate clear by the CURRENT origin-wide owner (review !62
+    // round 7, finding 1): if a newer sign-in (any tab) has taken over the demo
+    // DB, the clear aborts rather than wiping the successor's store. The result is
+    // PROPAGATED so the caller (DemoBanner) does not then sign the successor out.
+    const owner = await demoStorageService.readDemoOwner();
+    const cleared = await demoStorageService.clearAllData(owner);
+    console.log('[AuthContext] Demo data cleared', { cleared });
+    return { aborted: !cleared };
   };
 
   /**
@@ -665,13 +683,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { error: new Error('Not authenticated') };
     }
 
-    // Capture the generation so a sign-out/sign-in landing mid-reseed aborts the
-    // destructive seed before it wipes the singleton store and writes this (now
-    // former) identity's tenant data over the new one (review !62 round 6,
-    // Critical 2). A reseed is not an auth transition, so capture WITHOUT
-    // bumping — only signIn/signOut move the generation.
-    const reseedGeneration = authGenerationRef.current;
-    const isStale = () => authGenerationRef.current !== reseedGeneration;
+    // Read the CURRENT origin-wide owner (review !62 round 7, finding 1): a reseed
+    // is not a new sign-in, so it does not claim ownership — it asserts it still
+    // holds it. If a sign-in (any tab) claims a new token mid-reseed, the seed
+    // aborts before it wipes the singleton store and writes this (now former)
+    // identity's data over the successor's.
+    const owner = await demoStorageService.readDemoOwner();
 
     try {
       // Fetch all data in parallel from the backend
@@ -713,17 +730,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         chartCatalog = data.catalog || data.data || null;
       }
 
-      // Reseed the demo database (this clears existing data first)
-      if (isStale()) {
-        return { error: new Error('Reseed was superseded by a sign-in change') };
-      }
-      await demoStorageService.seedFromBackend({
+      // Reseed the demo database (this clears existing data first). A false return
+      // means the seed ABORTED because ownership moved on — propagate it as an
+      // error so Settings does NOT reload the successor's page (review !62 round 7,
+      // finding 1).
+      if (!(await demoStorageService.seedFromBackend({
         sections,
         reports,
         globalVariables,
         chartCatalog,
         userId: user.id
-      }, isStale);
+      }, owner))) {
+        return { error: new Error('Reseed was superseded by a newer sign-in') };
+      }
 
       console.log('[AuthContext] Demo data reseeded from backend', {
         sections: sections.length,

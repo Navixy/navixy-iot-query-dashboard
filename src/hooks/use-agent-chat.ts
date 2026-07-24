@@ -243,6 +243,14 @@ export function useAgentSession() {
   });
 }
 
+/** Mutation variables: the wire request PLUS the send-time bearer token, bound to
+ *  THIS turn (review !62 round 7, finding 2). getAuthHeaders re-reads localStorage
+ *  at request time, so binding the token here — captured at send, split off before
+ *  the body is serialized — is what stops a cross-tab sign-in after the send-time
+ *  guard from POSTing this turn under the next identity. authToken never reaches
+ *  the wire body. */
+export type AgentChatVariables = AgentChatRequest & { authToken: string | null };
+
 /**
  * Sends one chat turn (POST /api/agent/chat). The caller owns session_id
  * threading and transcript state; this hook owns transport and the session
@@ -252,10 +260,12 @@ export function useAgentChatMutation() {
   const queryClient = useQueryClient();
   const { authSessionId } = useAuth();
 
-  return useMutation<AgentChatResponse, Error, AgentChatRequest, AgentChatMutationContext>({
+  return useMutation<AgentChatResponse, Error, AgentChatVariables, AgentChatMutationContext>({
     mutationKey: agentChatMutationKey(authSessionId),
-    mutationFn: async (params) => {
-      const response = await apiService.agentChat(params);
+    mutationFn: async ({ authToken, ...params }) => {
+      // authToken is split off here so it is bound to the Authorization header and
+      // never serialized into the body (finding 2).
+      const response = await apiService.agentChat(params, authToken);
       // Throw on response.error so onError/onSuccess split cleanly: transport
       // failures and non-200 statuses land in onError; everything the server
       // answered 200 with — including the in-band type:'error' — lands in

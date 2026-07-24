@@ -1,6 +1,6 @@
 // A real (in-memory) IndexedDB so Dexie runs exactly as it does in the browser,
 // including transaction serialization on overlapping stores — the property the
-// in-transaction identity guard relies on.
+// in-transaction ownership guard relies on.
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { demoStorageService } from '@/services/demoStorage';
@@ -14,48 +14,75 @@ const seed = (userId: string) => ({
 });
 
 beforeEach(async () => {
-  // Fresh store each test: no predicate → a real clear.
+  // Fresh data each test: no expected owner → an unconditional clear.
   await demoStorageService.clearAllData();
 });
 
 /**
- * review !62 round 5, Critical 2. Before the fix, clearAllData/seedFromBackend
- * had NO identity guard at all — it lived only in AuthContext BEFORE the call,
- * leaving the awaits inside these operations as an interleaving window. These
- * pin the guard INSIDE the destructive operations: a superseded run (shouldAbort
- * → true) must leave the current identity's singleton store untouched.
+ * review !62 round 7, finding 1. Round 6 guarded these destructive ops with a
+ * TAB-LOCAL React ref, so a concurrent demo sign-in in ANOTHER tab could not be
+ * seen as stale and its late seed clobbered the singleton store. The guard is now
+ * an ORIGIN-WIDE token stored in IndexedDB and re-read INSIDE each destructive
+ * transaction. These pin that a run whose ownership moved on aborts (returns
+ * false) and leaves the successor's store untouched — and that the abort is
+ * observable to the caller.
  */
-describe('demoStorage identity guard', () => {
-  it('clearAllData(shouldAbort→true) leaves the current identity data intact', async () => {
-    await demoStorageService.seedFromBackend(seed('A'));
+describe('demoStorage origin-wide ownership guard', () => {
+  it('a clear whose ownership moved on aborts and leaves the current data intact', async () => {
+    const a = await demoStorageService.claimDemoOwnership();
+    await demoStorageService.seedFromBackend(seed('A'), a);
     expect(await demoStorageService.isSeeded()).toBe(true);
 
-    // A run whose identity was superseded while it awaited must NOT wipe the store.
-    await demoStorageService.clearAllData(() => true);
+    // Another sign-in (any tab) claims a new token — 'a' is now stale.
+    await demoStorageService.claimDemoOwnership();
 
+    // The stale clear aborts and does NOT wipe the store.
+    expect(await demoStorageService.clearAllData(a)).toBe(false);
     expect(await demoStorageService.isSeeded()).toBe(true);
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
   });
 
-  it('clearAllData() with no predicate still clears (normal path unaffected)', async () => {
-    await demoStorageService.seedFromBackend(seed('A'));
-    await demoStorageService.clearAllData();
+  it('a clear with the CURRENT owner runs and returns true', async () => {
+    const a = await demoStorageService.claimDemoOwnership();
+    await demoStorageService.seedFromBackend(seed('A'), a);
+    expect(await demoStorageService.clearAllData(a)).toBe(true);
+    expect(await demoStorageService.isSeeded()).toBe(false);
+  });
+
+  it('clearAllData() with no expected owner still clears (legacy path)', async () => {
+    const a = await demoStorageService.claimDemoOwnership();
+    await demoStorageService.seedFromBackend(seed('A'), a);
+    expect(await demoStorageService.clearAllData()).toBe(true);
     expect(await demoStorageService.isSeeded()).toBe(false);
     expect(await demoStorageService.getSections()).toEqual([]);
   });
 
-  it('seedFromBackend(..., shouldAbort→true) neither wipes nor replaces the current identity data', async () => {
-    await demoStorageService.seedFromBackend(seed('A'));
+  it('a seed whose ownership moved on neither wipes nor replaces the current data', async () => {
+    const a = await demoStorageService.claimDemoOwnership();
+    await demoStorageService.seedFromBackend(seed('A'), a);
 
-    // A superseded seed of B's data (its internal clear AND its write both abort).
-    await demoStorageService.seedFromBackend(seed('B'), () => true);
+    // B claims, then C claims — B's token is now stale.
+    const b = await demoStorageService.claimDemoOwnership();
+    await demoStorageService.claimDemoOwnership();
+
+    // B's superseded seed aborts (its internal clear AND its write both abort).
+    expect(await demoStorageService.seedFromBackend(seed('B'), b)).toBe(false);
 
     // A survived; B was never written.
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
   });
 
-  it('seedFromBackend(..., shouldAbort→false) seeds normally', async () => {
-    await demoStorageService.seedFromBackend(seed('A'), () => false);
+  it('a seed with the CURRENT owner seeds normally and returns true', async () => {
+    const owner = await demoStorageService.claimDemoOwnership();
+    expect(await demoStorageService.seedFromBackend(seed('A'), owner)).toBe(true);
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
+  });
+
+  it('readDemoOwner reflects the latest claim', async () => {
+    const a = await demoStorageService.claimDemoOwnership();
+    expect(await demoStorageService.readDemoOwner()).toBe(a);
+    const b = await demoStorageService.claimDemoOwnership();
+    expect(await demoStorageService.readDemoOwner()).toBe(b);
+    expect(b).not.toBe(a);
   });
 });

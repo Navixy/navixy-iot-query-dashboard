@@ -8,7 +8,7 @@ import type { DateFormat, TimeFormat } from '@/utils/datetime';
 import type { ChartCatalog } from '@/types/chart-catalog';
 import type { MenuTree, ReorderResponse, RenameResponse, DeleteSectionResponse, DeleteReportResponse } from '@/types/menu-editor';
 import type { CompositeReport, CompositeReportExecutionResult, StoredReport, RawReportSchema } from '@/types/dashboard-types';
-import type { AgentChatRequest, AgentChatResponse, AgentSessionResponse } from '@/types/agent';
+import type { AgentChatRequest, AgentChatResponse, AgentSessionResponse, AgentTurnStatusResponse } from '@/types/agent';
 import { toErrorMeta } from '@/utils/errors';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -91,16 +91,22 @@ class ApiService {
     options: RequestInit = {}
   ): Promise<ApiResponse<T>> {
     const url = `${API_BASE_URL}${endpoint}`;
+    // Destructure headers OUT of options so the merged set wins: a caller-supplied
+    // header (e.g. agentChat's bound Authorization, review !62 round 7 finding 2)
+    // merges over getAuthHeaders while Content-Type is preserved. Spreading the
+    // whole `options` after `headers` used to re-apply options.headers on top,
+    // dropping Content-Type and the default auth header.
+    const { headers: optionHeaders, ...restOptions } = options;
     const headers = {
       'Content-Type': 'application/json',
       ...this.getAuthHeaders(),
-      ...options.headers,
+      ...optionHeaders,
     };
 
     try {
       const response = await fetch(url, {
+        ...restOptions,
         headers,
-        ...options,
       });
 
       const data = await response.json();
@@ -871,12 +877,25 @@ class ApiService {
    * REVIEWERS: CLAUDE.md's rule "verify the same shape is honoured in demoApi.ts"
    * does NOT apply to this method. This comment is the record of the exception.
    */
-  async agentChat(params: AgentChatRequest): Promise<ApiResponse<AgentChatResponse>> {
+  async agentChat(
+    params: AgentChatRequest,
+    authToken?: string | null,
+  ): Promise<ApiResponse<AgentChatResponse>> {
     // The whole body forwards, including client_turn_id (review !62 round 6) — the
     // server persists it on the user turn and returns it in GET /session.
+    //
+    // BIND the send-time token (review !62 round 7, finding 2): getAuthHeaders
+    // re-reads localStorage at REQUEST time, so a cross-tab sign-in between the
+    // send-time guard and here would POST this turn under the NEW identity's
+    // token. When the caller passes the token captured at send, build the
+    // Authorization header from THAT snapshot; options.headers wins the merge in
+    // request(), so it overrides the localStorage-derived header. Omit to keep the
+    // legacy behaviour for non-chat callers.
+    const authHeader = authToken ? { Authorization: `Bearer ${authToken}` } : undefined;
     return this.request<AgentChatResponse>('/api/agent/chat', {
       method: 'POST',
       body: JSON.stringify(params),
+      ...(authHeader ? { headers: authHeader } : {}),
       // A ceiling above the server's AGENT_TIMEOUT_MS (180 s), not a policy
       // deadline: it exists so a wedged connection cannot hang a tab forever;
       // the server's deadline is the real one and fires first. Do not lower it
@@ -889,6 +908,15 @@ class ApiService {
 
   async getAgentSession(): Promise<ApiResponse<AgentSessionResponse>> {
     return this.request<AgentSessionResponse>('/api/agent/session');
+  }
+
+  /** Durable per-turn status lookup (review !62 round 7, finding 5b): confirms a
+   *  turn's delivery by client_turn_id even after it has been evicted from the
+   *  capped transcript. */
+  async getAgentTurnStatus(clientTurnId: string): Promise<ApiResponse<AgentTurnStatusResponse>> {
+    return this.request<AgentTurnStatusResponse>(
+      `/api/agent/turn-status?client_turn_id=${encodeURIComponent(clientTurnId)}`,
+    );
   }
 
   // Panel Export
