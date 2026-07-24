@@ -8,7 +8,7 @@ import type { DateFormat, TimeFormat } from '@/utils/datetime';
 import type { ChartCatalog } from '@/types/chart-catalog';
 import type { MenuTree, ReorderResponse, RenameResponse, DeleteSectionResponse, DeleteReportResponse } from '@/types/menu-editor';
 import type { CompositeReport, CompositeReportExecutionResult, StoredReport, RawReportSchema } from '@/types/dashboard-types';
-import type { AgentChatResponse, AgentSessionResponse } from '@/types/agent';
+import type { AgentChatRequest, AgentChatResponse, AgentSessionResponse } from '@/types/agent';
 import { toErrorMeta } from '@/utils/errors';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -871,7 +871,9 @@ class ApiService {
    * REVIEWERS: CLAUDE.md's rule "verify the same shape is honoured in demoApi.ts"
    * does NOT apply to this method. This comment is the record of the exception.
    */
-  async agentChat(params: { session_id?: string | null; message: string }): Promise<ApiResponse<AgentChatResponse>> {
+  async agentChat(params: AgentChatRequest): Promise<ApiResponse<AgentChatResponse>> {
+    // The whole body forwards, including client_turn_id (review !62 round 6) — the
+    // server persists it on the user turn and returns it in GET /session.
     return this.request<AgentChatResponse>('/api/agent/chat', {
       method: 'POST',
       body: JSON.stringify(params),

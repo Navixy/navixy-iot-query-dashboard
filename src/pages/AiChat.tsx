@@ -21,6 +21,7 @@ import { trimHistoryOverlap } from '@/components/ai-chat/historyOverlap';
 import {
   appendUncertainNotice,
   classifyTurnDelivery,
+  locksComposerAwaitingReply,
   reconcileOutcome,
   type TurnDelivery,
 } from '@/components/ai-chat/turnDelivery';
@@ -90,11 +91,17 @@ const AiChat = () => {
     select: (mutation) => ({
       mutationId: mutation.mutationId,
       message: (mutation.state.variables as AgentChatRequest | undefined)?.message ?? '',
+      // The client-minted idempotency id this turn was sent with (review !62
+      // round 6): the reconciler matches the server transcript by it, so a lost
+      // response is classified deterministically rather than by content.
+      clientTurnId:
+        (mutation.state.variables as AgentChatRequest | undefined)?.client_turn_id ?? null,
       errorMessage:
         mutation.state.error instanceof Error ? mutation.state.error.message : '',
-      // Send-time occurrence baseline (review !62 round 4, Important 2): how
-      // many identical user turns the client already knew about when this turn
-      // was sent, so the reconciler counts only a NEW occurrence as delivery.
+      // Send-time occurrence baseline (review !62 round 4, Important 2): the
+      // FALLBACK for a tenant whose server does not round-trip ids — how many
+      // identical user turns the client already knew about when this turn was
+      // sent, so content reconciliation counts only a NEW occurrence as delivery.
       priorSameContentUserTurns:
         (mutation.state.context as AgentChatMutationContext | undefined)
           ?.priorSameContentUserTurns ?? 0,
@@ -113,11 +120,20 @@ const AiChat = () => {
     (f) => !handledFailedTurnsRef.current.has(f.mutationId),
   ).length;
 
+  // A delivered-but-unanswered turn ('received') or one reconciliation could not
+  // confirm ('uncertain') leaves the composer LOCKED (review !62 round 6,
+  // Important 4): the first turn may still be running on the stateful agent, and
+  // a second POST would race it and interleave the transcript. Mount-local, so a
+  // page reload — which re-reads the session and observes the reply if it landed
+  // — is the explicit way out. See locksComposerAwaitingReply.
+  const [awaitingServerReply, setAwaitingServerReply] = useState(false);
+
   const isChatPending =
     pendingChatTurns.length > 0 ||
     chat.isPending ||
     reconcilingCount > 0 ||
-    unhandledFailedTurns > 0;
+    unhandledFailedTurns > 0 ||
+    awaitingServerReply;
 
   // D13: the SERVER is authoritative. Seeded from the session query, then
   // OVERWRITTEN from every single response — including error responses, which
@@ -229,6 +245,7 @@ const AiChat = () => {
             delivery = classifyTurnDelivery(
               response.data.messages,
               failed.message,
+              failed.clientTurnId,
               failed.priorSameContentUserTurns,
             );
             if (delivery !== 'lost') break; // delivered — stop polling
@@ -236,6 +253,13 @@ const AiChat = () => {
           }
 
           const outcome = reconcileOutcome(authoritative !== null, delivery, lastGetSucceeded);
+          // Lock the composer if this turn may still be running on the agent
+          // ('received') or its fate is unknown ('uncertain') — a second POST now
+          // would race it (review !62 round 6, Important 4). Sticky once set: only
+          // a reload (fresh mount) clears it, having re-read the session.
+          if (locksComposerAwaitingReply(outcome, delivery)) {
+            setAwaitingServerReply(true);
+          }
           if (authoritative && outcome === 'delivered') {
             // The server HAS the turn. Render server truth wholesale: the
             // authoritative transcript replaces both sources (older client-only
@@ -347,10 +371,14 @@ const AiChat = () => {
   const send = () => {
     const message = composerValue.trim();
     if (message === '' || isChatPending) return;
+    // Mint a per-send idempotency id (review !62 round 6): the server persists it
+    // on the user turn and returns it in GET /session, so a lost response is
+    // reconciled by id (classifyTurnDelivery), not by fragile content matching.
+    const clientTurnId = crypto.randomUUID();
     setComposerValue('');
     setLiveBubbles((prev) => [...prev, { id: nextLiveId(), role: 'user', text: message }]);
     chat.mutate(
-      { session_id: sessionIdRef.current, message },
+      { session_id: sessionIdRef.current, message, client_turn_id: clientTurnId },
       {
         // This mutate-level callback updates THIS mount's transcript and is
         // skipped if the page unmounts mid-turn — liveBubbles die with the
