@@ -7,6 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import {
   agentChatMutationKey,
   agentSessionQueryKey,
+  pruneSettledChatMutations,
   useAgentChatMutation,
   useAgentSession,
   type AgentChatMutationContext,
@@ -321,6 +322,21 @@ const AiChat = () => {
     };
     void run();
   }, [failedChatTurns, queryClient, authSessionId]);
+
+  // With gcTime: Infinity keeping unresolved turns alive across remounts (review
+  // !62 round 6, Important 3), SUCCEEDED turns would otherwise pile up in the
+  // mutation cache until sign-out. Their result is already in the session cache
+  // and the transcript, so prune them once settled — only unresolved turns
+  // (pending, or a kept-uncertain error) then persist.
+  const settledSuccessCount = useMutationState({
+    filters: { mutationKey: chatMutationKey, status: 'success' },
+    select: (mutation) => mutation.mutationId,
+  }).length;
+  useEffect(() => {
+    if (settledSuccessCount > 0) {
+      pruneSettledChatMutations(queryClient, authSessionId);
+    }
+  }, [settledSuccessCount, queryClient, authSessionId]);
 
   // MR 6 reads this to decide whether to render the Apply button. Computed here
   // so there is exactly one definition of the rule (D15): Apply is admin/editor
