@@ -6,6 +6,7 @@ import {
   countMatchingUserTurns,
   locksComposerAwaitingReply,
   reconcileOutcome,
+  reconcileReceiptOutcome,
   sessionAwaitsReply,
   UNCERTAIN_DELIVERY_NOTICE,
 } from '../turnDelivery';
@@ -174,6 +175,36 @@ describe('applyReceiptToDelivery — durable receipt reconfirmation (review !62 
   it('never reconsiders a positive verdict (a receipt cannot un-happen a delivery)', () => {
     expect(applyReceiptToDelivery('completed', { status: 'unknown', supported: true })).toBe('completed');
     expect(applyReceiptToDelivery('received', { status: 'unknown', supported: true })).toBe('received');
+  });
+});
+
+describe('reconcileReceiptOutcome — an unavailable receipt is NOT proof of loss (review !62 round 8, finding 3)', () => {
+  it('confirms loss ONLY on a supported+unknown receipt within the retention window', () => {
+    expect(reconcileReceiptOutcome({ status: 'unknown', supported: true }, true)).toBe('confirmed-lost');
+  });
+
+  it('is uncertain — not confirmed-lost — when the receipt lookup was UNAVAILABLE', () => {
+    // The exact round-8 bug: getAgentTurnStatus failed (null) → old code folded to
+    // 'lost' → confirmed-lost → restored a resendable draft for a turn that may
+    // have been delivered+answered.
+    expect(reconcileReceiptOutcome(null, true)).toBe('uncertain');
+  });
+
+  it('is uncertain when receipts are UNSUPPORTED (older schema / demo)', () => {
+    expect(reconcileReceiptOutcome({ status: 'unknown', supported: false }, true)).toBe('uncertain');
+  });
+
+  it('is uncertain when the receipt may have EXPIRED (outside the retention window)', () => {
+    // A supported 'unknown' past the retention window could just mean the row was
+    // pruned (7-day server prune vs gcTime: Infinity mutation), not a lost turn.
+    expect(reconcileReceiptOutcome({ status: 'unknown', supported: true }, false)).toBe('uncertain');
+  });
+
+  it('is delivered when the receipt positively confirms the turn (answered / received)', () => {
+    expect(reconcileReceiptOutcome({ status: 'answered', supported: true }, true)).toBe('delivered');
+    expect(reconcileReceiptOutcome({ status: 'received', supported: true }, true)).toBe('delivered');
+    // A positive receipt is trustworthy regardless of the retention window.
+    expect(reconcileReceiptOutcome({ status: 'answered', supported: true }, false)).toBe('delivered');
   });
 });
 

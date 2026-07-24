@@ -193,6 +193,33 @@ export function applyReceiptToDelivery(
 }
 
 /**
+ * The reconcile outcome for an ID-PATH turn ABSENT from the capped transcript
+ * (review !62 round 8, finding 3). On the id path a transcript 'lost' means only
+ * "not in the newest-100 window" — a delivered+answered turn's rows can be evicted
+ * by 100 newer turns while its mutation lives on (gcTime: Infinity). The DURABLE
+ * receipt is the ONLY authority, so 'lost' must be PROVEN, never assumed:
+ *
+ * - answered / received  → 'delivered' (the turn landed; render server truth).
+ * - supported + 'unknown' WITHIN the retention window → 'confirmed-lost': the turn
+ *   is absent from the receipts table too, and that table is guaranteed to still
+ *   hold it, so it genuinely never reached the server → safe to restore the draft.
+ * - anything else → 'uncertain', NEVER confirmed-lost. An UNAVAILABLE receipt
+ *   (lookup failed), an UNSUPPORTED one (older schema / demo — 'unknown' is
+ *   uninformative there), or an EXPIRED one (older than the receipt retention, so
+ *   an 'unknown' may just mean the row was pruned) is not proof of loss.
+ *   Restoring the draft there would invite re-feeding the stateful agent a turn it
+ *   may have taken (R20/D19); preserve the message, do not auto-resend.
+ */
+export function reconcileReceiptOutcome(
+  receipt: { status: 'received' | 'answered' | 'unknown'; supported: boolean } | null,
+  withinRetentionWindow: boolean,
+): ReconcileOutcome {
+  if (!receipt?.supported) return 'uncertain';
+  if (receipt.status === 'answered' || receipt.status === 'received') return 'delivered';
+  return withinRetentionWindow ? 'confirmed-lost' : 'uncertain';
+}
+
+/**
  * True when the persisted transcript's NEWEST turn is a USER turn — a turn is
  * still in flight, because the route appends the assistant reply only AFTER the
  * agent call (review !62 round 7, finding 4). Deriving the composer lock from this
