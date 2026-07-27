@@ -4,6 +4,7 @@ import {
   agentChatMutationKey,
   agentSessionQueryKey,
   createAgentChatContext,
+  fetchAgentSession,
   pruneSettledChatMutations,
   settleChatTurnIntoSessionCache,
 } from '../use-agent-chat';
@@ -149,6 +150,95 @@ describe('createAgentChatContext — send-time occurrence baseline (review !62 r
     );
     await expect(createAgentChatContext(client, 'd')).resolves.toBeTruthy();
     expect(apiService.getAgentSession).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * review !62 round 9, finding 3. The round-8 guard treated ANY cached snapshot as
+ * authoritative, so it only ever fired on an empty cache. But a cache left by a
+ * PREVIOUS mount is not server truth: navigate away with an idle transcript, let
+ * another tab (or this user elsewhere) send a turn, come back — React Query
+ * serves that stale idle cache immediately and refetches in parallel, so
+ * serverAwaitingReply is false, the composer is open, and a fast Send starts a
+ * SECOND turn on the stateful agent without ever waiting for the refetch.
+ *
+ * A snapshot is authoritative only when no fetch is in flight against it. When
+ * one is, the send joins it (fetchQuery dedups onto the mount refetch — no extra
+ * round trip) and judges the FRESH transcript.
+ */
+describe('createAgentChatContext — an unvalidated cached snapshot is not authority (round 9, finding 3)', () => {
+  /** Put the query into 'fetching' with a stale snapshot already cached, exactly
+   *  as a remount does, and hand back the resolver for the in-flight GET. */
+  const remountWithStaleCache = (client: QueryClient, epoch: string, cached: AgentSessionResponse) => {
+    client.setQueryData(agentSessionQueryKey(epoch), cached);
+    let settle!: (value: { data: AgentSessionResponse }) => void;
+    vi.mocked(apiService.getAgentSession).mockImplementation(
+      () => new Promise((resolve) => { settle = resolve; }),
+    );
+    // The mount's own refetch — started, deliberately not awaited.
+    void client.fetchQuery({
+      queryKey: agentSessionQueryKey(epoch),
+      queryFn: fetchAgentSession,
+      retry: false,
+    }).catch(() => null);
+    return () => settle;
+  };
+
+  it('waits for the in-flight refetch and rejects when it reveals an unanswered turn', async () => {
+    const epoch = beginAuthSession();
+    const client = new QueryClient();
+    // What THIS mount was handed instantly: a transcript that looks idle.
+    const getSettle = remountWithStaleCache(client, epoch, session([user('a'), assistant('b')]));
+
+    const pending = createAgentChatContext(client, 'second prompt');
+    // The server actually holds a turn sent from elsewhere that is still running.
+    getSettle()({ data: session([user('a'), assistant('b'), user('sent elsewhere')]) });
+
+    await expect(pending).rejects.toThrow(/awaiting a reply/i);
+    // Joined the mount refetch rather than issuing its own GET.
+    expect(apiService.getAgentSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('proceeds — with the FRESH baseline — when the refetch shows the session idle', async () => {
+    const epoch = beginAuthSession();
+    const client = new QueryClient();
+    const getSettle = remountWithStaleCache(client, epoch, session([user('refresh'), assistant('b')]));
+
+    const pending = createAgentChatContext(client, 'refresh');
+    // The server has one MORE identical turn than the stale cache knew about.
+    getSettle()({
+      data: session([user('refresh'), assistant('b'), user('refresh'), assistant('c')]),
+    });
+
+    const context = await pending;
+    // Baselined against server truth (2), not the stale cache (1) — otherwise a
+    // lost send would be absorbed by an occurrence it never produced.
+    expect(context.priorSameContentUserTurns).toBe(2);
+  });
+
+  it('keeps the cached baseline when the in-flight refetch FAILS (B5-R5: never brick the send)', async () => {
+    const epoch = beginAuthSession();
+    const client = new QueryClient();
+    const cached = session([user('refresh'), assistant('b')]);
+    client.setQueryData(agentSessionQueryKey(epoch), cached);
+    let fail!: (error: Error) => void;
+    vi.mocked(apiService.getAgentSession).mockImplementation(
+      () => new Promise((_resolve, reject) => { fail = reject; }),
+    );
+    void client.fetchQuery({
+      queryKey: agentSessionQueryKey(epoch),
+      queryFn: fetchAgentSession,
+      retry: false,
+    }).catch(() => null);
+
+    const pending = createAgentChatContext(client, 'refresh');
+    fail(new Error('network down'));
+
+    const context = await pending;
+    // A read that cannot validate is not a reason to refuse the send, and the
+    // stale snapshot is still a better baseline than none.
+    expect(context.snapshotAtSend).toBe(cached);
+    expect(context.priorSameContentUserTurns).toBe(1);
   });
 });
 

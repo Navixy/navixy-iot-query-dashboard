@@ -100,10 +100,12 @@ export async function fetchAgentSession(): Promise<AgentSessionResponse> {
  *  against an empty cache (0) there is unsound — if this send is lost and the
  *  server already holds an identical earlier turn, the reconciler would see
  *  that old occurrence and call the lost send 'completed', silently dropping
- *  it. When the snapshot is absent we therefore AWAIT the session read
- *  (ensureQueryData dedups onto the in-flight GET — no extra round-trip in the
- *  common case) to capture the true pre-send transcript before the POST fires.
- *  A failed read leaves the baseline 0 — the acknowledged residual a stable
+ *  it. When the snapshot is not AUTHORITATIVE — absent, or still being validated
+ *  by an in-flight refetch (review !62 round 9, finding 3) — we therefore AWAIT
+ *  the session read (fetchQuery dedups onto the in-flight GET, so joining a
+ *  mount refetch costs no extra round trip) to capture the true pre-send
+ *  transcript before the POST fires. A failed read leaves the baseline at
+ *  whatever was cached — 0 when nothing was — the acknowledged residual a stable
  *  client turn id would close (see classifyTurnDelivery).
  *
  *  REJECT-BEFORE-POST (review !62 round 6, Critical 1): making this async opened
@@ -129,31 +131,60 @@ export async function createAgentChatContext(
   // anchor is still its own; comparing the two below catches that.
   const tabTokenAtSend = getTabSessionToken();
   const sessionKey = agentSessionQueryKey(authSessionAtSend);
-  let snapshotAtSend =
-    queryClient.getQueryData<AgentSessionResponse>(sessionKey) ?? null;
-  const awaitedSessionRead = snapshotAtSend === null && authSessionAtSend !== null;
-  if (awaitedSessionRead) {
-    snapshotAtSend = await queryClient
+  const sessionState = queryClient.getQueryState<AgentSessionResponse>(sessionKey);
+  const cachedSnapshot = sessionState?.data ?? null;
+  let snapshotAtSend = cachedSnapshot;
+  // WHEN IS THE CACHE AUTHORITY? (review !62 round 9, finding 3.) Round 8 asked
+  // only "is it empty", which treated a snapshot left by a PREVIOUS mount as
+  // server truth. It is not: navigate away with an idle transcript, let a turn be
+  // sent from elsewhere, come back — React Query serves that stale idle cache
+  // instantly and refetches in parallel, so serverAwaitingReply is false, the
+  // composer is open, and a fast Send starts a SECOND turn on the stateful agent
+  // without ever waiting for the refetch. A snapshot is authoritative only when
+  // no fetch is in flight against it; while one is, this send joins it.
+  const needsAuthoritativeRead =
+    authSessionAtSend !== null &&
+    (cachedSnapshot === null || sessionState?.fetchStatus === 'fetching');
+  // Did this send actually OBTAIN server truth? Only then may it judge whether a
+  // turn is still awaiting a reply — a failed read leaves us with the same data
+  // the component already saw, which is no basis for refusing the send.
+  let hasAuthoritativeSnapshot = false;
+  if (needsAuthoritativeRead) {
+    const fresh = await queryClient
+      // fetchQuery, not ensureQueryData: ensureQueryData returns cached data
+      // WITHOUT waiting, which is precisely the defect above. fetchQuery dedups
+      // onto an in-flight fetch for the same key, so joining the mount refetch
+      // costs no extra round trip; with an empty cache it behaves as before.
       // retry:false so a wedged read cannot delay the POST behind three backoffs
       // — it matches useAgentSession's own retry policy.
-      .ensureQueryData<AgentSessionResponse>({
+      .fetchQuery<AgentSessionResponse>({
         queryKey: sessionKey,
         queryFn: fetchAgentSession,
         retry: false,
       })
+      // A read that cannot validate must not brick the send (B5-R5).
       .catch(() => null);
+    if (fresh !== null) {
+      snapshotAtSend = fresh;
+      hasAuthoritativeSnapshot = true;
+    }
+    // On failure snapshotAtSend keeps the PRE-await value: null when the cache was
+    // empty, otherwise the stale snapshot — still a better reconciliation baseline
+    // than none.
   }
-  // RELOAD-WINDOW GUARD (review !62 round 8, finding 4). The composer is usable
-  // before the initial GET resolves — gating it on the session read would brick
-  // the page for any tenant whose read fails (B5-R5) — so serverAwaitingReply has
-  // not computed yet and a fast send can race an in-flight turn on the stateful
-  // agent. When we had to AWAIT the read (empty cache: a fresh mount or reload)
-  // and it now shows a turn STILL awaiting a reply, reject the send. A CACHED
-  // snapshot is NOT this window: the component already derived serverAwaitingReply
-  // from it and locked the composer, so a normal send after a user-tail turn is
-  // unaffected. A FAILED read (snapshot null) also proceeds — preserving B5-R5.
+  // RELOAD-WINDOW GUARD (review !62 round 8, finding 4; widened round 9, finding
+  // 3). The composer is usable before a session read resolves — gating it on the
+  // read would brick the page for any tenant whose read fails (B5-R5) — so
+  // serverAwaitingReply has not computed yet and a fast send can race an in-flight
+  // turn on the stateful agent. Whenever this send had to AWAIT an authoritative
+  // read (an empty cache on a fresh mount or reload, OR a remount whose refetch
+  // had not yet validated a leftover snapshot) and that read shows a turn STILL
+  // awaiting a reply, reject. A SETTLED cached snapshot is not this window: the
+  // component already derived serverAwaitingReply from it and locked the composer.
+  // A read that FAILED leaves the pre-await snapshot, which is likewise settled
+  // component-visible data — so it too proceeds, preserving B5-R5.
   if (
-    awaitedSessionRead &&
+    hasAuthoritativeSnapshot &&
     snapshotAtSend &&
     sessionAwaitsReply(snapshotAtSend.messages, snapshotAtSend.supports_turn_ids === true)
   ) {
