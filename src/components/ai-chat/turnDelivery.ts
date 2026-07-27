@@ -220,11 +220,41 @@ export function reconcileReceiptOutcome(
 }
 
 /**
+ * Is a turn still running in this session?
+ *
+ * THE SERVER'S OWN ANSWER WINS (review !62 round 12, Important 4). It applies the
+ * same TTL as the single-active-turn guard, so an ABANDONED turn — one whose
+ * process died between the user append and the assistant append — stops counting
+ * as active there. The transcript-derived answer below has no notion of age, so it
+ * kept saying "awaiting" forever: polling gave up after 48 attempts and a reload
+ * re-read the same unmatched row, leaving the composer locked with nothing the
+ * user could do about it.
+ *
+ * The fallback stays for a legacy response that omits the field, and is what every
+ * round before this one relied on.
+ *
+ * ONE resolver for both consumers — the composer lock and the pre-send guard —
+ * because those two disagreeing is its own class of bug.
+ */
+export function sessionIsAwaitingReply(session: {
+  awaiting_reply?: boolean;
+  supports_turn_ids?: boolean;
+  messages?: AgentTurn[];
+} | null | undefined): boolean {
+  if (!session) return false;
+  if (typeof session.awaiting_reply === 'boolean') return session.awaiting_reply;
+  return sessionAwaitsReply(session.messages ?? [], session.supports_turn_ids === true);
+}
+
+/**
  * True when the persisted transcript still owes a reply — a turn is in flight,
  * because the route appends the assistant reply only AFTER the agent call
  * (review !62 round 7 finding 4; round 8 finding 4). Deriving the composer lock
  * from this SERVER state (re-read from GET /session on every mount) is what makes
  * it survive a route remount, which the round-6 mount-local flag did not.
+ *
+ * FALLBACK ONLY since round 12 — prefer sessionIsAwaitingReply, which uses the
+ * server's own age-aware verdict when the response carries one.
  *
  * Two conditions, because the newest-turn test alone was unsound under CONCURRENCY
  * (round 8): with two turns in flight the transcript can read `[user A, user B,

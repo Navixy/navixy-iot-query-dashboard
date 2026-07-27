@@ -25,7 +25,7 @@ import {
   locksComposerAwaitingReply,
   reconcileOutcome,
   reconcileReceiptOutcome,
-  sessionAwaitsReply,
+  sessionIsAwaitingReply,
   type ReconcileOutcome,
   type TurnDelivery,
 } from '@/components/ai-chat/turnDelivery';
@@ -156,10 +156,13 @@ const AiChat = () => {
   // capability lets it catch the interleaved `[user A, user B, assistant B]` case
   // where A is still running though the newest turn is an assistant (round 8,
   // finding 4).
-  const serverAwaitingReply = sessionAwaitsReply(
-    sessionQuery.data?.messages ?? [],
-    sessionQuery.data?.supports_turn_ids === true,
-  );
+  // The SERVER's verdict when it has one (review !62 round 12, Important 4): it
+  // applies the guard's TTL, so an ABANDONED turn stops counting as active. The
+  // transcript-derived fallback has no notion of age, which is why a turn whose
+  // process died between the user and assistant appends locked this composer
+  // forever — the poll gives up after 48 attempts and a reload re-reads the same
+  // unmatched row.
+  const serverAwaitingReply = sessionIsAwaitingReply(sessionQuery.data);
 
   const isChatPending =
     pendingChatTurns.length > 0 ||
