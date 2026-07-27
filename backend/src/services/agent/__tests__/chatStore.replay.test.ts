@@ -60,7 +60,7 @@ function makeScriptedPool() {
   const db = {
     sessions: [] as Array<{ id: string; user_id: string; created_at: number }>,
     messages: [] as MsgRow[],
-    receipts: [] as Array<{ client_turn_id: string; user_id: string; status: string }>,
+    receipts: [] as Array<{ client_turn_id: string; user_id: string; session_id: string; status: string; at: number }>,
   };
   const script: Script = {
     tablesExist: true,
@@ -130,8 +130,11 @@ function makeScriptedPool() {
           // else ON CONFLICT DO NOTHING
         } else {
           db.receipts.push({
-            client_turn_id: id, user_id: String(params[1]),
+            client_turn_id: id, user_id: String(params[1]), session_id: String(params[2]),
             status: answered ? 'answered' : 'received',
+            // created_at — the stub's clock is the real one; tests that care about
+            // the TTL drive it through activeTurnTtlMs instead of a fake clock.
+            at: Date.now(),
           });
         }
         return { rows: [] };
@@ -139,6 +142,22 @@ function makeScriptedPool() {
       if (q.startsWith('DELETE FROM dashboard_studio_meta_data.chat_turn_receipts')) {
         // Age-based prune; the stub has no clock, so nothing is old enough — no-op.
         return { rows: [], rowCount: 0 };
+      }
+      // SINGLE ACTIVE TURN probe (review !62 round 10): is a 'received' receipt for
+      // this session still inside the window? The stub ignores the interval bound —
+      // tests express "expired" by passing activeTurnTtlMs: 0, which the store
+      // short-circuits before reaching SQL.
+      if (
+        q.includes('FROM dashboard_studio_meta_data.chat_turn_receipts') &&
+        q.includes("status = 'received'")
+      ) {
+        const ttlMs = Number(params[2]) * 1000;
+        const cutoff = Date.now() - ttlMs;
+        const hit = db.receipts.some(
+          (r) => r.user_id === params[0] && r.session_id === params[1]
+            && r.status === 'received' && r.at > cutoff,
+        );
+        return { rows: hit ? [{ '?column?': 1 }] : [] };
       }
       if (q.includes('SELECT status FROM dashboard_studio_meta_data.chat_turn_receipts')) {
         const r = db.receipts.find(
@@ -591,5 +610,88 @@ describe('chatStore — durable turn receipts (review !62 round 7, finding 5b)',
     expect(await getTurnStatus(pool, demoIdent, 'tid-1')).toEqual({
       status: 'unknown', supported: false,
     });
+  });
+});
+
+/**
+ * SINGLE ACTIVE TURN PER SESSION, Postgres half (review !62 round 10,
+ * Important 3/4).
+ *
+ * The receipts table added in round 7 already IS this state — 'received' the
+ * moment a user turn is persisted, 'answered' when its reply lands — so the guard
+ * needs no new table and no migration, and being in the tenant's own database it
+ * is correct ACROSS REPLICAS, which a per-process map would not be.
+ *
+ * The check must sit inside the append's own transaction, behind the session row
+ * lock: otherwise two concurrent POSTs can both observe an idle session.
+ */
+describe('chatStore — single active turn on Postgres (review !62 round 10)', () => {
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses a second turn while the first receipt is still "received"', async () => {
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard),
+    ).toBe('appended');
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('busy');
+
+    // Refused means NOT WRITTEN — no phantom row, and no receipt for the refused
+    // turn, so the client's reconciler correctly calls it never-delivered.
+    expect(db.messages.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['first']);
+    expect(db.receipts.map((r) => r.client_turn_id)).toEqual(['t1']);
+  });
+
+  it('admits the next turn once the reply flips the receipt to "answered"', async () => {
+    const { pool } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    // The assistant turn RELEASES the guard, so it is never subject to it.
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('answer', 't1')]);
+
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
+  });
+
+  it('takes the session row lock BEFORE deciding — the check must not be raceable', async () => {
+    const { pool, calls } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    calls.length = 0;
+
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard);
+
+    const lockAt = calls.findIndex((q) => q.includes('FOR UPDATE'));
+    const probeAt = calls.findIndex((q) => q.includes("status = 'received'"));
+    const rollbackAt = calls.indexOf('ROLLBACK');
+    expect(lockAt).toBeGreaterThanOrEqual(0);
+    expect(probeAt).toBeGreaterThan(lockAt);
+    // ...and a refusal must END the transaction, never leave it open.
+    expect(rollbackAt).toBeGreaterThan(probeAt);
+    expect(calls).not.toContain('COMMIT');
+  });
+
+  it('does not probe at all when the guard is not asked for', async () => {
+    const { pool, calls } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    calls.length = 0;
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')]);
+    expect(calls.some((q) => q.includes("status = 'received'"))).toBe(false);
+  });
+
+  it('degrades to NO lock on a tenant without the receipts table', async () => {
+    // Same policy the rest of this subsystem takes on an older schema — and the
+    // reason the client-side guards stay in place rather than being replaced.
+    const { pool, script } = makeScriptedPool();
+    script.receiptsTable = false;
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
   });
 });

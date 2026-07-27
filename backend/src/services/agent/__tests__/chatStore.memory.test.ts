@@ -350,13 +350,121 @@ describe('chatStore — the Postgres failure contract (never rejects)', () => {
 
   it('appendTurns RESOLVES when the pool rejects, and the turn survives in memory', async () => {
     const { sessionId } = await loadHistory(rejectingPool, ident('u1'), null);
+    // Resolves rather than rejecting — and says the turn WAS written (to memory).
+    // 'busy' is reserved for a refused turn (review !62 round 10) and must never
+    // be what a degraded pool produces.
     await expect(
       appendTurns(rejectingPool, ident('u1'), sessionId, [user('degraded but alive')]),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe('appended');
 
     // The whole degraded flow stays coherent for this process.
     const reloaded = await loadHistory(rejectingPool, ident('u1'), sessionId);
     expect(reloaded.sessionId).toBe(sessionId);
     expect(reloaded.history).toEqual([user('degraded but alive')]);
+  });
+});
+
+/**
+ * SINGLE ACTIVE TURN PER SESSION (review !62 round 10, Important 3/4) — the
+ * in-memory half, which is also the DEMO half (a demo identity never reaches
+ * Postgres).
+ *
+ * Every client-side guard against a second concurrent turn is per-tab and
+ * best-effort: two tabs are not synchronized, a transient GET failure leaves one
+ * unable to tell whether a turn is running, and an identical repeat login used to
+ * mint a token that fired no storage event at all. Bedrock keys its conversation
+ * memory server-side on the session id, so a second concurrent turn corrupts the
+ * dialogue for BOTH tabs. The store is the one place that sees every tab.
+ */
+describe('chatStore — single active turn (review !62 round 10)', () => {
+  const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const replyWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses a second turn while the first is unanswered', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard),
+    ).toBe('appended');
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('busy');
+
+    // Refused means NOT WRITTEN — a rejected turn must not leave a phantom in the
+    // transcript, or the client's reconciler would call it delivered.
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history).toEqual([userWithId('first', 't1')]);
+  });
+
+  it('admits the next turn once the reply lands', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    // The assistant turn RELEASES the guard, so it must never be subject to it.
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer', 't1')]),
+    ).toBe('appended');
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
+  });
+
+  it('catches an INTERLEAVED unanswered turn, not just a trailing one', async () => {
+    // [user A, user B, assistant B]: the newest turn is an assistant, but A is
+    // still running. Pairing by client_turn_id is what sees that.
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('A', 'ta')]);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('B', 'tb')]);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer B', 'tb')]);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('C', 'tc')], guard),
+    ).toBe('busy');
+  });
+
+  it('releases an ABANDONED turn after the TTL, so a dead turn cannot wedge the session', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('crashed mid-turn', 't1')]);
+
+    // A window shorter than the turn's age: the process died between persisting
+    // the user turn and its reply, and the session must not stay locked forever.
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('next', 't2')], {
+        rejectWhenTurnActive: true, activeTurnTtlMs: 0,
+      }),
+    ).toBe('appended');
+  });
+
+  it('does not refuse when the guard is not asked for (assistant turns, other callers)', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('unguarded', 't2')]),
+    ).toBe('appended');
+  });
+
+  it('is scoped to the identity — one user\'s active turn cannot block another', async () => {
+    const a = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), a.sessionId, [userWithId('mine', 't1')], guard);
+
+    const b = await loadHistory(null, ident('u2'), null);
+    expect(
+      await appendTurns(null, ident('u2'), b.sessionId, [userWithId('theirs', 't2')], guard),
+    ).toBe('appended');
+  });
+
+  it('falls back to the trailing-turn test for id-less clients', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [user('no id')], guard);
+    expect(await appendTurns(null, ident('u1'), sessionId, [user('second')], guard)).toBe('busy');
+
+    // ...and an answered id-less exchange is not "active".
+    await appendTurns(null, ident('u1'), sessionId, [question('answered')]);
+    expect(await appendTurns(null, ident('u1'), sessionId, [user('third')], guard)).toBe('appended');
   });
 });

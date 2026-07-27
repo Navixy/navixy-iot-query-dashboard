@@ -36,6 +36,19 @@ const router = Router();
 // (fractions throw ERR_OUT_OF_RANGE, values past 2^31-1 clamp to ~1 ms on the Node 22
 // deploy image — MR !61 review) — the same way bedrockAgent reads its own tuning knobs.
 const AGENT_TIMEOUT_MS = envInt(process.env.AGENT_TIMEOUT_MS, 180_000);
+/**
+ * How long an unanswered user turn keeps its session locked to a single active
+ * turn (review !62 round 10, Important 3/4).
+ *
+ * DERIVED from the agent deadline, never a standalone number: below it, a turn
+ * that is legitimately still running would stop counting and a second POST would
+ * be admitted — exactly the concurrency this exists to prevent. The margin
+ * covers the gap between the deadline firing and the error turn being persisted.
+ * Above it, an unanswered turn is treated as abandoned (a crashed process, or an
+ * agent call that timed out without persisting a reply), so a dead turn cannot
+ * wedge the session forever.
+ */
+const ACTIVE_TURN_TTL_MS = AGENT_TIMEOUT_MS + 20_000;
 export const MAX_MESSAGE_LENGTH = 4_000; // exported: the composer mirrors it (MR 5)
 // A client-minted UUID is 36 chars; cap generously but bound the free-form,
 // client-supplied value that lands in a TEXT column (review !62 round 6).
@@ -169,11 +182,34 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   // when the turn ends in type:'error'. Carry the client's idempotency id (review !62
   // round 6) so GET /session can hand it back and the browser reconciles a lost
   // response by id. Conditional spread keeps exactOptional types happy.
-  await appendTurns(pool, ident, sessionId, [
-    client_turn_id
+  //
+  // SINGLE ACTIVE TURN PER SESSION (review !62 round 10, Important 3/4). Every
+  // client-side guard against a second concurrent turn — the server-derived
+  // composer lock, the authoritative pre-send probe, the cross-tab session ender —
+  // is per-tab and best-effort: two tabs are not synchronized, a transient GET
+  // failure leaves one unable to tell, and an identical repeat login used to
+  // produce a token that fired no storage event at all. Bedrock keys its
+  // conversation memory server-side on sessionId, so a second concurrent turn
+  // corrupts the dialogue for BOTH tabs. This is the last line, at the one place
+  // that sees every tab. The check runs inside the append's own transaction behind
+  // the session row lock, so it cannot be raced by a concurrent POST.
+  const started = await appendTurns(
+    pool, ident, sessionId,
+    [client_turn_id
       ? { role: 'user', content: message, client_turn_id }
-      : { role: 'user', content: message },
-  ]);
+      : { role: 'user', content: message }],
+    { rejectWhenTurnActive: true, activeTurnTtlMs: ACTIVE_TURN_TTL_MS },
+  );
+  if (started === 'busy') {
+    // 409, not 429: this is a state conflict on the session, not rate limiting —
+    // and it is retryable the moment the previous reply lands. Nothing was
+    // persisted, so the client's reconciler correctly classifies the turn as
+    // never delivered and hands the draft back.
+    throw new CustomError(
+      'Another message in this chat is still being answered. Wait for the reply before sending again.',
+      409,
+    );
+  }
 
   // --- THE ROUTE OWNS THE DEADLINE (D21). One place; the mock inherits it for free; the
   // Bedrock impl forwards it verbatim to BOTH client.send(command, {abortSignal}) and the

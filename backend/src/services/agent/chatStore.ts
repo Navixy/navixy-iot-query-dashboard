@@ -47,6 +47,36 @@ export interface ChatStoreResult {
   supportsTurnIds: boolean;
 }
 
+/** Whether an append landed, or was refused because the session already has a
+ *  turn in flight (review !62 round 10, Important 3/4). */
+export type AppendOutcome = 'appended' | 'busy';
+
+/** Options for appendTurns. */
+export interface AppendOptions {
+  /**
+   * SINGLE ACTIVE TURN PER SESSION. Refuse instead of appending when this
+   * session already holds a user turn awaiting its reply.
+   *
+   * Pass it for the USER turn only. The assistant turn is what RELEASES the
+   * guard, so blocking it would deadlock the session for a full TTL.
+   *
+   * The client tries hard not to reach this — the composer locks on
+   * server-derived state, and a send validates against an authoritative read —
+   * but every one of those guards is per-tab and best-effort: two tabs are not
+   * synchronized, and a transient GET failure can leave one of them unable to
+   * tell. Bedrock keys its conversation memory server-side on the session id, so
+   * a second concurrent turn corrupts the dialogue for BOTH. This is the last
+   * line, at the only place that sees every tab.
+   */
+  rejectWhenTurnActive?: boolean;
+  /** How long an unanswered user turn still counts as running. MUST be at least
+   *  the route's agent deadline, or a turn could be refused while its
+   *  predecessor is legitimately still working. Past it, the turn is treated as
+   *  abandoned (crashed process, timed-out agent call) so a dead turn cannot
+   *  wedge the session. */
+  activeTurnTtlMs?: number;
+}
+
 /** Durable per-turn receipt status (review !62 round 7, finding 5b). */
 export interface TurnStatusResult {
   status: 'received' | 'answered' | 'unknown';
@@ -139,6 +169,12 @@ const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 h
  *  within a minute with no restart, long enough that it is not a per-request
  *  round trip. */
 const PROBE_TTL_MS = 60_000;
+
+/** Fallback for AppendOptions.activeTurnTtlMs. The route passes its own value
+ *  derived from AGENT_TIMEOUT_MS; this only covers callers that ask for the
+ *  guard without naming a window. Comfortably above the 180 s default deadline
+ *  so a legitimately-running turn is never mistaken for an abandoned one. */
+const DEFAULT_ACTIVE_TURN_TTL_MS = 200_000;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -426,10 +462,59 @@ function memoryLoad(ident: ChatIdentity): ChatStoreResult {
   };
 }
 
-function memoryAppend(ident: ChatIdentity, sessionId: string, entries: StoredTurn[]): void {
+/**
+ * Does this in-memory session already hold a user turn that is still awaiting its
+ * reply, recently enough to still be running? (review !62 round 10, Important 3/4
+ * — the memory half of the single-active-turn guard.)
+ *
+ * Same predicate the client derives from GET /session: a user turn whose
+ * client_turn_id has no matching assistant reply. Pairing by id rather than
+ * "newest turn is a user turn" is what catches an interleaved
+ * [user A, user B, assistant B] where A is still running. Turns without an id
+ * (older clients) fall back to the newest-turn test, which is all their data
+ * supports.
+ *
+ * The TTL is what stops an ABANDONED turn — the process died between persisting
+ * the user turn and the reply, or the agent call timed out — from wedging the
+ * session forever. It must be at least the route's own deadline, or a turn could
+ * be refused while its predecessor is legitimately still running.
+ */
+function memoryHasActiveTurn(session: MemorySession, now: number, ttlMs: number): boolean {
+  const answered = new Set<string>();
+  for (const entry of session.entries) {
+    const id = entry.turn.role === 'assistant' ? entry.turn.client_turn_id : undefined;
+    if (id) answered.add(id);
+  }
+  for (let i = session.entries.length - 1; i >= 0; i--) {
+    const entry = session.entries[i];
+    if (!entry) continue;
+    // Entries are ordered by `at`, so the first one outside the window ends the scan.
+    if (entry.at <= now - ttlMs) return false;
+    if (entry.turn.role !== 'user') continue;
+    const id = entry.turn.client_turn_id;
+    if (!id) {
+      // No id to pair on: only a trailing user turn tells us anything.
+      if (i === session.entries.length - 1) return true;
+      continue;
+    }
+    if (!answered.has(id)) return true;
+  }
+  return false;
+}
+
+function memoryAppend(
+  ident: ChatIdentity, sessionId: string, entries: StoredTurn[], options?: AppendOptions,
+): AppendOutcome {
   const now = Date.now();
   sweepExpired(now);
   let session = memorySessions.get(memKey(ident));
+  if (
+    session &&
+    options?.rejectWhenTurnActive &&
+    memoryHasActiveTurn(session, now, options.activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS)
+  ) {
+    return 'busy';
+  }
   if (!session) {
     // A degraded Postgres append (e.g. read-only standby) lands here carrying a
     // Postgres-minted sessionId. Adopt it: if the outage persists, the next
@@ -464,6 +549,7 @@ function memoryAppend(ident: ChatIdentity, sessionId: string, entries: StoredTur
   }
   session.updatedAt = now;
   evictIfOverflow(); // the create above and the bytes just added, in one place
+  return 'appended';
 }
 
 // ---------------------------------------------------------------------------
@@ -850,10 +936,42 @@ async function pgLoadHistory(
   });
 }
 
+/**
+ * Is a user turn for this session still awaiting its reply? (review !62 round 10
+ * — the Postgres half of the single-active-turn guard.)
+ *
+ * The receipts table added in round 7 already IS this state: a row is written
+ * 'received' the moment the user turn is persisted and flipped to 'answered'
+ * when its reply lands. Reading it needs no new table, no migration, and — being
+ * in the tenant's own database — it is correct across replicas, which a
+ * per-process map would not be.
+ *
+ * MUST be called inside the caller's transaction, AFTER lockSession: the check
+ * and the insert that follows it have to be atomic against a concurrent POST, or
+ * two turns can both observe an idle session and both proceed.
+ *
+ * Tenants without the receipts table get no guard. That is the same degradation
+ * every other piece of this subsystem takes on an older schema — and it is why
+ * the client-side guards stay in place rather than being replaced by this one.
+ */
+async function pgHasActiveTurn(
+  client: PoolClient, userId: string, sessionId: string, ttlMs: number, schema: ChatSchema,
+): Promise<boolean> {
+  if (!schema.receipts) return false;
+  const res = await client.query(
+    `SELECT 1 FROM dashboard_studio_meta_data.chat_turn_receipts
+      WHERE user_id = $1 AND session_id = $2 AND status = 'received'
+        AND created_at > NOW() - make_interval(secs => $3)
+      LIMIT 1`,
+    [userId, sessionId, ttlMs / 1000],
+  );
+  return res.rows.length > 0;
+}
+
 async function pgAppendTurns(
   pool: Pool, ident: ChatIdentity, sessionId: string, entries: StoredTurn[],
-  schema: ChatSchema,
-): Promise<void> {
+  schema: ChatSchema, options?: AppendOptions,
+): Promise<AppendOutcome> {
   const { userId } = ident;
   // A WRITE — deliberately NOT wrapped in withTransientRetry: the failure path
   // (buffer, then replay on the next healthy touch) already delivers the turn
@@ -869,6 +987,18 @@ async function pgAppendTurns(
     // 56627): two concurrent appends must not each prune against a snapshot taken
     // before the other's turn is visible, or the retention bound leaks by one.
     await lockSession(client, userId, sessionId);
+    // SINGLE ACTIVE TURN (review !62 round 10): inside the transaction and behind
+    // the row lock, so the check and this request's INSERT are atomic against a
+    // concurrent POST — otherwise two turns can both see an idle session.
+    if (
+      options?.rejectWhenTurnActive &&
+      await pgHasActiveTurn(
+        client, userId, sessionId, options.activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS, schema,
+      )
+    ) {
+      await client.query('ROLLBACK');
+      return 'busy';
+    }
     // RECONCILIATION, write side: drain older buffered turns FIRST so a healed
     // transcript keeps its order — the user turn from a moment ago may sit in the
     // buffer while this assistant turn finds Postgres healthy again.
@@ -887,6 +1017,7 @@ async function pgAppendTurns(
     );
     await client.query('COMMIT');
     clearReplayed(ident, replayedIds);
+    return 'appended';
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw error;
@@ -955,7 +1086,8 @@ export async function loadHistory(
  */
 export async function appendTurns(
   pool: Pool | null, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
-): Promise<void> {
+  options?: AppendOptions,
+): Promise<AppendOutcome> {
   // Entry ids and timestamps are minted HERE, before any storage decision, so the
   // same identity follows a turn wherever it lands — memory today, Postgres on
   // replay tomorrow — and ON CONFLICT (id) DO NOTHING makes double-insertion
@@ -968,8 +1100,10 @@ export async function appendTurns(
     try {
       const schema = await probeChatSchema(pool);
       if (schema.tables) {
-        await pgAppendTurns(pool, ident, sessionId, entries, schema);
-        return;
+        // 'busy' is a DECISION, not a failure: returning it straight through is
+        // what keeps a refused turn from falling into the memory path and being
+        // written there anyway.
+        return await pgAppendTurns(pool, ident, sessionId, entries, schema, options);
       }
     } catch (error) {
       logger.warn('chatStore.appendTurns degraded to in-memory history', {
@@ -977,7 +1111,7 @@ export async function appendTurns(
       });
     }
   }
-  memoryAppend(ident, sessionId, entries);
+  return memoryAppend(ident, sessionId, entries, options);
 }
 
 /**
