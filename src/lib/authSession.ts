@@ -40,16 +40,36 @@ let currentAuthSessionId: string | null = null;
 let tabSessionToken: string | null = null;
 
 /**
- * The ORIGIN-WIDE demo-ownership token THIS TAB claimed at its demo sign-in
- * (review !62 round 8, finding 2). The demo IndexedDB is a per-origin singleton
- * guarded by an owner token; a destructive op (clear/reseed) must assert the
- * token THIS TAB claimed, not re-read the CURRENT owner — a stale tab that
- * re-reads finds the SUCCESSOR's token and passes its own guard as the successor,
- * wiping their store. Captured here, tab-scoped, dropped at sign-out. Kept
- * separate from beginAuthSession because the claim happens BEFORE the epoch is
- * minted (up front, before the login POST).
+ * THIS TAB's standing with respect to the ORIGIN-WIDE demo store (review !62
+ * round 8 finding 2; made a tri-state in round 10, Critical 1).
+ *
+ * The demo IndexedDB is a per-origin singleton guarded by an owner token, and a
+ * destructive op must assert the token THIS TAB claimed rather than re-reading
+ * the CURRENT owner — a stale tab that re-reads finds the SUCCESSOR's token and
+ * passes its own guard as the successor, wiping their store.
+ *
+ * Round 8-9 modelled that as `string | null`, where null meant "no claim" and was
+ * treated as PERMISSION (the legacy/bootstrap path). But the cross-tab teardown
+ * clears the tab's anchor, so null was ALSO what a superseded tab held: an
+ * operation already in flight when the teardown ran reached the guard, found
+ * null, and was allowed to read or write the successor's freshly-seeded store —
+ * exactly the case the guard exists for. The three states are genuinely
+ * different and only two of them may proceed:
+ *
+ * - 'unclaimed' — this tab has never held a demo session. The page-load default,
+ *   and a legacy store predating the owner row. Nothing to supersede.
+ * - 'owned'     — this tab claimed or adopted a specific token; it may act only
+ *   while that token is still the origin's owner.
+ * - 'revoked'   — this tab HELD a claim and lost it (cross-tab teardown, sign-out,
+ *   or a non-demo sign-in). It must never touch the store again. Sticky: only a
+ *   fresh page load or a new demo sign-in leaves this state.
  */
-let demoOwnerToken: string | null = null;
+export type DemoOwnership =
+  | { status: 'unclaimed' }
+  | { status: 'owned'; token: string }
+  | { status: 'revoked' };
+
+let demoOwnership: DemoOwnership = { status: 'unclaimed' };
 
 export function beginAuthSession(token: string | null = null): string {
   // randomUUID needs a secure context. localhost and the https iframe host both
@@ -68,20 +88,47 @@ export function beginAuthSession(token: string | null = null): string {
 export function endAuthSession(): void {
   currentAuthSessionId = null;
   tabSessionToken = null;
-  demoOwnerToken = null;
+  // REVOKED, not 'unclaimed' (review !62 round 10, Critical 1): this tab HELD a
+  // session and lost it. Falling back to 'unclaimed' here is what let an
+  // operation still in flight at teardown pass the ownership guard and touch the
+  // successor's store.
+  demoOwnership = { status: 'revoked' };
 }
 
-/** Record the demo-ownership token THIS TAB claimed (review !62 round 8, finding
- *  2). Set right after claimDemoOwnership at demo sign-in; cleared by a normal
- *  (non-demo) sign-in and by endAuthSession. */
-export function setDemoOwnerToken(token: string | null): void {
-  demoOwnerToken = token;
+/** Record the demo-ownership token THIS TAB claimed or adopted (review !62 round
+ *  8, finding 2). Set right after claimDemoOwnership at demo sign-in, and when a
+ *  restoring tab adopts the origin's current owner. */
+export function anchorDemoOwnership(token: string): void {
+  demoOwnership = { status: 'owned', token };
 }
 
-/** The demo-ownership token THIS TAB claimed — what clear/reseed must assert so a
- *  stale tab cannot act as the successor (review !62 round 8, finding 2). */
+/** This tab gives up any claim on the demo store — a non-demo sign-in, or a
+ *  session teardown. Deliberately NOT the same as never having had one. */
+export function revokeDemoOwnership(): void {
+  demoOwnership = { status: 'revoked' };
+}
+
+/** This tab's standing with the origin-wide demo store. The storage layer needs
+ *  the whole state, not just the token: 'unclaimed' and 'revoked' both have no
+ *  token but mean opposite things (review !62 round 10, Critical 1). */
+export function getDemoOwnership(): DemoOwnership {
+  return demoOwnership;
+}
+
+/** Reset this tab's demo standing to its PAGE-LOAD value. In the app only an
+ *  actual page load does this — 'unclaimed' is not a state any transition
+ *  returns to, which is the whole point of 'revoked' being distinct. Exported
+ *  because a test file shares one module instance across its cases and would
+ *  otherwise be order-dependent. */
+export function resetDemoOwnershipToPageLoad(): void {
+  demoOwnership = { status: 'unclaimed' };
+}
+
+/** The token THIS TAB holds, or null when it holds none. Convenience for the
+ *  destructive callers, which refuse on null either way — they cannot act
+ *  without a positive claim, so 'unclaimed' and 'revoked' are equivalent there. */
 export function getDemoOwnerToken(): string | null {
-  return demoOwnerToken;
+  return demoOwnership.status === 'owned' ? demoOwnership.token : null;
 }
 
 export function getAuthSessionId(): string | null {

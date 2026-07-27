@@ -4,13 +4,14 @@ import { demoStorageService } from '@/services/demoStorage';
 import { isDemoMode, setDemoMode, setDemoUserId } from '@/services/demoApi';
 import { queryClient } from '@/lib/queryClient';
 import {
+  anchorDemoOwnership,
   beginAuthSession,
   endAuthSession,
   getAuthSessionId,
   getDemoOwnerToken,
   getTabSessionToken,
   isForeignAuthChange,
-  setDemoOwnerToken,
+  revokeDemoOwnership,
 } from '@/lib/authSession';
 import type { ChartCatalog } from '@/types/chart-catalog';
 
@@ -144,7 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (isStale()) return;
       const anchor = current ?? (await demoStorageService.claimDemoOwnership());
       if (isStale()) return;
-      setDemoOwnerToken(anchor);
+      anchorDemoOwnership(anchor);
     } catch (error) {
       // An unreadable owner store must not break sign-in; the tab simply holds no
       // anchor, and the destructive callers refuse to act without one.
@@ -192,23 +193,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const data = JSON.parse(text);
           if (data.success && data.user) {
-            setUser(data.user);
-            setToken(tokenToVerify);
-            // KEEP the epoch across a refreshUser() re-verify of the same
-            // session — regenerating it here would invalidate the guards of a
-            // chat turn in flight during a routine profile refresh. Mint one
-            // only when none exists yet (initial restore from localStorage),
-            // anchoring the tab to the token it restored (round 8, finding 1).
-            setAuthSessionId(getAuthSessionId() ?? beginAuthSession(tokenToVerify));
-            if (data.preferences) setServerPreferences(data.preferences);
-            
-            // If JWT has demo flag and we're not already in demo mode, initialize demo mode
+            // DEMO STANDING IS SETTLED BEFORE `user` IS PUBLISHED (review !62
+            // round 10, Critical 1). Every demo-backed query is gated on `user`,
+            // so publishing it first opened a window where queries ran while this
+            // tab still held no ownership claim — and a claim-less tab is exactly
+            // what the storage guard must refuse. Ordering the whole demo
+            // determination ahead of the state writes costs nothing observable:
+            // `loading` stays true until this function's finally either way, so
+            // the app renders its spinner throughout.
             if (tokenHasDemoFlag && !isDemoMode()) {
               console.log('[AuthContext] Detected demo mode from JWT, initializing demo storage...');
               setDemoMode(true);
               setDemoUserId(data.user.id);
               setDemoModeState(true);
-              
+
               // Seed demo storage if not already seeded
               const isSeeded = await demoStorageService.isSeeded();
               // Seeding is slow (several backend fetches) — do not start or
@@ -239,7 +237,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               console.log('[AuthContext] JWT does not have demo flag, disabling demo mode');
               setDemoMode(false);
               setDemoModeState(false);
+              // ...and this tab explicitly gives up any claim on the demo store
+              // (round 10, Critical 1) rather than merely holding none.
+              revokeDemoOwnership();
             }
+            if (isStaleVerification()) return;
+
+            setUser(data.user);
+            setToken(tokenToVerify);
+            // KEEP the epoch across a refreshUser() re-verify of the same
+            // session — regenerating it here would invalidate the guards of a
+            // chat turn in flight during a routine profile refresh. Mint one
+            // only when none exists yet (initial restore from localStorage),
+            // anchoring the tab to the token it restored (round 8, finding 1).
+            setAuthSessionId(getAuthSessionId() ?? beginAuthSession(tokenToVerify));
+            if (data.preferences) setServerPreferences(data.preferences);
           } else {
             localStorage.removeItem('auth_token');
             setToken(null);
@@ -320,7 +332,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const owner = await demoStorageService.claimDemoOwnership();
       // ANCHOR the claimed owner to THIS TAB (review !62 round 8, finding 2) so a
       // later clear/reseed asserts what this tab claimed, not the current owner.
-      setDemoOwnerToken(owner);
+      anchorDemoOwnership(owner);
 
       // First, clear IndexedDB to ensure fresh data — but only if this run still
       // owns the session. A stale run here would wipe the new identity's store.
@@ -424,8 +436,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   /**
-   * Take the ORIGIN out of demo mode for a successful non-demo sign-in (review
-   * !62 round 9, finding 2).
+   * INVALIDATE the origin's demo ownership ahead of a successful non-demo
+   * sign-in (review !62 round 9, finding 2).
    *
    * Dropping only the tab-local anchor (round 8) left every OTHER tab still
    * holding a valid claim to a store whose identity had just changed. Rotating
@@ -434,19 +446,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * claims it. Skipped when the origin was never in demo mode: there is no store
    * to protect, and claiming would otherwise create the demo IndexedDB for users
    * who never used demo mode at all.
+   *
+   * DOES NOT clear the shared demo_mode flag — see endOriginDemoMode below for
+   * why that has to happen last (round 10, Critical 2).
    */
-  const leaveDemoMode = async () => {
-    const wasInDemoMode = isDemoMode();
-    setDemoMode(false);
-    setDemoModeState(false);
-    // A non-demo sign-in owns no demo store (review !62 round 8, finding 2).
-    setDemoOwnerToken(null);
-    if (!wasInDemoMode) return;
+  const invalidateOriginDemoOwnership = async () => {
+    // A non-demo sign-in owns no demo store (review !62 round 8, finding 2), and
+    // explicitly gives up any claim rather than merely holding none (round 10).
+    revokeDemoOwnership();
+    if (!isDemoMode()) return;
     try {
       await demoStorageService.claimDemoOwnership();
     } catch (error) {
       console.warn('[AuthContext] Could not rotate demo ownership:', error);
     }
+  };
+
+  /**
+   * Clear the ORIGIN-WIDE demo flags — the LAST step of a non-demo sign-in
+   * (review !62 round 10, Critical 2).
+   *
+   * demo_mode and demo_user_id are origin-wide localStorage, and api.ts routes on
+   * isDemoMode() at call time. Clearing them BEFORE the new auth_token is
+   * published left a window in which other tabs still held a demo JWT and their
+   * own demo React state, but read a non-demo flag — so their CRUD went to the
+   * real backend and wrote the customer's settings database. Publishing the token
+   * first means those tabs' storage events are already queued when the flags flip.
+   *
+   * The window cannot be closed entirely from here: a tab that has not yet
+   * processed its event still reads the cleared flag. That is precisely why the
+   * backend now rejects tenant writes from a demo JWT outright (!61's
+   * rejectDemoWrites) — this ordering shrinks the window, the server guard closes
+   * it.
+   */
+  const endOriginDemoMode = () => {
+    setDemoMode(false);
+    setDemoModeState(false);
   };
 
   const signIn = async (
@@ -479,14 +514,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await response.json();
 
       if (data.success) {
-        // Take the ORIGIN out of demo mode only once the sign-in has actually
-        // SUCCEEDED (review !62 round 9, finding 2). Doing it up front meant a
-        // FAILED attempt still deleted the origin-wide demo_mode/demo_user_id
-        // flags — breaking a demo session live in another tab on behalf of a
-        // sign-in that never happened. Ordered BEFORE the auth_token write below
-        // so demo ownership is already invalidated when the other tabs receive
-        // their storage event.
-        await leaveDemoMode();
+        // PUBLICATION ORDER (review !62 round 9 finding 2; round 10 Critical 2).
+        // Everything here happens only once the sign-in has actually SUCCEEDED —
+        // doing it up front meant a FAILED attempt still deleted the origin-wide
+        // demo flags, breaking a demo session live in another tab on behalf of a
+        // sign-in that never happened. Within that, the order is:
+        //
+        //   1. invalidate demo ownership, so no tab may write the demo store;
+        //   2. publish the new auth_token, which queues every other tab's
+        //      storage event and starts their teardown;
+        //   3. only THEN clear the shared demo flags, so the interval in which
+        //      a still-demo tab reads a non-demo flag (and would route its CRUD
+        //      to the real backend) is as short as this side can make it.
+        await invalidateOriginDemoOwnership();
         // Outrun any in-flight verifyToken of an older token: its late result
         // must not touch the session this sign-in is about to establish.
         authGenerationRef.current += 1;
@@ -498,6 +538,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAuthSessionId(beginAuthSession(data.token));
         if (data.preferences) setServerPreferences(data.preferences);
         localStorage.setItem('auth_token', data.token);
+        endOriginDemoMode();
         navigate('/app');
         return { error: null };
       } else {
@@ -530,27 +571,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Bump the auth generation UP FRONT so a later sign-in outruns any in-flight
       // verifyToken of an older token (round 3 reason). The DESTRUCTIVE IndexedDB
-      // ops below are now guarded by an ORIGIN-WIDE ownership token instead of this
+      // ops below are guarded by an ORIGIN-WIDE ownership token instead of this
       // tab-local counter (review !62 round 7, finding 1): round 6's generation was
       // per-tab, so a concurrent demo sign-in in ANOTHER tab could not be seen as
       // stale and its late seed clobbered the singleton store. The token lives in
       // IndexedDB, shared across tabs, and is re-read inside each destructive
       // transaction.
       authGenerationRef.current += 1;
-      const owner = await demoStorageService.claimDemoOwnership();
-      // ANCHOR the claimed owner to THIS TAB (review !62 round 8, finding 2): a
-      // later clear/reseed asserts THIS token, so a tab superseded by another
-      // demo sign-in cannot pass its guard as the successor.
-      setDemoOwnerToken(owner);
 
-      // IMPORTANT: Clear IndexedDB first to remove any leftovers from previous sessions
-      console.log('[AuthContext] Clearing IndexedDB before demo login...');
-      if (!(await demoStorageService.clearAllData(owner))) {
-        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
-      }
-      console.log('[AuthContext] IndexedDB cleared successfully');
-
-      // First, authenticate with demo flag to get the token and initial access
+      // AUTHENTICATE FIRST (review !62 round 10, Critical 2). The claim and the
+      // clear below used to run BEFORE this request, so a demo sign-in that was
+      // about to FAIL — wrong credentials, an unreachable backend — had already
+      // taken ownership away from a live demo session in another tab and wiped
+      // its data. Nothing may touch the singleton store until this login is known
+      // to have succeeded.
       console.log('[AuthContext] Authenticating with backend...');
       const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: 'POST',
@@ -587,6 +621,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Store the token for fetching data
       const authToken = loginData.token;
       const userId = loginData.user.id;
+
+      // The login SUCCEEDED, so this sign-in may now take the store. Claiming
+      // here rather than up front (round 10, Critical 2) is what stops a failed
+      // demo login from dispossessing and wiping a live demo session in another
+      // tab. Anchoring the claimed token to THIS TAB (round 8, finding 2) is what
+      // makes a later clear/reseed assert THIS claim, so a tab superseded by
+      // another demo sign-in cannot pass the guard as the successor.
+      const owner = await demoStorageService.claimDemoOwnership();
+      anchorDemoOwnership(owner);
+
+      // Clear IndexedDB to remove any leftovers from previous sessions.
+      console.log('[AuthContext] Clearing IndexedDB before demo login...');
+      if (!(await demoStorageService.clearAllData(owner))) {
+        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
+      }
+      console.log('[AuthContext] IndexedDB cleared successfully');
 
       // Fetch all data in parallel
       console.log('[AuthContext] Fetching sections, reports, and global variables from backend...');

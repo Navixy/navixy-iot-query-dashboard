@@ -16,7 +16,12 @@ import { createElement } from 'react';
 import { act, cleanup, render } from '@testing-library/react';
 import { AuthProvider, useAuth } from '../AuthContext';
 import { demoStorageService } from '@/services/demoStorage';
-import { endAuthSession, getDemoOwnerToken } from '@/lib/authSession';
+import {
+  endAuthSession,
+  getDemoOwnership,
+  getDemoOwnerToken,
+  resetDemoOwnershipToPageLoad,
+} from '@/lib/authSession';
 import { isDemoMode, setDemoMode } from '@/services/demoApi';
 
 vi.mock('@/services/demoStorage', () => ({
@@ -95,6 +100,7 @@ const CREDS = ['demo@navixy.io', 'admin', 'iot-url', 'user-url'] as const;
 beforeEach(() => {
   localStorage.clear();
   endAuthSession(); // reset the tab-scoped anchors between tests (round 8, finding 2)
+  resetDemoOwnershipToPageLoad(); // ...and back to the PAGE-LOAD demo standing (round 10)
   vi.clearAllMocks();
   vi.mocked(demoStorageService.claimDemoOwnership).mockResolvedValue('owner-1');
   vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-1');
@@ -368,5 +374,104 @@ describe('a superseded tab asserts its OWN anchor (review !62 round 8, finding 2
       'owner-1',
     );
     expect(result?.error).toBeInstanceOf(Error);
+  });
+});
+
+/**
+ * review !62 round 10, Critical 1 & 2. Two ordering invariants that the guards in
+ * demoStorage and the backend both depend on.
+ */
+describe('demo ownership is settled BEFORE `user` is published (round 10, Critical 1)', () => {
+  it('does not publish `user` until the ownership adoption has resolved', async () => {
+    // Every demo-backed query is gated on `user`, and a tab with no claim is
+    // exactly what the storage guard must now refuse — so publishing `user` while
+    // ownership is still unsettled would make those queries read empty.
+    //
+    // Probed by HOLDING the adoption open: with `user` published first (the old
+    // order) it would already be non-null here.
+    localStorage.setItem('auth_token', DEMO_JWT);
+    vi.mocked(isDemoMode).mockReturnValue(true);
+    let adopt!: (token: string) => void;
+    vi.mocked(demoStorageService.readDemoOwner).mockReturnValue(
+      new Promise<string>((resolve) => { adopt = resolve; }),
+    );
+
+    let seenUser: unknown = undefined;
+    function Watch() {
+      seenUser = useAuth().user;
+      return null;
+    }
+    render(createElement(AuthProvider, null, createElement(Watch)));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    expect(seenUser).toBeNull();          // still gated on the pending adoption
+    expect(getDemoOwnership().status).not.toBe('owned');
+
+    await act(async () => {
+      adopt('owner-live');
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(seenUser).not.toBeNull();      // published only now
+    expect(getDemoOwnership().status).toBe('owned');
+  });
+
+  it('a NON-demo restore revokes rather than merely holding no claim', async () => {
+    localStorage.setItem('auth_token', 'h.e30.s'); // no demo flag in the payload
+    vi.mocked(isDemoMode).mockReturnValue(true); // ...but the origin still says demo
+    mount();
+    await settleRestore();
+
+    expect(getDemoOwnership().status).toBe('revoked');
+  });
+});
+
+describe('the demo/normal transition publishes in a safe order (round 10, Critical 2)', () => {
+  it('writes the new auth_token BEFORE clearing the shared demo flags', async () => {
+    // api.ts routes on the ORIGIN-WIDE isDemoMode() at call time. Clearing the
+    // flags first left other tabs holding a demo JWT but reading a non-demo flag,
+    // so their CRUD went to the real backend. Publishing the token first means
+    // their storage events are already queued when the flags flip.
+    vi.mocked(isDemoMode).mockReturnValue(true);
+    let tokenAtFlagClear: string | null = 'not-called';
+    vi.mocked(setDemoMode).mockImplementation((enabled: boolean) => {
+      if (!enabled) tokenAtFlagClear = localStorage.getItem('auth_token');
+    });
+    mount();
+
+    await act(async () => {
+      await ctx.signIn(...CREDS);
+    });
+
+    expect(tokenAtFlagClear).toBe('demo-token'); // the value stubFetch returns
+  });
+
+  it('a demo sign-in claims and clears ONLY after the login succeeds', async () => {
+    // Claiming up front meant a demo login that was about to FAIL had already
+    // taken ownership from a live demo session in another tab and wiped its data.
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      text: async () => JSON.stringify({ error: { message: 'bad credentials' } }),
+    })) as unknown as typeof fetch;
+    mount();
+
+    let result: { error: Error | null } | undefined;
+    await act(async () => {
+      result = await ctx.signInDemo(...CREDS);
+    });
+
+    expect(result?.error).toBeInstanceOf(Error);
+    expect(demoStorageService.claimDemoOwnership).not.toHaveBeenCalled();
+    expect(demoStorageService.clearAllData).not.toHaveBeenCalled();
+  });
+
+  it('a successful demo sign-in still claims and clears before seeding', async () => {
+    mount();
+    await act(async () => {
+      await ctx.signInDemo(...CREDS);
+    });
+    expect(demoStorageService.claimDemoOwnership).toHaveBeenCalled();
+    expect(demoStorageService.clearAllData).toHaveBeenCalledWith('owner-1');
+    expect(getDemoOwnerToken()).toBe('owner-1');
   });
 });
