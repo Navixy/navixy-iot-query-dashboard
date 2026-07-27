@@ -72,9 +72,19 @@ export interface AgentChatMutationContext {
 }
 
 /** The GET /session fetcher, shared by the session query and the baseline
- *  read below so both throw on response.error identically. */
+ *  read below so both throw on response.error identically.
+ *
+ *  BINDS THIS TAB'S TOKEN (review !62 round 9, finding 1). The read is as
+ *  identity-sensitive as the send: api.ts's getAuthHeaders resolves the
+ *  ORIGIN-WIDE localStorage key at dispatch, so a GET issued by a tab whose token
+ *  another tab had already replaced would return the SUCCESSOR's transcript and
+ *  write it into THIS tab's epoch-scoped cache — before the storage-event ender
+ *  had a chance to run (it is asynchronous and cannot be ordered against an
+ *  already-queued request). The anchor is read at dispatch and is tab-local, so
+ *  it only ever moves on THIS tab's own auth transitions; a null anchor (torn
+ *  down) fails closed inside api.ts rather than falling back to shared storage. */
 export async function fetchAgentSession(): Promise<AgentSessionResponse> {
-  const response = await apiService.getAgentSession();
+  const response = await apiService.getAgentSession(getTabSessionToken());
   if (response.error) {
     throw new Error(response.error.message);
   }

@@ -14,6 +14,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   agentSessionQueryKey,
   createAgentChatContext,
+  fetchAgentSession,
   useAgentChatMutation,
 } from '../use-agent-chat';
 import { beginAuthSession, endAuthSession } from '@/lib/authSession';
@@ -58,6 +59,30 @@ describe('createAgentChatContext — tab-anchored identity guard (round 8, findi
     client.setQueryData(agentSessionQueryKey(epoch), session());
 
     await expect(createAgentChatContext(client, 'A prompt')).rejects.toThrow(/session/i);
+  });
+});
+
+describe('fetchAgentSession — the transcript read is bound too (round 9, finding 1)', () => {
+  it('binds THIS TAB\'s anchor, not the origin-wide localStorage token', async () => {
+    beginAuthSession('token-A');
+    localStorage.setItem('auth_token', 'token-B'); // another tab signed in as B
+    vi.mocked(apiService.getAgentSession).mockResolvedValue({ data: session() });
+
+    await fetchAgentSession();
+
+    // A GET dispatched before the storage-event ender runs must still carry A's
+    // own token — otherwise B's transcript lands in A's epoch-scoped cache.
+    expect(apiService.getAgentSession).toHaveBeenCalledWith('token-A');
+  });
+
+  it('binds null on a torn-down tab, so api.ts fails it closed', async () => {
+    endAuthSession();
+    localStorage.setItem('auth_token', 'successor-token');
+    vi.mocked(apiService.getAgentSession).mockResolvedValue({ data: session() });
+
+    await fetchAgentSession();
+
+    expect(apiService.getAgentSession).toHaveBeenCalledWith(null);
   });
 });
 

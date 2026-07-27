@@ -66,3 +66,62 @@ describe('agentChat — bound Authorization token', () => {
     expect(body).not.toHaveProperty('authToken');
   });
 });
+
+/**
+ * review !62 round 9, finding 1. Binding only the POST left every chat GET
+ * authorized by the ORIGIN-WIDE localStorage read inside getAuthHeaders: a probe,
+ * poll or turn-status lookup dispatched by a tab whose token another tab had
+ * already replaced would authorize as the SUCCESSOR and could land their
+ * transcript in this tab's cache before the storage-event teardown ran. Every
+ * agent call now takes the caller's own token; an EXPLICIT null means "this tab
+ * holds no identity" and must FAIL CLOSED — falling back to shared storage is
+ * exactly the leak. `undefined` (the parameter omitted) keeps the legacy
+ * localStorage behaviour for callers that have no anchor to bind.
+ */
+describe('agent GET/status — bound Authorization token', () => {
+  it('getAgentSession uses the passed token, overriding localStorage', async () => {
+    localStorage.setItem('auth_token', 'successor-token');
+    const calls = captureFetch();
+
+    await apiService.getAgentSession('this-tab-token');
+
+    expect(calls[0].url).toContain('/api/agent/session');
+    expect(headersOf(calls[0].init).Authorization).toBe('Bearer this-tab-token');
+  });
+
+  it('getAgentTurnStatus uses the passed token, overriding localStorage', async () => {
+    localStorage.setItem('auth_token', 'successor-token');
+    const calls = captureFetch();
+
+    await apiService.getAgentTurnStatus('turn-1', 'this-tab-token');
+
+    expect(calls[0].url).toContain('client_turn_id=turn-1');
+    expect(headersOf(calls[0].init).Authorization).toBe('Bearer this-tab-token');
+  });
+
+  it.each([
+    ['getAgentSession', () => apiService.getAgentSession(null)],
+    ['getAgentTurnStatus', () => apiService.getAgentTurnStatus('turn-1', null)],
+    [
+      'agentChat',
+      () => apiService.agentChat({ session_id: null, message: 'hi' }, null),
+    ],
+  ])('%s FAILS CLOSED on an explicit null token — no request, no fallback', async (_name, call) => {
+    localStorage.setItem('auth_token', 'successor-token');
+    const calls = captureFetch();
+
+    const response = await call();
+
+    expect(calls).toHaveLength(0);
+    expect(response.error?.code).toBe('NOT_AUTHENTICATED');
+  });
+
+  it('getAgentSession falls back to localStorage when no token is bound (legacy callers)', async () => {
+    localStorage.setItem('auth_token', 'localStorage-token');
+    const calls = captureFetch();
+
+    await apiService.getAgentSession();
+
+    expect(headersOf(calls[0].init).Authorization).toBe('Bearer localStorage-token');
+  });
+});

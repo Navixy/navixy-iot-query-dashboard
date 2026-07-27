@@ -86,6 +86,47 @@ class ApiService {
     return token ? { 'Authorization': `Bearer ${token}` } : {};
   }
 
+  /**
+   * Resolve a chat call's bound bearer token into request headers (review !62
+   * round 9, finding 1).
+   *
+   * getAuthHeaders above reads the ORIGIN-WIDE localStorage key at REQUEST time,
+   * so any agent call left on that path is authorized by whichever tab signed in
+   * last — a probe, poll or turn-status lookup dispatched by a tab whose token a
+   * second tab had already replaced authorizes as the SUCCESSOR, and its response
+   * can land in this tab's cache before the cross-tab storage event tears the tab
+   * down. Every agent call therefore carries the token its caller holds:
+   *
+   * - a string BINDS it — options.headers wins request()'s merge, overriding the
+   *   localStorage-derived header;
+   * - `null` FAILS CLOSED — the caller explicitly has no identity (signed out, or
+   *   torn down by the cross-tab ender). Falling back to shared storage there is
+   *   precisely the leak, so no request is made at all;
+   * - `undefined` (parameter omitted) keeps the legacy localStorage behaviour for
+   *   callers with no anchor to bind.
+   *
+   * Shaped as `{ reject?, headers? }` rather than a discriminated union because
+   * this project compiles with `strict: false`, where a boolean discriminant does
+   * not narrow.
+   */
+  private resolveBoundAuth(authToken: string | null | undefined): {
+    reject?: ApiResponse<never>;
+    headers?: Record<string, string>;
+  } {
+    if (authToken === undefined) return {};
+    if (!authToken) {
+      return {
+        reject: {
+          error: {
+            code: 'NOT_AUTHENTICATED',
+            message: 'Not signed in; the request was not sent.',
+          },
+        },
+      };
+    }
+    return { headers: { Authorization: `Bearer ${authToken}` } };
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -891,11 +932,17 @@ class ApiService {
     // Authorization header from THAT snapshot; options.headers wins the merge in
     // request(), so it overrides the localStorage-derived header. Omit to keep the
     // legacy behaviour for non-chat callers.
-    const authHeader = authToken ? { Authorization: `Bearer ${authToken}` } : undefined;
+    //
+    // An EXPLICIT null now fails closed here too (round 9, finding 1): the old
+    // truthy check silently fell back to the shared localStorage token, so the
+    // API surface itself was not safe — only the hook's own null reject stood
+    // between a torn-down tab and a POST under the successor's identity.
+    const bound = this.resolveBoundAuth(authToken);
+    if (bound.reject) return bound.reject;
     return this.request<AgentChatResponse>('/api/agent/chat', {
       method: 'POST',
       body: JSON.stringify(params),
-      ...(authHeader ? { headers: authHeader } : {}),
+      ...(bound.headers ? { headers: bound.headers } : {}),
       // A ceiling above the server's AGENT_TIMEOUT_MS (180 s), not a policy
       // deadline: it exists so a wedged connection cannot hang a tab forever;
       // the server's deadline is the real one and fires first. Do not lower it
@@ -906,16 +953,34 @@ class ApiService {
     });
   }
 
-  async getAgentSession(): Promise<ApiResponse<AgentSessionResponse>> {
-    return this.request<AgentSessionResponse>('/api/agent/session');
+  /** `authToken` binds the CALLER's own token instead of the origin-wide
+   *  localStorage read (review !62 round 9, finding 1) — see resolveBoundAuth. A
+   *  transcript read is exactly as identity-sensitive as the POST: authorized by
+   *  a successor's token it would return THEIR chat history to this tab. */
+  async getAgentSession(
+    authToken?: string | null,
+  ): Promise<ApiResponse<AgentSessionResponse>> {
+    const bound = this.resolveBoundAuth(authToken);
+    if (bound.reject) return bound.reject;
+    return this.request<AgentSessionResponse>('/api/agent/session', {
+      ...(bound.headers ? { headers: bound.headers } : {}),
+    });
   }
 
   /** Durable per-turn status lookup (review !62 round 7, finding 5b): confirms a
    *  turn's delivery by client_turn_id even after it has been evicted from the
-   *  capped transcript. */
-  async getAgentTurnStatus(clientTurnId: string): Promise<ApiResponse<AgentTurnStatusResponse>> {
+   *  capped transcript. `authToken` binds the caller's own token (round 9,
+   *  finding 1) — a receipt lookup under a successor's identity would answer
+   *  about THEIR turns, and 'unknown' there is what drives a confirmed-lost. */
+  async getAgentTurnStatus(
+    clientTurnId: string,
+    authToken?: string | null,
+  ): Promise<ApiResponse<AgentTurnStatusResponse>> {
+    const bound = this.resolveBoundAuth(authToken);
+    if (bound.reject) return bound.reject;
     return this.request<AgentTurnStatusResponse>(
       `/api/agent/turn-status?client_turn_id=${encodeURIComponent(clientTurnId)}`,
+      { ...(bound.headers ? { headers: bound.headers } : {}) },
     );
   }
 
