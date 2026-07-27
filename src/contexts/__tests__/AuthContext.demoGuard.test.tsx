@@ -475,3 +475,40 @@ describe('the demo/normal transition publishes in a safe order (round 10, Critic
     expect(getDemoOwnerToken()).toBe('owner-1');
   });
 });
+
+/**
+ * review !62 round 11, Critical 1. DELETE /auth/demo-user removes a user and
+ * everything they own. The server now refuses to delete a row this login did not
+ * create, but the client's own liveness check ran only AFTER the call — so a
+ * sign-in that had already been superseded still got to fire it. Ordering it
+ * before the call is defence in depth, and it was plainly backwards.
+ */
+describe('demo-user cleanup runs only for a live sign-in (round 11, Critical 1)', () => {
+  const deleteCalls = () =>
+    (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([url, init]) => String(url).endsWith('/api/auth/demo-user')
+        && (init as RequestInit | undefined)?.method === 'DELETE',
+    );
+
+  it('does NOT call the destructive endpoint when ownership moved on mid-seed', async () => {
+    mount();
+    // A newer sign-in (any tab) claims while this one seeds.
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-successor');
+
+    let result: { error: Error | null } | undefined;
+    await act(async () => {
+      result = await ctx.signInDemo(...CREDS);
+    });
+
+    expect(result?.error).toBeInstanceOf(Error);
+    expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it('calls it for a sign-in that still owns the store', async () => {
+    mount();
+    await act(async () => {
+      await ctx.signInDemo(...CREDS);
+    });
+    expect(deleteCalls()).toHaveLength(1);
+  });
+});

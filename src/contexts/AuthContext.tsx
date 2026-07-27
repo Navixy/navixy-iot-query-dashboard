@@ -401,10 +401,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Delete the temporary demo user from the database
-      // This cleans up the user record since all data is now in IndexedDB
+      // Delete the temporary demo user from the database. This cleans up the user
+      // record since all data is now in IndexedDB. The server deletes ONLY a row
+      // this login itself created (review !62 round 11, Critical 1).
+      //
+      // BOTH liveness checks run BEFORE the destructive call: the tab-local
+      // generation, and the ORIGIN-WIDE ownership token. A superseded run must not
+      // delete a user and everything they own on the successor's behalf.
       if (isStale()) {
         console.log('[AuthContext] Demo init superseded before demo-user delete; aborting');
+        return;
+      }
+      if ((await demoStorageService.readDemoOwner()) !== owner) {
+        console.log('[AuthContext] Demo init ownership moved on before demo-user delete; aborting');
         return;
       }
       console.log('[AuthContext] Deleting temporary demo user from database...');
@@ -709,9 +718,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
       }
 
-      // Delete the temporary demo user from the database
-      // This cleans up the user record since all data is now in IndexedDB
-      // The token will still work because demo mode bypasses user verification
+      // A newer sign-in (this tab or another) claimed ownership while we seeded —
+      // do not resurrect this attempt's identity over theirs (review !62 round 7,
+      // finding 1). The read resolves a microtask before the SYNCHRONOUS state
+      // writes below, so no cross-tab storage event can interleave between them.
+      //
+      // CHECKED BEFORE THE CLEANUP, not after (review !62 round 11, Critical 1):
+      // the DELETE below removes a user and everything they own, and running it on
+      // behalf of a sign-in that has already been superseded is the last thing a
+      // dead attempt should be allowed to do. The server refuses to delete a row
+      // this login did not create, so this is defence in depth — but the ordering
+      // was plainly backwards.
+      if ((await demoStorageService.readDemoOwner()) !== owner) {
+        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
+      }
+
+      // Delete the temporary demo user from the database. This cleans up the user
+      // record since all data is now in IndexedDB; the token keeps working because
+      // demo mode bypasses user verification. The server deletes ONLY a row this
+      // login itself created (round 11, Critical 1) — a demo sign-in that reused a
+      // real user's identity gets `deleted: false` and their data is untouched.
       console.log('[AuthContext] Deleting temporary demo user from database...');
       try {
         const deleteRes = await fetch(`${API_BASE_URL}/api/auth/demo-user`, {
@@ -719,21 +745,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           headers
         });
         if (deleteRes.ok) {
-          console.log('[AuthContext] Demo user deleted successfully');
+          console.log('[AuthContext] Demo user cleanup completed');
         } else {
           console.warn('[AuthContext] Failed to delete demo user:', deleteRes.status);
         }
       } catch (deleteError) {
         // Non-critical error, just log it
         console.warn('[AuthContext] Error deleting demo user:', deleteError);
-      }
-
-      // A newer sign-in (this tab or another) claimed ownership while we seeded —
-      // do not resurrect this attempt's identity over theirs (review !62 round 7,
-      // finding 1). The read resolves a microtask before the SYNCHRONOUS state
-      // writes below, so no cross-tab storage event can interleave between them.
-      if ((await demoStorageService.readDemoOwner()) !== owner) {
-        return { error: new Error('Demo sign-in was superseded by a newer sign-in') };
       }
 
       // Enable demo mode
