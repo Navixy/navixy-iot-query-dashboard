@@ -16,7 +16,8 @@ import { createElement } from 'react';
 import { act, cleanup, render } from '@testing-library/react';
 import { AuthProvider, useAuth } from '../AuthContext';
 import { demoStorageService } from '@/services/demoStorage';
-import { endAuthSession } from '@/lib/authSession';
+import { endAuthSession, getDemoOwnerToken } from '@/lib/authSession';
+import { isDemoMode, setDemoMode } from '@/services/demoApi';
 
 vi.mock('@/services/demoStorage', () => ({
   demoStorageService: {
@@ -51,6 +52,17 @@ function stubFetch() {
     if (u.endsWith('/api/auth/demo-user')) {
       return { ok: true, json: async () => ({}) } as Response;
     }
+    if (u.endsWith('/api/auth/me')) {
+      // verifyToken reads text() then JSON.parses it.
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            success: true,
+            user: { id: 'u1', email: 'demo@navixy.io', role: 'admin' },
+          }),
+      } as unknown as Response;
+    }
     return {
       ok: true,
       json: async () => ({ sections: [], reports: [], variables: [], catalog: null, data: [] }),
@@ -59,6 +71,7 @@ function stubFetch() {
 }
 
 interface Ctx {
+  signIn: ReturnType<typeof useAuth>['signIn'];
   signInDemo: ReturnType<typeof useAuth>['signInDemo'];
   reseedDemoData: ReturnType<typeof useAuth>['reseedDemoData'];
   clearDemoData: ReturnType<typeof useAuth>['clearDemoData'];
@@ -68,7 +81,7 @@ let ctx: Ctx;
 function Grab() {
   const c = useAuth();
   ctx = {
-    signInDemo: c.signInDemo, reseedDemoData: c.reseedDemoData,
+    signIn: c.signIn, signInDemo: c.signInDemo, reseedDemoData: c.reseedDemoData,
     clearDemoData: c.clearDemoData, signOut: c.signOut,
   };
   return null;
@@ -88,9 +101,18 @@ beforeEach(() => {
   vi.mocked(demoStorageService.clearAllData).mockResolvedValue(true);
   vi.mocked(demoStorageService.seedFromBackend).mockResolvedValue(true);
   vi.mocked(demoStorageService.isSeeded).mockResolvedValue(false);
+  vi.mocked(isDemoMode).mockReturnValue(false);
   stubFetch();
 });
 afterEach(() => cleanup());
+
+/** A JWT whose payload carries the demo flag — verifyToken only base64-decodes
+ *  the middle segment, so header and signature can be anything. */
+const DEMO_JWT = `h.${btoa(JSON.stringify({ demo: true }))}.s`;
+/** Let the mount-time verifyToken (a fetch plus a few awaits) settle. */
+const settleRestore = () => act(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 
 describe('signInDemo — origin-wide ownership token (review !62 round 7, finding 1)', () => {
   it('claims a token and passes it to both clearAllData and seedFromBackend', async () => {
@@ -156,8 +178,11 @@ describe('reseedDemoData — asserts THIS TAB\'s owner anchor (review !62 round 
 
 describe('clearDemoData — propagates the abort (review !62 round 7, finding 1)', () => {
   it('reports { aborted: true } when the clear was superseded, so DemoBanner skips sign-out', async () => {
-    vi.mocked(demoStorageService.clearAllData).mockResolvedValue(false);
     mount();
+    await act(async () => {
+      await ctx.signInDemo(...CREDS);
+    });
+    vi.mocked(demoStorageService.clearAllData).mockResolvedValue(false);
     let result: { aborted: boolean } | undefined;
     await act(async () => {
       result = await ctx.clearDemoData();
@@ -167,11 +192,139 @@ describe('clearDemoData — propagates the abort (review !62 round 7, finding 1)
 
   it('reports { aborted: false } on a normal clear', async () => {
     mount();
+    await act(async () => {
+      await ctx.signInDemo(...CREDS);
+    });
     let result: { aborted: boolean } | undefined;
     await act(async () => {
       result = await ctx.clearDemoData();
     });
     expect(result).toEqual({ aborted: false });
+  });
+});
+
+/**
+ * review !62 round 9, finding 2. Round 8 anchored the owner token only where the
+ * session was CREATED. A tab that RESTORES an already-seeded demo session — the
+ * ordinary page reload — reached the destructive paths with no anchor at all, and
+ * `?? undefined` turned that absence into an explicit licence for an
+ * UNCONDITIONAL clear/reseed of a store that may by then belong to someone else.
+ * Restoring now adopts the origin's current owner, and a demo session that
+ * somehow holds no anchor refuses to act rather than acting unconditionally.
+ */
+describe('restoring a demo session anchors this tab (round 9, finding 2)', () => {
+  it('adopts the current origin owner when the store is ALREADY seeded', async () => {
+    localStorage.setItem('auth_token', DEMO_JWT);
+    vi.mocked(demoStorageService.isSeeded).mockResolvedValue(true);
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-live');
+
+    mount();
+    await settleRestore();
+
+    expect(getDemoOwnerToken()).toBe('owner-live');
+    // Adopting must not steal the store from whoever holds it.
+    expect(demoStorageService.claimDemoOwnership).not.toHaveBeenCalled();
+  });
+
+  it('adopts on a reload that is already in demo mode', async () => {
+    localStorage.setItem('auth_token', DEMO_JWT);
+    vi.mocked(isDemoMode).mockReturnValue(true);
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-live');
+
+    mount();
+    await settleRestore();
+
+    expect(getDemoOwnerToken()).toBe('owner-live');
+  });
+
+  it('claims when the store has NO owner yet (a pre-owner legacy store)', async () => {
+    localStorage.setItem('auth_token', DEMO_JWT);
+    vi.mocked(isDemoMode).mockReturnValue(true);
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue(undefined);
+    vi.mocked(demoStorageService.claimDemoOwnership).mockResolvedValue('owner-fresh');
+
+    mount();
+    await settleRestore();
+
+    expect(getDemoOwnerToken()).toBe('owner-fresh');
+  });
+});
+
+describe('a demo session with no anchor refuses to act (round 9, finding 2)', () => {
+  it('clearDemoData aborts instead of clearing unconditionally', async () => {
+    vi.mocked(isDemoMode).mockReturnValue(true); // origin is in demo mode...
+    mount(); // ...but this tab never established a session, so it holds no claim
+    let result: { aborted: boolean } | undefined;
+    await act(async () => {
+      result = await ctx.clearDemoData();
+    });
+    expect(result).toEqual({ aborted: true });
+    expect(demoStorageService.clearAllData).not.toHaveBeenCalled();
+  });
+
+  it('reseedDemoData errors instead of seeding unconditionally', async () => {
+    vi.mocked(isDemoMode).mockReturnValue(true);
+    localStorage.setItem('auth_token', DEMO_JWT);
+    vi.mocked(demoStorageService.readDemoOwner).mockResolvedValue('owner-live');
+    mount();
+    await settleRestore(); // token+user restored, anchor adopted
+    // Now lose the anchor the way a torn-down tab would.
+    endAuthSession();
+    vi.mocked(demoStorageService.seedFromBackend).mockClear();
+
+    let result: { error: Error | null } | undefined;
+    await act(async () => {
+      result = await ctx.reseedDemoData();
+    });
+    expect(result?.error).toBeInstanceOf(Error);
+    expect(demoStorageService.seedFromBackend).not.toHaveBeenCalled();
+  });
+});
+
+describe('a non-demo sign-in invalidates the origin\'s demo ownership (round 9, finding 2)', () => {
+  it('rotates the owner token and anchors it to nobody', async () => {
+    vi.mocked(isDemoMode).mockReturnValue(true); // switching AWAY from demo
+    vi.mocked(demoStorageService.claimDemoOwnership).mockResolvedValue('owner-rotated');
+    mount();
+
+    await act(async () => {
+      await ctx.signIn(...CREDS);
+    });
+
+    // Rotated: every tab still anchored to the old token is now superseded...
+    expect(demoStorageService.claimDemoOwnership).toHaveBeenCalled();
+    // ...including this one, which owns no demo store at all.
+    expect(getDemoOwnerToken()).toBeNull();
+  });
+
+  it('does not touch demo storage when the origin was never in demo mode', async () => {
+    vi.mocked(isDemoMode).mockReturnValue(false);
+    mount();
+    await act(async () => {
+      await ctx.signIn(...CREDS);
+    });
+    expect(demoStorageService.claimDemoOwnership).not.toHaveBeenCalled();
+  });
+
+  it('a FAILED sign-in leaves the origin-wide demo state alone', async () => {
+    // Same defect class as the stale-tab teardown: clearing the shared flags up
+    // front broke a demo session live in another tab on behalf of a sign-in that
+    // never happened.
+    vi.mocked(isDemoMode).mockReturnValue(true);
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      text: async () => JSON.stringify({ error: { message: 'nope' } }),
+    })) as unknown as typeof fetch;
+    mount();
+
+    let result: { error: Error | null } | undefined;
+    await act(async () => {
+      result = await ctx.signIn(...CREDS);
+    });
+
+    expect(result?.error).toBeInstanceOf(Error);
+    expect(setDemoMode).not.toHaveBeenCalled();
+    expect(demoStorageService.claimDemoOwnership).not.toHaveBeenCalled();
   });
 });
 

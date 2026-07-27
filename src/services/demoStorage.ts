@@ -3,6 +3,7 @@
  * This provides a local database for demo mode that persists across browser sessions
  */
 import Dexie, { type Table } from 'dexie';
+import { getDemoOwnerToken } from '@/lib/authSession';
 import type { RawReportSchema } from '@/types/dashboard-types';
 
 /** Coerce an unknown backend date value (ISO string / epoch / Date) to a Date. */
@@ -107,6 +108,39 @@ class DemoDatabase extends Dexie {
 }
 
 const OWNER_KEY = 'current';
+/** Dexie store name for the owner table — used by name so the guarded-write
+ *  helper can widen a transaction scope without importing Table generics. */
+const OWNER_STORE = 'owner';
+
+/** Thrown by every guarded demo operation when this tab's claim has been
+ *  superseded. demoApi wraps thrown errors into a DEMO_ERROR response, so the
+ *  caller sees a normal failure instead of a silent cross-identity write. */
+const OWNERSHIP_MOVED_MESSAGE = 'Demo data now belongs to a newer sign-in';
+
+/**
+ * Has the origin's demo ownership moved AWAY from the token THIS TAB claimed?
+ * (review !62 round 9, finding 2.)
+ *
+ * IndexedDB here is a per-origin SINGLETON shared by every tab, while a tab's
+ * identity is tab-local. Rounds 7-8 guarded only clear/seed with an explicit
+ * `expectedOwner`, leaving ordinary CRUD — the bulk of demo traffic — free to
+ * read and write on behalf of a tab whose identity a newer sign-in had already
+ * replaced. The cross-tab storage-event ender cannot close that: it is
+ * asynchronous and cannot be ordered against work already in flight.
+ *
+ * DENY ON PROVEN SUPERSESSION, not deny-unless-proven-ownership: a null anchor
+ * means this tab holds no claim to compare — a store predating the owner row, or
+ * the bootstrap window before AuthContext restores a session — and gets the
+ * previous unconditional behaviour rather than a bricked app. Every ESTABLISHED
+ * demo session anchors itself (signInDemo, and both restore paths since round 9),
+ * so the null case is never a real identity.
+ */
+async function ownershipMovedOn(database: DemoDatabase): Promise<boolean> {
+  const anchor = getDemoOwnerToken();
+  if (anchor === null) return false;
+  const current = (await database.owner.get(OWNER_KEY))?.token;
+  return current !== undefined && current !== anchor;
+}
 
 /** Mint an origin-wide ownership token. randomUUID needs a secure context
  *  (localhost + the https iframe host qualify); the fallback only needs
@@ -162,9 +196,42 @@ export class DemoStorageService {
   }
 
   /** The current origin-wide owner token, or undefined if none has been claimed.
-   *  reseed/clear read this to pass themselves as the expected owner. */
+   *  A restoring tab adopts this as its anchor (review !62 round 9, finding 2);
+   *  clear/reseed assert the anchor they already hold, never this. */
   async readDemoOwner(): Promise<string | undefined> {
     return (await getDb().owner.get(OWNER_KEY))?.token;
+  }
+
+  /**
+   * Run a demo WRITE only while this tab still holds the origin's ownership
+   * (review !62 round 9, finding 2).
+   *
+   * The check runs INSIDE the same read-write transaction as the write, over a
+   * scope that includes the owner store: IndexedDB serializes transactions on
+   * overlapping stores, so a competing claimDemoOwnership() cannot land between
+   * the check and the write. Throwing aborts the transaction, so a superseded
+   * write leaves nothing half-applied.
+   */
+  private async guardedWrite<T>(stores: string[], body: () => Promise<T>): Promise<T> {
+    const database = getDb();
+    return database.transaction('rw', [OWNER_STORE, ...stores], async () => {
+      if (await ownershipMovedOn(database)) {
+        throw new Error(OWNERSHIP_MOVED_MESSAGE);
+      }
+      return body();
+    });
+  }
+
+  /**
+   * True when this tab may NOT read the demo store because its claim was
+   * superseded (review !62 round 9, finding 2). Reads return their empty value
+   * rather than throwing: the tab is on its way to /login via the storage-event
+   * ender, and showing nothing is the safe failure — showing the SUCCESSOR's
+   * sections, reports or dashboards is a cross-identity leak. A read cannot
+   * corrupt anything, so this is a plain pre-check rather than a transaction.
+   */
+  private async readDenied(): Promise<boolean> {
+    return ownershipMovedOn(getDb());
   }
 
   // ==========================================
@@ -454,6 +521,7 @@ export class DemoStorageService {
   // ==========================================
 
   async getChartCatalog(): Promise<{ schemaVersion: string; groups: unknown[] } | null> {
+    if (await this.readDenied()) return null;
     const database = getDb();
     const row = await database.chartCatalog.get('catalog');
     if (!row) return null;
@@ -465,6 +533,7 @@ export class DemoStorageService {
   // ==========================================
 
   async getSections(userId?: string): Promise<DemoSection[]> {
+    if (await this.readDenied()) return [];
     const database = getDb();
     const query = database.sections.where('isDeleted').equals(0); // IndexedDB stores booleans as 0/1
     
@@ -485,7 +554,7 @@ export class DemoStorageService {
     userId: string;
   }): Promise<DemoSection> {
     const database = getDb();
-    
+
     const section: DemoSection = {
       id: crypto.randomUUID(),
       name: data.name,
@@ -499,7 +568,7 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await database.sections.add(section);
+    await this.guardedWrite(['sections'], () => database.sections.add(section));
     return section;
   }
 
@@ -529,8 +598,8 @@ export class DemoStorageService {
     if (data.name !== undefined) updated.name = data.name;
     if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
 
-    await database.sections.update(id, updated);
-    
+    await this.guardedWrite(['sections'], () => database.sections.update(id, updated));
+
     return { ...existing, ...updated } as DemoSection;
   }
 
@@ -549,7 +618,7 @@ export class DemoStorageService {
 
     const affectedReports = childReports.length;
 
-    await database.transaction('rw', [database.sections, database.reports], async () => {
+    await this.guardedWrite(['sections', 'reports'], async () => {
       if (strategy === 'move_children_to_root') {
         // Move reports to root
         for (const report of childReports) {
@@ -589,11 +658,12 @@ export class DemoStorageService {
       throw new Error('Deleted section not found');
     }
 
-    await database.sections.update(id, {
-      isDeleted: false,
-      updatedAt: new Date(),
-      updatedBy: userId
-    });
+    await this.guardedWrite(['sections'], () =>
+      database.sections.update(id, {
+        isDeleted: false,
+        updatedAt: new Date(),
+        updatedBy: userId
+      }));
   }
 
   // ==========================================
@@ -601,8 +671,9 @@ export class DemoStorageService {
   // ==========================================
 
   async getReports(userId?: string): Promise<DemoReport[]> {
+    if (await this.readDenied()) return [];
     const database = getDb();
-    
+
     let reports = await database.reports.toArray();
     console.log('[DemoStorage] getReports - Total reports in IndexedDB:', reports.length);
     
@@ -636,8 +707,9 @@ export class DemoStorageService {
   }
 
   async getReportById(id: string, userId?: string): Promise<DemoReport | null> {
+    if (await this.readDenied()) return null;
     const database = getDb();
-    
+
     const report = await database.reports.get(id);
     if (!report || report.isDeleted) return null;
     if (userId && report.userId !== userId) return null;
@@ -671,7 +743,7 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await database.reports.add(report);
+    await this.guardedWrite(['reports'], () => database.reports.add(report));
     return report;
   }
 
@@ -707,8 +779,8 @@ export class DemoStorageService {
     if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
     if (data.reportSchema !== undefined) updated.reportSchema = data.reportSchema as RawReportSchema;
 
-    await database.reports.update(id, updated);
-    
+    await this.guardedWrite(['reports'], () => database.reports.update(id, updated));
+
     return { ...existing, ...updated } as DemoReport;
   }
 
@@ -720,11 +792,12 @@ export class DemoStorageService {
       throw new Error('Report not found');
     }
 
-    await database.reports.update(id, {
-      isDeleted: true,
-      updatedAt: new Date(),
-      updatedBy: userId
-    });
+    await this.guardedWrite(['reports'], () =>
+      database.reports.update(id, {
+        isDeleted: true,
+        updatedAt: new Date(),
+        updatedBy: userId
+      }));
   }
 
   async restoreReport(id: string, userId: string): Promise<void> {
@@ -735,11 +808,12 @@ export class DemoStorageService {
       throw new Error('Deleted report not found');
     }
 
-    await database.reports.update(id, {
-      isDeleted: false,
-      updatedAt: new Date(),
-      updatedBy: userId
-    });
+    await this.guardedWrite(['reports'], () =>
+      database.reports.update(id, {
+        isDeleted: false,
+        updatedAt: new Date(),
+        updatedBy: userId
+      }));
   }
 
   // ==========================================
@@ -751,8 +825,9 @@ export class DemoStorageService {
     rootReports: Array<{ id: string; name: string; sortOrder: number; version: number; parentSectionId: null }>;
     sectionReports: Record<string, Array<{ id: string; name: string; sortOrder: number; version: number; parentSectionId: string }>>;
   }> {
+    if (await this.readDenied()) return { sections: [], rootReports: [], sectionReports: {} };
     const database = getDb();
-    
+
     let sections = await database.sections.toArray();
     let reports = await database.reports.toArray();
 
@@ -815,7 +890,7 @@ export class DemoStorageService {
     const database = getDb();
     const newVersions: Record<string, number> = {};
 
-    await database.transaction('rw', [database.sections, database.reports], async () => {
+    await this.guardedWrite(['sections', 'reports'], async () => {
       // Update sections
       for (const section of payload.sections) {
         const existing = await database.sections.get(section.id);
@@ -858,12 +933,14 @@ export class DemoStorageService {
   // ==========================================
 
   async getGlobalVariables(): Promise<DemoGlobalVariable[]> {
+    if (await this.readDenied()) return [];
     const database = getDb();
     const variables = await database.globalVariables.toArray();
     return variables.sort((a, b) => a.label.localeCompare(b.label));
   }
 
   async getGlobalVariableById(id: string): Promise<DemoGlobalVariable | null> {
+    if (await this.readDenied()) return null;
     const database = getDb();
     return await database.globalVariables.get(id) ?? null;
   }
@@ -890,7 +967,7 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await database.globalVariables.add(variable);
+    await this.guardedWrite(['globalVariables'], () => database.globalVariables.add(variable));
     return variable;
   }
 
@@ -922,8 +999,9 @@ export class DemoStorageService {
     if (data.description !== undefined) updated.description = data.description;
     if (data.value !== undefined) updated.value = data.value;
 
-    await database.globalVariables.update(id, updated);
-    
+    await this.guardedWrite(['globalVariables'], () =>
+      database.globalVariables.update(id, updated));
+
     return { ...existing, ...updated } as DemoGlobalVariable;
   }
 
@@ -935,7 +1013,7 @@ export class DemoStorageService {
       throw new Error('Global variable not found');
     }
 
-    await database.globalVariables.delete(id);
+    await this.guardedWrite(['globalVariables'], () => database.globalVariables.delete(id));
   }
 }
 
