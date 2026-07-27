@@ -3,8 +3,13 @@
 // in-transaction ownership guard relies on.
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach } from 'vitest';
+import Dexie from 'dexie';
 import { demoStorageService } from '@/services/demoStorage';
-import { setDemoOwnerToken } from '@/lib/authSession';
+import {
+  anchorDemoOwnership,
+  resetDemoOwnershipToPageLoad,
+  revokeDemoOwnership,
+} from '@/lib/authSession';
 
 const seed = (userId: string) => ({
   sections: [{ id: `sec-${userId}`, name: `Section ${userId}`, user_id: userId }],
@@ -14,10 +19,28 @@ const seed = (userId: string) => ({
   userId,
 });
 
+/** Drop the owner row through a SECOND handle on the same database — clearAllData
+ *  deliberately preserves it, and this is the only faithful way to reproduce a
+ *  store seeded before round 7 introduced the row. */
+async function emptyOwnerRow(): Promise<void> {
+  const raw = new Dexie('NavixyDemoDatabase');
+  raw.version(3).stores({
+    sections: 'id, name, sortOrder, userId, isDeleted',
+    reports: 'id, title, sectionId, sortOrder, userId, isDeleted',
+    globalVariables: 'id, label',
+    metadata: 'id, key',
+    chartCatalog: 'id',
+    owner: 'id',
+  });
+  await raw.open();
+  await raw.table('owner').clear();
+  raw.close();
+}
+
 beforeEach(async () => {
-  // No tab anchor by default — the legacy/bootstrap state these older tests run
-  // in, and the one the round-9 guard deliberately leaves unconditional.
-  setDemoOwnerToken(null);
+  // Page-load state ('unclaimed'): this tab has never held a demo session. NOT
+  // the same as having lost one — see the round-10 describe at the bottom.
+  resetDemoOwnershipToPageLoad();
   // Fresh data each test: no expected owner → an unconditional clear.
   await demoStorageService.clearAllData();
 });
@@ -43,6 +66,8 @@ describe('demoStorage origin-wide ownership guard', () => {
     // The stale clear aborts and does NOT wipe the store.
     expect(await demoStorageService.clearAllData(a)).toBe(false);
     expect(await demoStorageService.isSeeded()).toBe(true);
+    // Reads are guarded too since round 10, so adopt the CURRENT owner to look.
+    anchorDemoOwnership((await demoStorageService.readDemoOwner())!);
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
   });
 
@@ -73,11 +98,13 @@ describe('demoStorage origin-wide ownership guard', () => {
     expect(await demoStorageService.seedFromBackend(seed('B'), b)).toBe(false);
 
     // A survived; B was never written.
+    anchorDemoOwnership((await demoStorageService.readDemoOwner())!);
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
   });
 
   it('a seed with the CURRENT owner seeds normally and returns true', async () => {
     const owner = await demoStorageService.claimDemoOwnership();
+    anchorDemoOwnership(owner);
     expect(await demoStorageService.seedFromBackend(seed('A'), owner)).toBe(true);
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
   });
@@ -108,7 +135,7 @@ describe('demoStorage origin-wide ownership guard', () => {
 describe('demoStorage per-operation ownership assertion (round 9, finding 2)', () => {
   const supersededTab = async () => {
     const mine = await demoStorageService.claimDemoOwnership();
-    setDemoOwnerToken(mine); // this tab anchors to its own claim
+    anchorDemoOwnership(mine); // this tab anchors to its own claim
     await demoStorageService.seedFromBackend(seed('A'), mine);
     await demoStorageService.claimDemoOwnership(); // another sign-in takes over
   };
@@ -119,7 +146,8 @@ describe('demoStorage per-operation ownership assertion (round 9, finding 2)', (
       demoStorageService.createSection({ name: 'stale', userId: 'A' }),
     ).rejects.toThrow(/newer sign-in/i);
     // Nothing was written on top of the successor's data.
-    setDemoOwnerToken(null);
+    resetDemoOwnershipToPageLoad();
+    await demoStorageService.claimDemoOwnership().then(anchorDemoOwnership);
     expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
   });
 
@@ -132,7 +160,7 @@ describe('demoStorage per-operation ownership assertion (round 9, finding 2)', (
       demoStorageService.deleteSection('sec-A', 'delete_children', 'A'),
     ).rejects.toThrow(/newer sign-in/i);
 
-    setDemoOwnerToken(null);
+    await demoStorageService.claimDemoOwnership().then(anchorDemoOwnership);
     const sections = await demoStorageService.getSections();
     expect(sections.map((s) => s.name)).toEqual(['Section A']); // untouched
   });
@@ -146,7 +174,7 @@ describe('demoStorage per-operation ownership assertion (round 9, finding 2)', (
       demoStorageService.createGlobalVariable({ label: 'stale' }),
     ).rejects.toThrow(/newer sign-in/i);
 
-    setDemoOwnerToken(null);
+    await demoStorageService.claimDemoOwnership().then(anchorDemoOwnership);
     expect(await demoStorageService.getReports()).toEqual([]);
     expect(await demoStorageService.getGlobalVariables()).toEqual([]);
   });
@@ -165,7 +193,7 @@ describe('demoStorage per-operation ownership assertion (round 9, finding 2)', (
 
   it('the CURRENT owner reads and writes normally', async () => {
     const mine = await demoStorageService.claimDemoOwnership();
-    setDemoOwnerToken(mine);
+    anchorDemoOwnership(mine);
     await demoStorageService.seedFromBackend(seed('A'), mine);
 
     const created = await demoStorageService.createSection({ name: 'mine', userId: 'A' });
@@ -176,14 +204,58 @@ describe('demoStorage per-operation ownership assertion (round 9, finding 2)', (
     ]);
   });
 
-  it('a tab with NO anchor keeps the unconditional legacy behaviour', async () => {
+});
+
+/**
+ * review !62 round 10, Critical 1. Round 9 modelled the anchor as `string | null`
+ * and read null as PERMISSION — "no claim to compare, so nothing to supersede".
+ * That was wrong in the one case it exists for: the cross-tab teardown CLEARS the
+ * anchor, so a superseded tab's in-flight operation arrived holding null and was
+ * waved through into the successor's freshly-seeded store. The round-9 test named
+ * "a tab with NO anchor keeps the unconditional legacy behaviour" pinned exactly
+ * that unsafe path and is REPLACED by the three cases below.
+ */
+describe('demo ownership is a tri-state, and only two of them may act', () => {
+  it('REVOKED is denied — a teardown must not read as "no claim, carry on"', async () => {
+    const mine = await demoStorageService.claimDemoOwnership();
+    anchorDemoOwnership(mine);
+    await demoStorageService.seedFromBackend(seed('A'), mine);
+
+    // What endAuthSession does when the cross-tab ender fires. An operation
+    // already in flight reaches the guard AFTER this point.
+    revokeDemoOwnership();
+
+    await expect(
+      demoStorageService.createSection({ name: 'in flight at teardown', userId: 'A' }),
+    ).rejects.toThrow(/newer sign-in/i);
+    expect(await demoStorageService.getSections()).toEqual([]);
+
+    // ...and it stays denied even though this tab was the LAST owner: it gave the
+    // claim up, so the store is no longer its to touch.
+    expect(await demoStorageService.readDemoOwner()).toBe(mine);
+  });
+
+  it('UNCLAIMED is denied while the store HAS an owner — it is somebody else\'s', async () => {
     const other = await demoStorageService.claimDemoOwnership();
     await demoStorageService.seedFromBackend(seed('A'), other);
-    setDemoOwnerToken(null); // e.g. the bootstrap window, or a pre-owner store
+    resetDemoOwnershipToPageLoad();
+
+    await expect(
+      demoStorageService.createSection({ name: 'no claim', userId: 'A' }),
+    ).rejects.toThrow(/newer sign-in/i);
+    expect(await demoStorageService.getSections()).toEqual([]);
+  });
+
+  it('UNCLAIMED is allowed on an UNOWNED store — the pre-owner legacy case', async () => {
+    // A store seeded before round 7 introduced the owner row: no owner exists, so
+    // there is nobody to dispossess and the app must keep working.
+    await demoStorageService.clearAllData();
+    await emptyOwnerRow();
+    resetDemoOwnershipToPageLoad();
 
     await expect(
       demoStorageService.createSection({ name: 'legacy', userId: 'A' }),
     ).resolves.toBeTruthy();
-    expect((await demoStorageService.getSections()).length).toBe(2);
+    expect((await demoStorageService.getSections()).map((s) => s.name)).toEqual(['legacy']);
   });
 });

@@ -3,7 +3,7 @@
  * This provides a local database for demo mode that persists across browser sessions
  */
 import Dexie, { type Table } from 'dexie';
-import { getDemoOwnerToken } from '@/lib/authSession';
+import { getDemoOwnership } from '@/lib/authSession';
 import type { RawReportSchema } from '@/types/dashboard-types';
 
 /** Coerce an unknown backend date value (ISO string / epoch / Date) to a Date. */
@@ -118,28 +118,42 @@ const OWNER_STORE = 'owner';
 const OWNERSHIP_MOVED_MESSAGE = 'Demo data now belongs to a newer sign-in';
 
 /**
- * Has the origin's demo ownership moved AWAY from the token THIS TAB claimed?
- * (review !62 round 9, finding 2.)
+ * May THIS TAB touch the origin's demo store right now? (review !62 round 9
+ * finding 2; corrected in round 10, Critical 1.)
  *
  * IndexedDB here is a per-origin SINGLETON shared by every tab, while a tab's
- * identity is tab-local. Rounds 7-8 guarded only clear/seed with an explicit
- * `expectedOwner`, leaving ordinary CRUD — the bulk of demo traffic — free to
- * read and write on behalf of a tab whose identity a newer sign-in had already
- * replaced. The cross-tab storage-event ender cannot close that: it is
- * asynchronous and cannot be ordered against work already in flight.
+ * identity is tab-local. Rounds 7-8 guarded only clear/seed, leaving ordinary
+ * CRUD — the bulk of demo traffic — free to read and write on behalf of a tab
+ * whose identity a newer sign-in had already replaced. The cross-tab
+ * storage-event ender cannot close that: it is asynchronous and cannot be
+ * ordered against work already in flight.
  *
- * DENY ON PROVEN SUPERSESSION, not deny-unless-proven-ownership: a null anchor
- * means this tab holds no claim to compare — a store predating the owner row, or
- * the bootstrap window before AuthContext restores a session — and gets the
- * previous unconditional behaviour rather than a bricked app. Every ESTABLISHED
- * demo session anchors itself (signInDemo, and both restore paths since round 9),
- * so the null case is never a real identity.
+ * Round 9 modelled the anchor as `string | null` and read null as PERMISSION —
+ * "no claim to compare, so nothing to supersede". That was wrong in the one case
+ * that matters: the teardown CLEARS the anchor, so a superseded tab's in-flight
+ * operation arrived here holding null and was allowed through, into the
+ * successor's freshly-seeded store. The states are now distinguished
+ * (authSession.ts) and only two of them may act:
+ *
+ * - 'owned'     — DENY UNLESS the claimed token is still the origin's owner. An
+ *                 owner row that has vanished is also a denial: this tab holds a
+ *                 claim on a store that no longer exists in the form it claimed.
+ * - 'revoked'   — ALWAYS DENY. This tab held a claim and lost it.
+ * - 'unclaimed' — allowed only while the store has NO owner at all: a legacy
+ *                 store predating the owner row, where there is nobody to harm.
+ *                 An owned store is somebody else's, so a tab with no claim of
+ *                 its own does not get to read or write it.
+ *
+ * Bootstrap is not a hole in that last rule: AuthContext adopts the origin's
+ * owner BEFORE it publishes `user`, and every demo-backed query is gated on
+ * `user`, so no CRUD runs in the 'unclaimed' state for a real demo session.
  */
-async function ownershipMovedOn(database: DemoDatabase): Promise<boolean> {
-  const anchor = getDemoOwnerToken();
-  if (anchor === null) return false;
+async function ownershipDenied(database: DemoDatabase): Promise<boolean> {
+  const ownership = getDemoOwnership();
+  if (ownership.status === 'revoked') return true;
   const current = (await database.owner.get(OWNER_KEY))?.token;
-  return current !== undefined && current !== anchor;
+  if (ownership.status === 'unclaimed') return current !== undefined;
+  return current !== ownership.token;
 }
 
 /** Mint an origin-wide ownership token. randomUUID needs a secure context
@@ -215,7 +229,7 @@ export class DemoStorageService {
   private async guardedWrite<T>(stores: string[], body: () => Promise<T>): Promise<T> {
     const database = getDb();
     return database.transaction('rw', [OWNER_STORE, ...stores], async () => {
-      if (await ownershipMovedOn(database)) {
+      if (await ownershipDenied(database)) {
         throw new Error(OWNERSHIP_MOVED_MESSAGE);
       }
       return body();
@@ -223,15 +237,27 @@ export class DemoStorageService {
   }
 
   /**
-   * True when this tab may NOT read the demo store because its claim was
-   * superseded (review !62 round 9, finding 2). Reads return their empty value
-   * rather than throwing: the tab is on its way to /login via the storage-event
-   * ender, and showing nothing is the safe failure — showing the SUCCESSOR's
-   * sections, reports or dashboards is a cross-identity leak. A read cannot
-   * corrupt anything, so this is a plain pre-check rather than a transaction.
+   * Run a demo READ only while this tab may see the store, in ONE readonly
+   * transaction spanning the owner row and the data (review !62 round 9 finding
+   * 2; made transactional in round 10, Critical 1).
+   *
+   * Round 9 checked ownership and then read, as two separate IndexedDB
+   * operations — a claim could land in between, so the check said "yours" about a
+   * store that was somebody else's by the time it was read. Holding both in one
+   * transaction closes that: IndexedDB serializes transactions over overlapping
+   * stores, and the owner store is in scope here for exactly that reason.
+   *
+   * A denied read returns its EMPTY value rather than throwing: the tab is on its
+   * way to /login via the storage-event ender, and showing nothing is the safe
+   * failure — showing the SUCCESSOR's sections, reports or dashboards is a
+   * cross-identity leak.
    */
-  private async readDenied(): Promise<boolean> {
-    return ownershipMovedOn(getDb());
+  private async guardedRead<T>(stores: string[], empty: T, body: () => Promise<T>): Promise<T> {
+    const database = getDb();
+    return database.transaction('r', [OWNER_STORE, ...stores], async () => {
+      if (await ownershipDenied(database)) return empty;
+      return body();
+    });
   }
 
   // ==========================================
@@ -521,11 +547,12 @@ export class DemoStorageService {
   // ==========================================
 
   async getChartCatalog(): Promise<{ schemaVersion: string; groups: unknown[] } | null> {
-    if (await this.readDenied()) return null;
     const database = getDb();
-    const row = await database.chartCatalog.get('catalog');
-    if (!row) return null;
-    return { schemaVersion: row.schemaVersion, groups: Array.isArray(row.groups) ? row.groups : [] };
+    return this.guardedRead(['chartCatalog'], null, async () => {
+      const row = await database.chartCatalog.get('catalog');
+      if (!row) return null;
+      return { schemaVersion: row.schemaVersion, groups: Array.isArray(row.groups) ? row.groups : [] };
+    });
   }
 
   // ==========================================
@@ -533,19 +560,18 @@ export class DemoStorageService {
   // ==========================================
 
   async getSections(userId?: string): Promise<DemoSection[]> {
-    if (await this.readDenied()) return [];
     const database = getDb();
-    const query = database.sections.where('isDeleted').equals(0); // IndexedDB stores booleans as 0/1
-    
-    // Dexie doesn't support compound where on different fields well, so filter in memory
-    let sections = await database.sections.toArray();
-    sections = sections.filter(s => !s.isDeleted);
-    
-    if (userId) {
-      sections = sections.filter(s => s.userId === userId);
-    }
-    
-    return sections.sort((a, b) => a.sortOrder - b.sortOrder);
+    return this.guardedRead(['sections'], [] as DemoSection[], async () => {
+      // Dexie doesn't support compound where on different fields well, so filter in memory
+      let sections = await database.sections.toArray();
+      sections = sections.filter(s => !s.isDeleted);
+
+      if (userId) {
+        sections = sections.filter(s => s.userId === userId);
+      }
+
+      return sections.sort((a, b) => a.sortOrder - b.sortOrder);
+    });
   }
 
   async createSection(data: {
@@ -671,10 +697,10 @@ export class DemoStorageService {
   // ==========================================
 
   async getReports(userId?: string): Promise<DemoReport[]> {
-    if (await this.readDenied()) return [];
     const database = getDb();
 
-    let reports = await database.reports.toArray();
+    let reports = await this.guardedRead(['reports'], [] as DemoReport[], () =>
+      database.reports.toArray());
     console.log('[DemoStorage] getReports - Total reports in IndexedDB:', reports.length);
     
     const beforeFilter = reports.length;
@@ -707,14 +733,14 @@ export class DemoStorageService {
   }
 
   async getReportById(id: string, userId?: string): Promise<DemoReport | null> {
-    if (await this.readDenied()) return null;
     const database = getDb();
+    return this.guardedRead(['reports'], null as DemoReport | null, async () => {
+      const report = await database.reports.get(id);
+      if (!report || report.isDeleted) return null;
+      if (userId && report.userId !== userId) return null;
 
-    const report = await database.reports.get(id);
-    if (!report || report.isDeleted) return null;
-    if (userId && report.userId !== userId) return null;
-    
-    return report;
+      return report;
+    });
   }
 
   async createReport(data: {
@@ -825,11 +851,18 @@ export class DemoStorageService {
     rootReports: Array<{ id: string; name: string; sortOrder: number; version: number; parentSectionId: null }>;
     sectionReports: Record<string, Array<{ id: string; name: string; sortOrder: number; version: number; parentSectionId: string }>>;
   }> {
-    if (await this.readDenied()) return { sections: [], rootReports: [], sectionReports: {} };
     const database = getDb();
 
-    let sections = await database.sections.toArray();
-    let reports = await database.reports.toArray();
+    const snapshot = await this.guardedRead(
+      ['sections', 'reports'],
+      { sections: [] as DemoSection[], reports: [] as DemoReport[] },
+      async () => ({
+        sections: await database.sections.toArray(),
+        reports: await database.reports.toArray(),
+      }),
+    );
+    let sections = snapshot.sections;
+    let reports = snapshot.reports;
 
     // Filter by user and deleted status
     sections = sections.filter(s => 
@@ -933,16 +966,17 @@ export class DemoStorageService {
   // ==========================================
 
   async getGlobalVariables(): Promise<DemoGlobalVariable[]> {
-    if (await this.readDenied()) return [];
     const database = getDb();
-    const variables = await database.globalVariables.toArray();
-    return variables.sort((a, b) => a.label.localeCompare(b.label));
+    return this.guardedRead(['globalVariables'], [] as DemoGlobalVariable[], async () => {
+      const variables = await database.globalVariables.toArray();
+      return variables.sort((a, b) => a.label.localeCompare(b.label));
+    });
   }
 
   async getGlobalVariableById(id: string): Promise<DemoGlobalVariable | null> {
-    if (await this.readDenied()) return null;
     const database = getDb();
-    return await database.globalVariables.get(id) ?? null;
+    return this.guardedRead(['globalVariables'], null as DemoGlobalVariable | null, async () =>
+      await database.globalVariables.get(id) ?? null);
   }
 
   async createGlobalVariable(data: {
