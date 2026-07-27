@@ -111,22 +111,23 @@ export function validateChatBody(body: unknown): ChatBody {
     throw new CustomError('session_id must be a string', 400);
   }
 
-  // client_turn_id (review !62 round 6): optional, client-minted. Bound its length
-  // — it is free-form and lands in a TEXT column — but do NOT require a UUID shape;
-  // the server only stores and echoes it. An empty string means "none".
-  let clientTurnId: string | null = null;
-  if (b.client_turn_id !== undefined && b.client_turn_id !== null) {
-    if (typeof b.client_turn_id !== 'string') {
-      throw new CustomError('client_turn_id must be a string', 400);
-    }
-    if (b.client_turn_id.length > MAX_CLIENT_TURN_ID_LENGTH) {
-      throw new CustomError(
-        `client_turn_id must be at most ${MAX_CLIENT_TURN_ID_LENGTH} characters`,
-        400,
-      );
-    }
-    clientTurnId = b.client_turn_id || null;
+  // client_turn_id (review !62 round 6): client-minted, and REQUIRED since round
+  // 11 (Important 2). It was optional, and an absent id meant no receipt was
+  // written — which left the single-active-turn guard with nothing to see, so a
+  // second concurrent request was simply admitted. The guard's state IS the
+  // receipt, so the id is not decoration: without it there is no lock. Bound its
+  // length — it is free-form and lands in a TEXT column — but do NOT require a
+  // UUID shape; the server only stores and echoes it.
+  if (typeof b.client_turn_id !== 'string' || !b.client_turn_id) {
+    throw new CustomError('client_turn_id is required', 400);
   }
+  if (b.client_turn_id.length > MAX_CLIENT_TURN_ID_LENGTH) {
+    throw new CustomError(
+      `client_turn_id must be at most ${MAX_CLIENT_TURN_ID_LENGTH} characters`,
+      400,
+    );
+  }
+  const clientTurnId: string = b.client_turn_id;
 
   return {
     session_id: (b.session_id as string | null | undefined) ?? null,
@@ -208,6 +209,25 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     throw new CustomError(
       'Another message in this chat is still being answered. Wait for the reply before sending again.',
       409,
+    );
+  }
+  if (started === 'duplicate') {
+    // A client_turn_id this user has already used (review !62 round 11). Admitting
+    // it would double-feed the stateful agent AND leave the guard blind, since no
+    // new 'received' receipt is ever written for an id that already exists.
+    throw new CustomError(
+      'This message was already sent. Reload the page to see its reply.',
+      409,
+    );
+  }
+  if (started === 'unavailable') {
+    // The guard could not be evaluated on a tenant whose lock is supposed to be
+    // authoritative (round 11, Important 2). Refusing is deliberate: admitting the
+    // turn would bypass the lock entirely. 503 says "try again", which is true —
+    // nothing was persisted.
+    throw new CustomError(
+      'The chat is temporarily unavailable. Please try again in a moment.',
+      503,
     );
   }
 

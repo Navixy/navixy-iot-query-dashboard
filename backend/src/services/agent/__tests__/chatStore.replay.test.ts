@@ -159,6 +159,18 @@ function makeScriptedPool() {
         );
         return { rows: hit ? [{ '?column?': 1 }] : [] };
       }
+      // DUPLICATE-ID probe (review !62 round 11, Important 2): has this
+      // client_turn_id been seen in ANY state? The active probe above only sees
+      // 'received', so a replayed ANSWERED id slipped past it.
+      if (
+        q.startsWith('SELECT 1 FROM dashboard_studio_meta_data.chat_turn_receipts') &&
+        q.includes('client_turn_id = $1')
+      ) {
+        const hit = db.receipts.some(
+          (r) => r.client_turn_id === params[0] && r.user_id === params[1],
+        );
+        return { rows: hit ? [{ '?column?': 1 }] : [] };
+      }
       if (q.includes('SELECT status FROM dashboard_studio_meta_data.chat_turn_receipts')) {
         const r = db.receipts.find(
           (x) => x.client_turn_id === params[0] && x.user_id === params[1],
@@ -693,5 +705,83 @@ describe('chatStore — single active turn on Postgres (review !62 round 10)', (
     expect(
       await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
     ).toBe('appended');
+  });
+});
+
+/**
+ * review !62 round 11, Important 2 — three ways the round-10 guard could be
+ * bypassed. Its state IS the receipt, so anything that stops a 'received' receipt
+ * from existing, or hides one that does, is a hole.
+ */
+describe('chatStore — the single-active-turn guard cannot be bypassed (round 11)', () => {
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses a REPLAYED client_turn_id whose receipt is already answered', async () => {
+    // The active probe only sees 'received'. An answered id passed it, and the
+    // receipt insert's ON CONFLICT DO NOTHING meant no new 'received' row would
+    // ever appear for it — so the turn AND the next one went unguarded.
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('answer', 't1')]);
+
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('replayed', 't1')], guard),
+    ).toBe('duplicate');
+
+    // Nothing written, so the guard is not left blind for the NEXT turn either.
+    expect(db.messages.filter((m) => m.content === 'replayed')).toEqual([]);
+  });
+
+  it('refuses a replayed id even while its receipt is still "received"', async () => {
+    const { pool } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+
+    // 'busy' wins here (the session has a turn in flight), which is also correct —
+    // what matters is that it is REFUSED.
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('again', 't1')], guard),
+    ).toBe('busy');
+  });
+
+  it('FAILS CLOSED when Postgres breaks on a receipts-capable tenant', async () => {
+    // The memory buffer knows nothing about the receipt this tenant's other turn
+    // wrote, so degrading here would admit a turn that bypassed the lock outright.
+    const { pool, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    // Answer the first turn so the session is IDLE — otherwise 'busy' would be
+    // the (also correct) answer and this would not probe the failure path at all.
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('answer', 't1')]);
+
+    script.failMessageInsert = true;
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('unavailable');
+  });
+
+  it('still buffers the ASSISTANT turn when Postgres breaks — a reply must never be lost', async () => {
+    // The fail-closed rule is for the guarded USER turn only. An assistant turn
+    // that already reached the user has to reach the write-behind buffer.
+    const { pool, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+
+    script.failMessageInsert = true;
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [questionWithId('answer', 't1')]),
+    ).toBe('appended');
+  });
+
+  it('does NOT fail closed on a tenant without receipts — there was no lock to lose', async () => {
+    const { pool, script } = makeScriptedPool();
+    script.receiptsTable = false;
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    script.failMessageInsert = true;
+
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard),
+    ).toBe('appended'); // degraded to the memory buffer, as before
   });
 });

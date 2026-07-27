@@ -51,16 +51,16 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
 
   it(`rejects a message over ${MAX_MESSAGE_LENGTH} chars and accepts one exactly at the limit`, () => {
     expect400({ message: 'a'.repeat(MAX_MESSAGE_LENGTH + 1) }, 'at most');
-    expect(validateChatBody({ message: 'a'.repeat(MAX_MESSAGE_LENGTH) })).toEqual({
+    expect(validateChatBody({ message: 'a'.repeat(MAX_MESSAGE_LENGTH), client_turn_id: 't' })).toEqual({
       session_id: null,
       message: 'a'.repeat(MAX_MESSAGE_LENGTH),
-      client_turn_id: null,
+      client_turn_id: 't',
     });
   });
 
   it('measures the limit AFTER trimming — padding does not count against the user', () => {
     const padded = `  ${'a'.repeat(MAX_MESSAGE_LENGTH)}  `;
-    expect(validateChatBody({ message: padded }).message).toHaveLength(MAX_MESSAGE_LENGTH);
+    expect(validateChatBody({ message: padded, client_turn_id: 't' }).message).toHaveLength(MAX_MESSAGE_LENGTH);
   });
 
   it.each([
@@ -73,28 +73,28 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
   });
 
   it('normalizes an absent or null session_id to null', () => {
-    expect(validateChatBody({ message: 'hi' })).toEqual({
+    expect(validateChatBody({ message: 'hi', client_turn_id: 't' })).toEqual({
       session_id: null,
       message: 'hi',
-      client_turn_id: null,
+      client_turn_id: 't',
     });
-    expect(validateChatBody({ session_id: null, message: 'hi' })).toEqual({
+    expect(validateChatBody({ session_id: null, message: 'hi', client_turn_id: 't' })).toEqual({
       session_id: null,
       message: 'hi',
-      client_turn_id: null,
+      client_turn_id: 't',
     });
   });
 
   it('round-trips a valid body with the message trimmed', () => {
-    expect(validateChatBody({ session_id: 'abc-123', message: '  build me a dashboard  ' })).toEqual({
+    expect(validateChatBody({ session_id: 'abc-123', message: '  build me a dashboard  ', client_turn_id: 't' })).toEqual({
       session_id: 'abc-123',
       message: 'build me a dashboard',
-      client_turn_id: null,
+      client_turn_id: 't',
     });
   });
 
   it('passes an arbitrary session_id STRING through untouched — resolution is the store\'s job (D13), never a 400', () => {
-    expect(validateChatBody({ session_id: 'not-a-real-session', message: 'hi' }).session_id).toBe(
+    expect(validateChatBody({ session_id: 'not-a-real-session', message: 'hi', client_turn_id: 't' }).session_id).toBe(
       'not-a-real-session',
     );
   });
@@ -111,10 +111,13 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
       ).toBe('5f1e-abc');
     });
 
-    it('normalizes an absent, null or empty client_turn_id to null', () => {
-      expect(validateChatBody({ message: 'hi' }).client_turn_id).toBeNull();
-      expect(validateChatBody({ message: 'hi', client_turn_id: null }).client_turn_id).toBeNull();
-      expect(validateChatBody({ message: 'hi', client_turn_id: '' }).client_turn_id).toBeNull();
+    it('REQUIRES an id — absent, null and empty are all 400s (round 11, Important 2)', () => {
+      // It was optional, and an absent id meant no receipt was written, which left
+      // the single-active-turn guard with nothing to see: a second concurrent
+      // request was simply admitted. The guard's state IS the receipt.
+      expect400({ message: 'hi' }, 'client_turn_id is required');
+      expect400({ message: 'hi', client_turn_id: null }, 'client_turn_id is required');
+      expect400({ message: 'hi', client_turn_id: '' }, 'client_turn_id is required');
     });
 
     it.each([
@@ -123,7 +126,7 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
       ['an array', ['x']],
       ['a boolean', true],
     ])('rejects a client_turn_id that is %s', (_label, client_turn_id) => {
-      expect400({ message: 'hi', client_turn_id }, 'client_turn_id must be a string');
+      expect400({ message: 'hi', client_turn_id }, 'client_turn_id is required');
     });
 
     it('rejects a client_turn_id over 100 chars and accepts one at the limit', () => {

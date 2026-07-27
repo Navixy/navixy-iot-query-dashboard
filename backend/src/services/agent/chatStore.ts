@@ -47,9 +47,24 @@ export interface ChatStoreResult {
   supportsTurnIds: boolean;
 }
 
-/** Whether an append landed, or was refused because the session already has a
- *  turn in flight (review !62 round 10, Important 3/4). */
-export type AppendOutcome = 'appended' | 'busy';
+/**
+ * Whether an append landed, or was refused (review !62 round 10, Important 3/4;
+ * extended round 11, Important 2).
+ *
+ * - 'appended'    — written.
+ * - 'busy'        — this session already has a turn awaiting its reply.
+ * - 'duplicate'   — a receipt for this client_turn_id already exists. The turn is
+ *                   a repeat, not a new one: admitting it would both double-feed
+ *                   the stateful agent and leave the guard blind, since the
+ *                   receipt insert's ON CONFLICT DO NOTHING means no NEW 'received'
+ *                   row would ever appear for it.
+ * - 'unavailable' — the tenant is known to support receipts, so the guard is
+ *                   supposed to be authoritative, but the Postgres write failed
+ *                   and we cannot say whether it ran. FAIL CLOSED: degrading to
+ *                   the memory buffer here would admit a turn that bypassed the
+ *                   lock entirely.
+ */
+export type AppendOutcome = 'appended' | 'busy' | 'duplicate' | 'unavailable';
 
 /** Options for appendTurns. */
 export interface AppendOptions {
@@ -968,6 +983,32 @@ async function pgHasActiveTurn(
   return res.rows.length > 0;
 }
 
+/**
+ * Has this client_turn_id been seen before, in ANY state? (review !62 round 11,
+ * Important 2.)
+ *
+ * The active-turn probe above only sees 'received' receipts, so a REPLAYED id
+ * whose receipt is already 'answered' slipped past it — and the receipt insert's
+ * ON CONFLICT DO NOTHING meant no new 'received' row would appear for it either,
+ * leaving the guard blind for that turn AND the next one. A repeat is not a new
+ * turn: it is refused outright rather than double-feeding the stateful agent.
+ *
+ * Runs inside the same transaction and behind the same row lock as the active
+ * check, so a concurrent POST cannot slip between them.
+ */
+async function pgTurnIdSeen(
+  client: PoolClient, userId: string, clientTurnId: string, schema: ChatSchema,
+): Promise<boolean> {
+  if (!schema.receipts) return false;
+  const res = await client.query(
+    `SELECT 1 FROM dashboard_studio_meta_data.chat_turn_receipts
+      WHERE client_turn_id = $1 AND user_id = $2
+      LIMIT 1`,
+    [clientTurnId, userId],
+  );
+  return res.rows.length > 0;
+}
+
 async function pgAppendTurns(
   pool: Pool, ident: ChatIdentity, sessionId: string, entries: StoredTurn[],
   schema: ChatSchema, options?: AppendOptions,
@@ -990,14 +1031,24 @@ async function pgAppendTurns(
     // SINGLE ACTIVE TURN (review !62 round 10): inside the transaction and behind
     // the row lock, so the check and this request's INSERT are atomic against a
     // concurrent POST — otherwise two turns can both see an idle session.
-    if (
-      options?.rejectWhenTurnActive &&
-      await pgHasActiveTurn(
+    if (options?.rejectWhenTurnActive) {
+      if (await pgHasActiveTurn(
         client, userId, sessionId, options.activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS, schema,
-      )
-    ) {
-      await client.query('ROLLBACK');
-      return 'busy';
+      )) {
+        await client.query('ROLLBACK');
+        return 'busy';
+      }
+      // A REPLAYED id is not a new turn (round 11, Important 2). Checked here
+      // because the active probe above only sees 'received' receipts, and the
+      // receipt insert's ON CONFLICT DO NOTHING would never create one for an id
+      // that already exists — so an answered id used to pass both.
+      const replayedId = entries.find(
+        (e) => e.turn.role === 'user' && e.turn.client_turn_id,
+      )?.turn.client_turn_id;
+      if (replayedId && await pgTurnIdSeen(client, userId, replayedId, schema)) {
+        await client.query('ROLLBACK');
+        return 'duplicate';
+      }
     }
     // RECONCILIATION, write side: drain older buffered turns FIRST so a healed
     // transcript keeps its order — the user turn from a moment ago may sit in the
@@ -1097,18 +1148,35 @@ export async function appendTurns(
   // Same demo override as loadHistory (review !62 round 2, Critical 1): a demo
   // turn must be structurally unable to reach chat_messages.
   if (pool && !ident.demo) {
+    // Tracked outside the try so the catch below can tell "we know this tenant
+    // has receipts, so the guard was supposed to be authoritative" from "we never
+    // got far enough to know" (review !62 round 11, Important 2).
+    let receiptsKnownPresent = false;
     try {
       const schema = await probeChatSchema(pool);
+      receiptsKnownPresent = schema.receipts;
       if (schema.tables) {
-        // 'busy' is a DECISION, not a failure: returning it straight through is
-        // what keeps a refused turn from falling into the memory path and being
-        // written there anyway.
+        // 'busy'/'duplicate' are DECISIONS, not failures: returning them straight
+        // through is what keeps a refused turn from falling into the memory path
+        // and being written there anyway.
         return await pgAppendTurns(pool, ident, sessionId, entries, schema, options);
       }
     } catch (error) {
       logger.warn('chatStore.appendTurns degraded to in-memory history', {
         error: toErrorMeta(error).message,
       });
+      // FAIL CLOSED for a guarded append on a receipts-capable tenant (round 11,
+      // Important 2). The memory buffer knows nothing about the receipt this
+      // tenant's OTHER turn may have written, so degrading here would admit a
+      // second concurrent turn that bypassed the lock outright. Refusing costs a
+      // failed send during a database outage; admitting corrupts a stateful
+      // dialogue for every tab.
+      //
+      // Only for the GUARDED (user) turn: the assistant turn must still degrade
+      // to the write-behind buffer, or a completed reply would be lost.
+      if (options?.rejectWhenTurnActive && receiptsKnownPresent) {
+        return 'unavailable';
+      }
     }
   }
   return memoryAppend(ident, sessionId, entries, options);
