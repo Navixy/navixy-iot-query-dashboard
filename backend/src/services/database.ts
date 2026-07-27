@@ -6,6 +6,7 @@ import { SQLSelectGuard } from '../utils/sqlSelectGuard.js';
 import { RedisService } from './redis.js';
 import jwt from 'jsonwebtoken';
 import { toErrorMeta, isTransientDbError, type ErrorWithMeta } from '../utils/errors.js';
+import { buildAuthTokenPayload } from './authTokenPayload.js';
 import { sanitizeTimeZone } from '../utils/datetime.js';
 import {
   parsePostgresUrl as parseDbUrl,
@@ -287,20 +288,19 @@ export class DatabaseService {
           session_id: sessionId ?? 'not provided',
         });
 
-        // Generate JWT token - include both URLs, demo flag, and optional session_id for subsequent requests
-        const tokenPayload: Record<string, unknown> = {
+        // Generate JWT token - include both URLs, demo flag, and optional session_id
+        // for subsequent requests. buildAuthTokenPayload also adds the per-login jti
+        // that makes every token unique (review !62 round 10, Important 4) — see
+        // services/authTokenPayload.ts for why that is load-bearing.
+        const tokenPayload = buildAuthTokenPayload({
           userId: user.id,
           email: user.email,
           role: role,
           iotDbUrl: iotDbUrl,
           userDbUrl: userDbUrl,
-          demo: demo
-        };
-
-        // Add session_id if provided
-        if (sessionId) {
-          tokenPayload.session_id = sessionId;
-        }
+          demo: demo,
+          sessionId: sessionId != null ? String(sessionId) : undefined,
+        });
 
         const token = jwt.sign(
           tokenPayload,
