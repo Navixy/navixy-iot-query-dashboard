@@ -216,11 +216,14 @@ describe('createAgentChatContext — an unvalidated cached snapshot is not autho
     expect(context.priorSameContentUserTurns).toBe(2);
   });
 
-  it('keeps the cached baseline when the in-flight refetch FAILS (B5-R5: never brick the send)', async () => {
+  it('REFUSES the send when validating a STALE cache fails (round 10, Important 3)', async () => {
+    // Round 9 let this through, which put the whole race back on the error path:
+    // we are only here because a refetch was in flight against a snapshot from a
+    // previous mount — exactly when another tab may have started a turn — and the
+    // probe that would have told us just failed.
     const epoch = beginAuthSession();
     const client = new QueryClient();
-    const cached = session([user('refresh'), assistant('b')]);
-    client.setQueryData(agentSessionQueryKey(epoch), cached);
+    client.setQueryData(agentSessionQueryKey(epoch), session([user('refresh'), assistant('b')]));
     let fail!: (error: Error) => void;
     vi.mocked(apiService.getAgentSession).mockImplementation(
       () => new Promise((_resolve, reject) => { fail = reject; }),
@@ -234,11 +237,19 @@ describe('createAgentChatContext — an unvalidated cached snapshot is not autho
     const pending = createAgentChatContext(client, 'refresh');
     fail(new Error('network down'));
 
-    const context = await pending;
-    // A read that cannot validate is not a reason to refuse the send, and the
-    // stale snapshot is still a better baseline than none.
-    expect(context.snapshotAtSend).toBe(cached);
-    expect(context.priorSameContentUserTurns).toBe(1);
+    await expect(pending).rejects.toThrow(/could not confirm/i);
+  });
+
+  it('STILL sends when the read fails with an EMPTY cache — B5-R5 is untouched', async () => {
+    // The tenant whose history read never succeeds has no cache to be stale, so
+    // the refusal above cannot reach them: their page stays usable.
+    beginAuthSession();
+    const client = new QueryClient();
+    vi.mocked(apiService.getAgentSession).mockRejectedValue(new Error('history is broken here'));
+
+    const context = await createAgentChatContext(client, 'first message');
+    expect(context.snapshotAtSend).toBeNull();
+    expect(context.priorSameContentUserTurns).toBe(0);
   });
 });
 

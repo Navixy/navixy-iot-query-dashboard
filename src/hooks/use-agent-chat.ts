@@ -167,10 +167,25 @@ export async function createAgentChatContext(
     if (fresh !== null) {
       snapshotAtSend = fresh;
       hasAuthoritativeSnapshot = true;
+    } else if (cachedSnapshot !== null) {
+      // A FAILED validation of a STALE cache is not a reason to proceed (review
+      // !62 round 9 shipped it as one; round 10, Important 3). We only get here
+      // because a refetch was in flight against a snapshot left by a previous
+      // mount — the exact situation in which another tab may have started a turn
+      // — and the probe that would have told us just failed. Sending anyway puts
+      // the whole race back on the error path.
+      //
+      // This is NOT the B5-R5 case, which is about a tenant whose session read
+      // NEVER succeeds: such a tenant has no cache to be stale, takes the
+      // empty-cache branch below, and still sends. Only a tab that once had a
+      // transcript and cannot currently confirm it is asked to wait.
+      throw new Error(
+        'Could not confirm the state of this chat. Check your connection and try again.',
+      );
     }
-    // On failure snapshotAtSend keeps the PRE-await value: null when the cache was
-    // empty, otherwise the stale snapshot — still a better reconciliation baseline
-    // than none.
+    // With an EMPTY cache a failed read leaves snapshotAtSend null and the send
+    // proceeds on a 0 baseline — the acknowledged residual, and what keeps the
+    // page usable for a tenant whose history read is broken (B5-R5).
   }
   // RELOAD-WINDOW GUARD (review !62 round 8, finding 4; widened round 9, finding
   // 3). The composer is usable before a session read resolves — gating it on the
@@ -181,8 +196,8 @@ export async function createAgentChatContext(
   // had not yet validated a leftover snapshot) and that read shows a turn STILL
   // awaiting a reply, reject. A SETTLED cached snapshot is not this window: the
   // component already derived serverAwaitingReply from it and locked the composer.
-  // A read that FAILED leaves the pre-await snapshot, which is likewise settled
-  // component-visible data — so it too proceeds, preserving B5-R5.
+  // A read that failed against an EMPTY cache proceeds on a null snapshot (B5-R5);
+  // one that failed against a STALE cache never reaches here — it rejected above.
   if (
     hasAuthoritativeSnapshot &&
     snapshotAtSend &&
