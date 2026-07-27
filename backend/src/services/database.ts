@@ -8,6 +8,7 @@ import { RedisService } from './redis.js';
 import jwt from 'jsonwebtoken';
 import { toErrorMeta, isTransientDbError, type ErrorWithMeta } from '../utils/errors.js';
 import { buildAuthTokenPayload } from './authTokenPayload.js';
+import { resolveLoginIdentity } from './passwordlessLogin.js';
 import { sanitizeTimeZone } from '../utils/datetime.js';
 import {
   parsePostgresUrl as parseDbUrl,
@@ -243,65 +244,14 @@ export class DatabaseService {
       const client = await pool.connect();
 
       try {
-        // Check if user exists in client database (match by email)
-        const result = await client.query(
-          'SELECT * FROM dashboard_studio_meta_data.users WHERE email = $1',
-          [email]
-        );
-
-        let user: User;
-        let isNewUser = false;
-
-        if (result.rows.length === 0) {
-          // Create new user
-          logger.info('Creating new user for passwordless auth', { email, role });
-          const insertResult = await client.query(
-            `INSERT INTO dashboard_studio_meta_data.users (email, email_confirmed_at, is_super_admin, raw_user_meta_data)
-             VALUES ($1, NOW(), $2, $3)
-             RETURNING *`,
-            [email, role === 'admin', JSON.stringify({ iotDbUrl, userDbUrl })]
-          );
-          user = insertResult.rows[0] as User;
-          isNewUser = true;
-
-          // Create user role
-          await client.query('DELETE FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1', [user.id]);
-          await client.query('INSERT INTO dashboard_studio_meta_data.user_roles (user_id, role) VALUES ($1, $2)', [user.id, role]);
-        } else {
-          user = result.rows[0] as User;
-          logger.info('Found existing user for passwordless auth', { email, userId: user.id, role });
-
-          // Update user role
-          await client.query('DELETE FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1', [user.id]);
-          await client.query('INSERT INTO dashboard_studio_meta_data.user_roles (user_id, role) VALUES ($1, $2)', [user.id, role]);
-        }
-
-        // EPHEMERAL-ROW MARKER (review !62 round 11, Critical 1). Login matches by
-        // EMAIL and REUSES an existing row, so a demo sign-in with a real user's
-        // address authenticates AS that user — and the demo cleanup that follows
-        // deleted whatever userId the token carried, taking their roles, sections
-        // and reports with it. The marker is minted ONLY when this DEMO login
-        // created the row, and the cleanup endpoint deletes only a row whose
-        // stored marker still matches the one in the token. A demo login that
-        // reused a pre-existing identity therefore carries no marker and can
-        // delete nothing.
-        //
-        // DO NOT change this UPDATE to MERGE into raw_user_meta_data. Replacing it
-        // wholesale is load-bearing: it is what makes ANY later login on this row
-        // — normal or demo — drop an outstanding marker, which is what closes the
-        // race where a real user signs in while a demo cleanup is still in flight.
-        const demoCleanupToken = demo && isNewUser ? randomUUID() : undefined;
-        await client.query(
-          'UPDATE dashboard_studio_meta_data.users SET last_sign_in_at = NOW(), raw_user_meta_data = $1 WHERE id = $2',
-          [
-            JSON.stringify({
-              iotDbUrl,
-              userDbUrl,
-              ...(demoCleanupToken && { demo_cleanup_token: demoCleanupToken }),
-            }),
-            user.id,
-          ]
-        );
+        // Get-or-create, the role/metadata writes, the marker and therefore the
+        // JWT all happen in ONE transaction, serialized per email address —
+        // see services/passwordlessLogin.ts for the races that required it
+        // (review !62 round 12, Critical 1). It lives there rather than inline
+        // because this module cannot be imported under the repo's ts-jest ESM
+        // setup, which is why none of this was testable before.
+        const { user, isNewUser, effectiveRole, demoCleanupToken } =
+          await resolveLoginIdentity(client, { email, role, iotDbUrl, userDbUrl, demo });
 
         logger.info('Updated user metadata with database URLs', {
           userId: user.id,
@@ -317,7 +267,11 @@ export class DatabaseService {
         const tokenPayload = buildAuthTokenPayload({
           userId: user.id,
           email: user.email,
-          role: role,
+          // The role the account ACTUALLY holds. For a demo login on a
+          // pre-existing row this is the stored role, not the requested one, so a
+          // demo sign-in can never hand itself more privilege than the account has
+          // (review !62 round 12, Critical 1).
+          role: effectiveRole,
           iotDbUrl: iotDbUrl,
           userDbUrl: userDbUrl,
           demo: demo,
@@ -331,7 +285,7 @@ export class DatabaseService {
           { expiresIn: '24h' }
         );
 
-        return { user, token };
+        return { user: user as unknown as User, token };
       } finally {
         client.release();
       }
