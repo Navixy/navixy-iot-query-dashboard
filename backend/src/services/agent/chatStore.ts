@@ -263,9 +263,22 @@ function memKey(ident: ChatIdentity): string {
 interface ChatSchema {
   tables: boolean;
   clientTurnId: boolean;
-  /** Whether the durable per-turn receipts table exists (review !62 round 7,
-   *  finding 5b) — gates the receipt upsert and the turn-status lookup. */
+  /** Whether the durable per-turn receipts table exists AND carries the per-user
+   *  key 004 introduces (review !62 round 7 finding 5b; round 12 Important 3) —
+   *  gates the receipt upsert, the turn-status lookup and the turn guard. */
   receipts: boolean;
+  /**
+   * Did we actually LEARN this tenant's capabilities, or is it a placeholder for
+   * "the probe failed"? (review !62 round 12, Important 2.)
+   *
+   * The probe returned all-false on any error, which is indistinguishable from
+   * "proved absent" — so a settings DB blip made a receipts-capable tenant look
+   * like one with no receipts at all, and the guarded append quietly degraded to
+   * process memory where an already-active Postgres receipt is invisible. On two
+   * replicas each could then admit its own turn. A guarded user append refuses
+   * outright when capability is unknown; everything else keeps degrading.
+   */
+  known: boolean;
 }
 
 let probeCache = new WeakMap<Pool, { schema: ChatSchema; checkedAt: number }>();
@@ -326,7 +339,7 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
         `);
         if (!sessionsExist.rows[0].exists) {
           logger.warn('chat_sessions table does not exist in dashboard_studio_meta_data schema');
-          return { tables: false, clientTurnId: false, receipts: false };
+          return { tables: false, clientTurnId: false, receipts: false, known: true };
         }
 
         const messagesExist = await client.query(`
@@ -338,7 +351,7 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
         `);
         if (!messagesExist.rows[0].exists) {
           logger.warn('chat_messages table does not exist in dashboard_studio_meta_data schema');
-          return { tables: false, clientTurnId: false, receipts: false };
+          return { tables: false, clientTurnId: false, receipts: false, known: true };
         }
 
         // The idempotency column is OPTIONAL (review !62 round 6): a tenant on an
@@ -390,6 +403,7 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
           tables: true,
           clientTurnId: Boolean(columnExists.rows[0].exists),
           receipts,
+          known: true,
         };
       } finally {
         client.release();
@@ -401,7 +415,16 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
     logger.warn('chat schema probe failed; degrading to in-memory history', {
       error: toErrorMeta(error).message,
     });
-    return { tables: false, clientTurnId: false, receipts: false };
+    // LAST-KNOWN CAPABILITY beats a guess (review !62 round 12, Important 2). The
+    // cache above is consulted only while fresh, so an expired entry was being
+    // thrown away — even though a tenant's schema does not change because their
+    // database went briefly unreachable. Reusing it keeps a receipts-capable
+    // tenant recognised as such, which is what makes the guarded append fail
+    // CLOSED rather than silently degrade past its own lock.
+    if (cached) return cached.schema;
+    // Never probed successfully: we genuinely do not know. `known: false` is what
+    // the guarded append refuses on.
+    return { tables: false, clientTurnId: false, receipts: false, known: false };
   }
 }
 
@@ -545,12 +568,20 @@ function memoryAppend(
   const now = Date.now();
   sweepExpired(now);
   let session = memorySessions.get(memKey(ident));
-  if (
-    session &&
-    options?.rejectWhenTurnActive &&
-    memoryHasActiveTurn(session, now, options.activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS)
-  ) {
-    return 'busy';
+  if (session && options?.rejectWhenTurnActive) {
+    if (memoryHasActiveTurn(session, now, options.activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS)) {
+      return 'busy';
+    }
+    // A REPLAYED id is refused here too (review !62 round 12, Important 2). Round
+    // 11 added this check only to the Postgres path, so on the memory/demo path a
+    // repeat of an already-answered id was admitted — and its OLD assistant turn
+    // immediately made the new user turn look answered, blinding the guard again.
+    const replayedId = entries.find(
+      (e) => e.turn.role === 'user' && e.turn.client_turn_id,
+    )?.turn.client_turn_id;
+    if (replayedId && session.entries.some((e) => e.turn.client_turn_id === replayedId)) {
+      return 'duplicate';
+    }
   }
   if (!session) {
     // A degraded Postgres append (e.g. read-only standby) lands here carrying a
@@ -1177,6 +1208,15 @@ export async function appendTurns(
     try {
       const schema = await probeChatSchema(pool);
       receiptsKnownPresent = schema.receipts;
+      // CAPABILITY UNKNOWN IS NOT CAPABILITY ABSENT (review !62 round 12,
+      // Important 2). A probe that failed with nothing cached tells us nothing
+      // about this tenant — and the memory path cannot see a Postgres receipt an
+      // active turn may already hold, so degrading here would let each replica
+      // admit its own turn. Refuse the GUARDED turn only; everything else still
+      // degrades, because a reply that already reached the user must not be lost.
+      if (!schema.known && options?.rejectWhenTurnActive) {
+        return 'unavailable';
+      }
       if (schema.tables) {
         // 'busy'/'duplicate' are DECISIONS, not failures: returning them straight
         // through is what keeps a refused turn from falling into the memory path

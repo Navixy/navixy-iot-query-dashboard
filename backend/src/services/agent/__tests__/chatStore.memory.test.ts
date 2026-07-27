@@ -468,3 +468,43 @@ describe('chatStore — single active turn (review !62 round 10)', () => {
     expect(await appendTurns(null, ident('u1'), sessionId, [user('third')], guard)).toBe('appended');
   });
 });
+
+/**
+ * review !62 round 12, Important 2. Round 11 added the duplicate-id refusal only
+ * to the Postgres path, so on the memory path — which is also the DEMO path — a
+ * repeat of an already-answered id was admitted, and its OLD assistant turn
+ * immediately made the new user turn look answered, blinding the guard again.
+ */
+describe('chatStore — the memory guard refuses a replayed id too (round 12)', () => {
+  const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const replyWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses an id whose exchange has already completed', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer', 't1')]);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('replayed', 't1')], guard),
+    ).toBe('duplicate');
+
+    // ...and nothing was written, so the guard is not blinded for the NEXT turn.
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history).toHaveLength(2);
+  });
+
+  it('still admits a genuinely new id', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer', 't1')]);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
+  });
+});

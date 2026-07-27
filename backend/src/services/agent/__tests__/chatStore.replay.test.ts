@@ -861,3 +861,49 @@ describe('chatStore — receipts are keyed per user (round 12, Important 3)', ()
     });
   });
 });
+
+/**
+ * review !62 round 12, Important 2. The probe returned all-false on ANY error,
+ * which is indistinguishable from "proved absent" — so a settings-DB blip made a
+ * receipts-capable tenant look like one with no receipts, and the guarded append
+ * degraded to process memory where an already-active Postgres receipt is
+ * invisible. On two replicas each could then admit its own turn.
+ */
+describe('chatStore — an unprobed tenant is not an unguarded one (round 12)', () => {
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses a guarded turn when the probe fails and nothing is known', async () => {
+    const failingPool = {
+      connect: async () => { throw new Error('settings DB unreachable'); },
+    } as unknown as Pool;
+
+    expect(
+      await appendTurns(failingPool, ident('u1'), 'session-1', [userWithId('hi', 't1')], guard),
+    ).toBe('unavailable');
+  });
+
+  it('still buffers an UNGUARDED turn when the probe fails — a reply is never lost', async () => {
+    const failingPool = {
+      connect: async () => { throw new Error('settings DB unreachable'); },
+    } as unknown as Pool;
+
+    expect(
+      await appendTurns(failingPool, ident('u1'), 'session-1', [questionWithId('answer', 't1')]),
+    ).toBe('appended');
+  });
+
+  it('reuses the LAST KNOWN capability when a later probe fails', async () => {
+    // A tenant's schema does not change because their database went briefly
+    // unreachable, and the cache was previously consulted only while fresh.
+    const { pool, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null); // probes: receipts present
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(pool, ident('u1'), sessionId, [questionWithId('answer', 't1')]);
+
+    // Now the whole connection breaks, expiring nothing but failing every probe.
+    script.failMessageInsert = true;
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('unavailable'); // known receipts-capable => fail closed, not degrade
+  });
+});
