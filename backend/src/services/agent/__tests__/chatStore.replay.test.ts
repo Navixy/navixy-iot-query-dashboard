@@ -49,6 +49,9 @@ interface Script {
   clientTurnIdColumn: boolean;
   /** Whether the round-7 chat_turn_receipts table exists. */
   receiptsTable: boolean;
+  /** Whether 004 has scoped its primary key to (user_id, client_turn_id). The
+   *  store refuses to use a globally-keyed table (review !62 round 12). */
+  receiptsPerUserKey: boolean;
   /** Every chat_messages INSERT throws while true. */
   failMessageInsert: boolean;
   /** Emulates an in-doubt COMMIT once: the server APPLIES the transaction, but the
@@ -66,6 +69,7 @@ function makeScriptedPool() {
     tablesExist: true,
     clientTurnIdColumn: true,
     receiptsTable: true,
+    receiptsPerUserKey: true,
     failMessageInsert: false,
     failCommitOnceAfterApply: false,
   };
@@ -117,6 +121,16 @@ function makeScriptedPool() {
         }
         return { rows: [{ exists: script.tablesExist }] };
       }
+      // Receipts PRIMARY KEY columns (review !62 round 12, Important 3): the table
+      // is only usable once 004 has scoped the key to (user_id, client_turn_id).
+      if (q.includes('information_schema.key_column_usage')) {
+        if (!script.receiptsTable) return { rows: [] };
+        return {
+          rows: script.receiptsPerUserKey
+            ? [{ column_name: 'user_id' }, { column_name: 'client_turn_id' }]
+            : [{ column_name: 'client_turn_id' }],
+        };
+      }
 
       // Durable receipts (round 7, finding 5b). Applied directly, not txn-buffered:
       // insertEntry only writes a receipt AFTER a successful message INSERT, and the
@@ -124,7 +138,11 @@ function makeScriptedPool() {
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_turn_receipts')) {
         const id = String(params[0]);
         const answered = q.includes("'answered'");
-        const existing = db.receipts.find((r) => r.client_turn_id === id);
+        // Keyed per user since 004 (review !62 round 12, Important 3).
+        const userId = String(params[1]);
+        const existing = db.receipts.find(
+          (r) => r.client_turn_id === id && r.user_id === userId,
+        );
         if (existing) {
           if (q.includes('DO UPDATE')) existing.status = 'answered';
           // else ON CONFLICT DO NOTHING
@@ -783,5 +801,63 @@ describe('chatStore — the single-active-turn guard cannot be bypassed (round 1
     expect(
       await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard),
     ).toBe('appended'); // degraded to the memory buffer, as before
+  });
+});
+
+/**
+ * review !62 round 12, Important 3. 003 keyed chat_turn_receipts GLOBALLY on
+ * client_turn_id while every check that reads it is scoped by user_id — and the
+ * id is a client-minted arbitrary string. The scopes disagreeing is a CROSS-USER
+ * defect: B sending a turn under an id A already holds got no receipt of their
+ * own, and B's reply then flipped A's receipt to 'answered', releasing A's guard
+ * while A's turn was still running.
+ */
+describe('chatStore — receipts are keyed per user (round 12, Important 3)', () => {
+  const guard = { rejectWhenTurnActive: true };
+
+  it('one user\'s turn id does not touch another user\'s receipt', async () => {
+    const { pool, db } = makeScriptedPool();
+
+    // A starts a turn under a shared id and is left waiting for its reply.
+    const a = await loadHistory(pool, ident('user-A'), null);
+    await appendTurns(pool, ident('user-A'), a.sessionId, [userWithId('A works', 'shared-id')], guard);
+
+    // B sends a turn under the SAME id. It is a NEW turn for B, so it is admitted.
+    const b = await loadHistory(pool, ident('user-B'), null);
+    expect(
+      await appendTurns(pool, ident('user-B'), b.sessionId, [userWithId('B works', 'shared-id')], guard),
+    ).toBe('appended');
+    // B has a receipt OF THEIR OWN — under the global key this INSERT vanished.
+    expect(db.receipts.filter((r) => r.client_turn_id === 'shared-id')).toHaveLength(2);
+
+    // B's reply answers B's receipt only.
+    await appendTurns(pool, ident('user-B'), b.sessionId, [questionWithId('B done', 'shared-id')]);
+    const byUser = Object.fromEntries(
+      db.receipts.filter((r) => r.client_turn_id === 'shared-id').map((r) => [r.user_id, r.status]),
+    );
+    expect(byUser['user-B']).toBe('answered');
+    // THE POINT: A is still waiting, so A's guard must still hold.
+    expect(byUser['user-A']).toBe('received');
+    expect(
+      await appendTurns(pool, ident('user-A'), a.sessionId, [userWithId('A again', 'a-2')], guard),
+    ).toBe('busy');
+  });
+
+  it('treats a GLOBALLY keyed receipts table as absent until 004 is applied', async () => {
+    // Using it under the old key is the cross-user hazard above, so the store
+    // declines to use it at all rather than half-work.
+    const { pool, script } = makeScriptedPool();
+    script.receiptsPerUserKey = false;
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    // No receipts => no lock (the documented older-schema degradation), and no
+    // cross-user collisions either.
+    expect(
+      await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
+    expect(await getTurnStatus(pool, ident('u1'), 't1')).toEqual({
+      status: 'unknown', supported: false,
+    });
   });
 });

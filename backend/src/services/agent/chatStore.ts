@@ -357,17 +357,39 @@ async function probeChatSchema(pool: Pool): Promise<ChatSchema> {
         // The receipts table is also OPTIONAL (review !62 round 7, 003 migration):
         // absent on a tenant who has not applied 003. Its absence only disables
         // the durable turn-status lookup; it never blocks chat or persistence.
-        const receiptsExist = await client.query(`
-          SELECT EXISTS (
-            SELECT FROM information_schema.tables
-            WHERE table_schema = 'dashboard_studio_meta_data'
-            AND table_name = 'chat_turn_receipts'
-          )
+        //
+        // USABLE ONLY WITH THE PER-USER KEY (review !62 round 12, Important 3).
+        // 003 keyed the table globally on client_turn_id while every check that
+        // reads it is scoped by user_id, and the id is a client-minted arbitrary
+        // string: user B sending a turn under an id user A already holds got no
+        // receipt of their own (global conflict) and B's reply then flipped A's
+        // receipt to 'answered', releasing A's guard mid-turn. 004 fixes the key.
+        // Until a tenant applies it, the receipts table is treated as ABSENT —
+        // no lock and no turn-status rather than a cross-user hazard.
+        const receiptsPk = await client.query(`
+          SELECT k.column_name
+            FROM information_schema.table_constraints c
+            JOIN information_schema.key_column_usage k
+              ON k.constraint_name = c.constraint_name
+             AND k.constraint_schema = c.constraint_schema
+           WHERE c.constraint_schema = 'dashboard_studio_meta_data'
+             AND c.table_name = 'chat_turn_receipts'
+             AND c.constraint_type = 'PRIMARY KEY'
         `);
+        const pkColumns = receiptsPk.rows.map((r: { column_name: string }) => r.column_name).sort();
+        const receipts =
+          pkColumns.length === 2 &&
+          pkColumns[0] === 'client_turn_id' &&
+          pkColumns[1] === 'user_id';
+        if (!receipts && pkColumns.length > 0) {
+          logger.warn('chat_turn_receipts is keyed globally; apply 004 to enable the turn guard', {
+            pkColumns,
+          });
+        }
         return {
           tables: true,
           clientTurnId: Boolean(columnExists.rows[0].exists),
-          receipts: Boolean(receiptsExist.rows[0].exists),
+          receipts,
         };
       } finally {
         client.release();
@@ -732,7 +754,7 @@ async function insertEntry(
         `INSERT INTO dashboard_studio_meta_data.chat_turn_receipts
            (client_turn_id, user_id, session_id, status)
          VALUES ($1, $2, $3, 'received')
-         ON CONFLICT (client_turn_id) DO NOTHING`,
+         ON CONFLICT (user_id, client_turn_id) DO NOTHING`,
         [clientTurnId, userId, sessionId],
       );
     } else {
@@ -740,7 +762,7 @@ async function insertEntry(
         `INSERT INTO dashboard_studio_meta_data.chat_turn_receipts
            (client_turn_id, user_id, session_id, status)
          VALUES ($1, $2, $3, 'answered')
-         ON CONFLICT (client_turn_id) DO UPDATE SET status = 'answered', updated_at = NOW()`,
+         ON CONFLICT (user_id, client_turn_id) DO UPDATE SET status = 'answered', updated_at = NOW()`,
         [clientTurnId, userId, sessionId],
       );
     }

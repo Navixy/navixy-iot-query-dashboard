@@ -63,6 +63,10 @@ function makeHealthyPool() {
       // Column probe (review !62 round 6) — matched before the tables probe.
       if (q.includes('information_schema.columns')) return { rows: [{ exists: true }] };
       if (q.includes('information_schema.tables')) return { rows: [{ exists: true }] };
+      // Receipts PK columns (review !62 round 12): 004-applied shape.
+      if (q.includes('information_schema.key_column_usage')) {
+        return { rows: [{ column_name: 'user_id' }, { column_name: 'client_turn_id' }] };
+      }
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_sessions')) {
         const userId = String(params[0]);
