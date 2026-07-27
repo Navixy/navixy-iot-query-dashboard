@@ -290,7 +290,14 @@ const AiChat = () => {
               handledFailedTurnsRef.current.delete(failed.mutationId);
               return;
             }
-            const response = await apiService.getAgentSession().catch(() => null);
+            // Bound to THIS TAB's token, like every other chat call (review !62
+            // round 9, finding 1). Read per attempt rather than captured once: if
+            // the tab is torn down mid-poll the anchor is null, api.ts fails the
+            // probe closed, and a failed probe is already treated as no proof —
+            // the turn degrades to 'uncertain' instead of a confirmed loss.
+            const response = await apiService
+              .getAgentSession(getTabSessionToken())
+              .catch(() => null);
             if (!failureHandlingAliveRef.current) {
               handledFailedTurnsRef.current.delete(failed.mutationId);
               return;
@@ -321,7 +328,12 @@ const AiChat = () => {
           // proof of loss and yields 'uncertain', never a resendable draft.
           let outcome: ReconcileOutcome;
           if (delivery === 'lost' && lastGetSucceeded && supportsTurnIds && failed.clientTurnId) {
-            const receipt = await apiService.getAgentTurnStatus(failed.clientTurnId).catch(() => null);
+            const receipt = await apiService
+              // Bound like the probe above (round 9, finding 1): a receipt looked
+              // up under a successor's token answers about THEIR turns, and an
+              // 'unknown' there is exactly what would fabricate a confirmed loss.
+              .getAgentTurnStatus(failed.clientTurnId, getTabSessionToken())
+              .catch(() => null);
             if (!failureHandlingAliveRef.current) {
               handledFailedTurnsRef.current.delete(failed.mutationId);
               return;
