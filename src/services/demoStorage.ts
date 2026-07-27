@@ -605,46 +605,55 @@ export class DemoStorageService {
     version: number;
   }): Promise<DemoSection> {
     const database = getDb();
-    
-    const existing = await database.sections.get(id);
-    if (!existing) {
-      throw new Error('Section not found');
-    }
-    
-    if (existing.version !== data.version) {
-      throw new Error('Version conflict');
-    }
 
-    const updated: Partial<DemoSection> = {
-      updatedAt: new Date(),
-      updatedBy: data.userId,
-      version: existing.version + 1
-    };
+    // The lookup, the version check and the write are ONE transaction (review !62
+    // round 11, Important 3). Split, two tabs holding the same owner could both
+    // read version 1 and both write version 2 — the optimistic-locking check would
+    // pass for both and one edit would be silently lost. A revoked tab also got to
+    // read the successor's row before the guard refused it.
+    return this.guardedWrite(['sections'], async () => {
+      const existing = await database.sections.get(id);
+      if (!existing) {
+        throw new Error('Section not found');
+      }
 
-    if (data.name !== undefined) updated.name = data.name;
-    if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
+      if (existing.version !== data.version) {
+        throw new Error('Version conflict');
+      }
 
-    await this.guardedWrite(['sections'], () => database.sections.update(id, updated));
+      const updated: Partial<DemoSection> = {
+        updatedAt: new Date(),
+        updatedBy: data.userId,
+        version: existing.version + 1
+      };
 
-    return { ...existing, ...updated } as DemoSection;
+      if (data.name !== undefined) updated.name = data.name;
+      if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
+
+      await database.sections.update(id, updated);
+
+      return { ...existing, ...updated } as DemoSection;
+    });
   }
 
   async deleteSection(id: string, strategy: 'move_children_to_root' | 'delete_children', userId: string): Promise<{ affectedReports: number }> {
     const database = getDb();
-    
-    const section = await database.sections.get(id);
-    if (!section || section.isDeleted) {
-      throw new Error('Section not found');
-    }
 
-    // Get child reports
-    const childReports = await database.reports
-      .filter(r => r.sectionId === id && !r.isDeleted)
-      .toArray();
+    // Lookup, the dependent child read and every write in ONE transaction (round
+    // 11, Important 3): the child set a concurrent write could have changed under
+    // us is exactly what decides which reports are moved or deleted.
+    return this.guardedWrite(['sections', 'reports'], async () => {
+      const section = await database.sections.get(id);
+      if (!section || section.isDeleted) {
+        throw new Error('Section not found');
+      }
 
-    const affectedReports = childReports.length;
+      const childReports = await database.reports
+        .filter(r => r.sectionId === id && !r.isDeleted)
+        .toArray();
 
-    await this.guardedWrite(['sections', 'reports'], async () => {
+      const affectedReports = childReports.length;
+
       if (strategy === 'move_children_to_root') {
         // Move reports to root
         for (const report of childReports) {
@@ -671,25 +680,26 @@ export class DemoStorageService {
         updatedAt: new Date(),
         updatedBy: userId
       });
-    });
 
-    return { affectedReports };
+      return { affectedReports };
+    });
   }
 
   async restoreSection(id: string, userId: string): Promise<void> {
     const database = getDb();
     
-    const section = await database.sections.get(id);
-    if (!section || !section.isDeleted) {
-      throw new Error('Deleted section not found');
-    }
+    await this.guardedWrite(['sections'], async () => {
+      const section = await database.sections.get(id);
+      if (!section || !section.isDeleted) {
+        throw new Error('Deleted section not found');
+      }
 
-    await this.guardedWrite(['sections'], () =>
-      database.sections.update(id, {
+      await database.sections.update(id, {
         isDeleted: false,
         updatedAt: new Date(),
         updatedBy: userId
-      }));
+      });
+    });
   }
 
   // ==========================================
@@ -783,63 +793,70 @@ export class DemoStorageService {
     version?: number;
   }): Promise<DemoReport> {
     const database = getDb();
-    
-    const existing = await database.reports.get(id);
-    if (!existing || existing.isDeleted) {
-      throw new Error('Report not found');
-    }
 
-    // Check version if provided
-    if (data.version !== undefined && existing.version !== data.version) {
-      throw new Error('Version conflict');
-    }
+    // Lookup, version check and write in ONE transaction (round 11, Important 3):
+    // split, two tabs could both read version 1, both pass the check and both
+    // write version 2, losing one edit.
+    return this.guardedWrite(['reports'], async () => {
+      const existing = await database.reports.get(id);
+      if (!existing || existing.isDeleted) {
+        throw new Error('Report not found');
+      }
 
-    const updated: Partial<DemoReport> = {
-      updatedAt: new Date(),
-      updatedBy: data.userId,
-      version: existing.version + 1
-    };
+      // Check version if provided
+      if (data.version !== undefined && existing.version !== data.version) {
+        throw new Error('Version conflict');
+      }
 
-    if (data.title !== undefined) updated.title = data.title;
-    if (data.sectionId !== undefined) updated.sectionId = data.sectionId;
-    if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
-    if (data.reportSchema !== undefined) updated.reportSchema = data.reportSchema as RawReportSchema;
+      const updated: Partial<DemoReport> = {
+        updatedAt: new Date(),
+        updatedBy: data.userId,
+        version: existing.version + 1
+      };
 
-    await this.guardedWrite(['reports'], () => database.reports.update(id, updated));
+      if (data.title !== undefined) updated.title = data.title;
+      if (data.sectionId !== undefined) updated.sectionId = data.sectionId;
+      if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
+      if (data.reportSchema !== undefined) updated.reportSchema = data.reportSchema as RawReportSchema;
 
-    return { ...existing, ...updated } as DemoReport;
+      await database.reports.update(id, updated);
+
+      return { ...existing, ...updated } as DemoReport;
+    });
   }
 
   async deleteReport(id: string, userId: string): Promise<void> {
     const database = getDb();
     
-    const report = await database.reports.get(id);
-    if (!report || report.isDeleted) {
-      throw new Error('Report not found');
-    }
+    await this.guardedWrite(['reports'], async () => {
+      const report = await database.reports.get(id);
+      if (!report || report.isDeleted) {
+        throw new Error('Report not found');
+      }
 
-    await this.guardedWrite(['reports'], () =>
-      database.reports.update(id, {
+      await database.reports.update(id, {
         isDeleted: true,
         updatedAt: new Date(),
         updatedBy: userId
-      }));
+      });
+    });
   }
 
   async restoreReport(id: string, userId: string): Promise<void> {
     const database = getDb();
     
-    const report = await database.reports.get(id);
-    if (!report || !report.isDeleted) {
-      throw new Error('Deleted report not found');
-    }
+    await this.guardedWrite(['reports'], async () => {
+      const report = await database.reports.get(id);
+      if (!report || !report.isDeleted) {
+        throw new Error('Deleted report not found');
+      }
 
-    await this.guardedWrite(['reports'], () =>
-      database.reports.update(id, {
+      await database.reports.update(id, {
         isDeleted: false,
         updatedAt: new Date(),
         updatedBy: userId
-      }));
+      });
+    });
   }
 
   // ==========================================
@@ -985,12 +1002,6 @@ export class DemoStorageService {
     value?: string;
   }): Promise<DemoGlobalVariable> {
     const database = getDb();
-    
-    // Check for duplicate label
-    const existing = await database.globalVariables.where('label').equals(data.label).first();
-    if (existing) {
-      throw new Error('A variable with this label already exists');
-    }
 
     const variable: DemoGlobalVariable = {
       id: crypto.randomUUID(),
@@ -1001,8 +1012,17 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await this.guardedWrite(['globalVariables'], () => database.globalVariables.add(variable));
-    return variable;
+    // The duplicate-label check belongs INSIDE the transaction (round 11,
+    // Important 3): checked outside, two concurrent creates both see no match and
+    // both insert the same label.
+    return this.guardedWrite(['globalVariables'], async () => {
+      const existing = await database.globalVariables.where('label').equals(data.label).first();
+      if (existing) {
+        throw new Error('A variable with this label already exists');
+      }
+      await database.globalVariables.add(variable);
+      return variable;
+    });
   }
 
   async updateGlobalVariable(id: string, data: {
@@ -1011,43 +1031,49 @@ export class DemoStorageService {
     value?: string;
   }): Promise<DemoGlobalVariable> {
     const database = getDb();
-    
-    const existing = await database.globalVariables.get(id);
-    if (!existing) {
-      throw new Error('Global variable not found');
-    }
 
-    // Check for duplicate label if changing label
-    if (data.label && data.label !== existing.label) {
-      const duplicate = await database.globalVariables.where('label').equals(data.label).first();
-      if (duplicate) {
-        throw new Error('A variable with this label already exists');
+    // Lookup, duplicate-label check and write in ONE transaction (round 11,
+    // Important 3) — the check is worthless if another write can land between it
+    // and the update.
+    return this.guardedWrite(['globalVariables'], async () => {
+      const existing = await database.globalVariables.get(id);
+      if (!existing) {
+        throw new Error('Global variable not found');
       }
-    }
 
-    const updated: Partial<DemoGlobalVariable> = {
-      updatedAt: new Date()
-    };
+      // Check for duplicate label if changing label
+      if (data.label && data.label !== existing.label) {
+        const duplicate = await database.globalVariables.where('label').equals(data.label).first();
+        if (duplicate) {
+          throw new Error('A variable with this label already exists');
+        }
+      }
 
-    if (data.label !== undefined) updated.label = data.label;
-    if (data.description !== undefined) updated.description = data.description;
-    if (data.value !== undefined) updated.value = data.value;
+      const updated: Partial<DemoGlobalVariable> = {
+        updatedAt: new Date()
+      };
 
-    await this.guardedWrite(['globalVariables'], () =>
-      database.globalVariables.update(id, updated));
+      if (data.label !== undefined) updated.label = data.label;
+      if (data.description !== undefined) updated.description = data.description;
+      if (data.value !== undefined) updated.value = data.value;
 
-    return { ...existing, ...updated } as DemoGlobalVariable;
+      await database.globalVariables.update(id, updated);
+
+      return { ...existing, ...updated } as DemoGlobalVariable;
+    });
   }
 
   async deleteGlobalVariable(id: string): Promise<void> {
     const database = getDb();
     
-    const existing = await database.globalVariables.get(id);
-    if (!existing) {
-      throw new Error('Global variable not found');
-    }
+    await this.guardedWrite(['globalVariables'], async () => {
+      const existing = await database.globalVariables.get(id);
+      if (!existing) {
+        throw new Error('Global variable not found');
+      }
 
-    await this.guardedWrite(['globalVariables'], () => database.globalVariables.delete(id));
+      await database.globalVariables.delete(id);
+    });
   }
 }
 
