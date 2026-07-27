@@ -7,6 +7,7 @@ import {
   type UserPreferences,
 } from '../services/userPreferences.js';
 import { authenticateToken, requireAdmin, requireAdminOrEditor } from '../middleware/auth.js';
+import { rejectDemoWrites } from '../middleware/demoGuard.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { CustomError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
@@ -236,7 +237,7 @@ router.get('/user/preferences', authenticateToken, async (req: AuthenticatedRequ
   }
 });
 
-router.put('/user/preferences', authenticateToken, async (req: AuthenticatedRequest, res, next) => {
+router.put('/user/preferences', authenticateToken, rejectDemoWrites, async (req: AuthenticatedRequest, res, next) => {
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
     // Field validation (incl. sanitizeTimeZone on `timezone` — the same rules
@@ -322,7 +323,7 @@ router.get('/global-variables/:id', authenticateToken, async (req: Authenticated
 });
 
 // Create global variable (admin only)
-router.post('/global-variables', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+router.post('/global-variables', authenticateToken, rejectDemoWrites, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { label, description, value } = req.body;
 
@@ -354,7 +355,7 @@ router.post('/global-variables', authenticateToken, requireAdmin, async (req: Au
 });
 
 // Update global variable (admin only)
-router.put('/global-variables/:id', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+router.put('/global-variables/:id', authenticateToken, rejectDemoWrites, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     if (!id) {
@@ -386,7 +387,7 @@ router.put('/global-variables/:id', authenticateToken, requireAdmin, async (req:
 });
 
 // Delete global variable (admin only)
-router.delete('/global-variables/:id', authenticateToken, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
+router.delete('/global-variables/:id', authenticateToken, rejectDemoWrites, requireAdmin, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     if (!id) {
@@ -495,7 +496,7 @@ router.get('/reports/:id', authenticateToken, async (req: AuthenticatedRequest, 
 });
 
 // Create section (admin/editor only)
-router.post('/sections', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.post('/sections', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { name, sort_order } = req.body;
     
@@ -534,7 +535,7 @@ router.post('/sections', authenticateToken, requireAdminOrEditor, async (req: Au
 });
 
 // Update section (admin/editor only)
-router.put('/sections/:id', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.put('/sections/:id', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     const { name, sort_index } = req.body;
@@ -597,7 +598,7 @@ router.put('/sections/:id', authenticateToken, requireAdminOrEditor, async (req:
 });
 
 // Delete section (admin/editor only)
-router.delete('/sections/:id', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.delete('/sections/:id', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     const { moveReportsToSection } = req.query; // Optional: move reports to another section
@@ -695,7 +696,7 @@ router.delete('/sections/:id', authenticateToken, requireAdminOrEditor, async (r
 });
 
 // Reorder sections (admin/editor only)
-router.put('/sections/reorder', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.put('/sections/reorder', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { sections } = req.body; // Array of { id, sort_index }
     
@@ -743,7 +744,7 @@ router.put('/sections/reorder', authenticateToken, requireAdminOrEditor, async (
 });
 
 // Reorder reports (admin/editor only)
-router.put('/reports/reorder', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.put('/reports/reorder', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { reports } = req.body; // Array of { id, sort_index, section_id }
     
@@ -801,7 +802,7 @@ router.put('/reports/reorder', authenticateToken, requireAdminOrEditor, async (r
 });
 
 // Create report (admin/editor only)
-router.post('/reports', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.post('/reports', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { title, section_id, slug, sort_order, report_schema } = req.body;
     
@@ -861,7 +862,7 @@ router.post('/reports', authenticateToken, requireAdminOrEditor, async (req: Aut
 });
 
 // Update report (admin/editor only)
-router.put('/reports/:id', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.put('/reports/:id', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     const { title, subtitle, report_schema } = req.body;
@@ -938,7 +939,7 @@ router.put('/reports/:id', authenticateToken, requireAdminOrEditor, async (req: 
 });
 
 // Delete report (admin/editor only)
-router.delete('/reports/:id', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.delete('/reports/:id', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
 

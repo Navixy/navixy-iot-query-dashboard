@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateToken, requireAdminOrEditor } from '../middleware/auth.js';
+import { rejectDemoWrites } from '../middleware/demoGuard.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { CustomError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
@@ -143,7 +144,7 @@ router.get('/v1/menu/tree', authenticateToken, async (req: AuthenticatedRequest,
 });
 
 // 2) Bulk reorder / move (single operation)
-router.patch('/v1/menu/reorder', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/menu/reorder', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     logger.info('Menu reorder request received', {
       userId: req.user?.userId,
@@ -355,7 +356,7 @@ router.patch('/v1/menu/reorder', authenticateToken, requireAdminOrEditor, async 
 });
 
 // 3) Rename section
-router.patch('/v1/sections/:id', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/sections/:id', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     const { name, version } = req.body;
@@ -413,7 +414,7 @@ router.patch('/v1/sections/:id', authenticateToken, requireAdminOrEditor, async 
 });
 
 // 4) Rename report
-router.patch('/v1/reports/:id', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/reports/:id', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     const { name, version } = req.body;
@@ -471,7 +472,7 @@ router.patch('/v1/reports/:id', authenticateToken, requireAdminOrEditor, async (
 });
 
 // 5) Soft-delete section (with strategy)
-router.patch('/v1/sections/:id/delete', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/sections/:id/delete', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
     const { strategy } = req.body;
@@ -562,7 +563,7 @@ router.patch('/v1/sections/:id/delete', authenticateToken, requireAdminOrEditor,
 });
 
 // 6) Soft-delete report
-router.patch('/v1/reports/:id/delete', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/reports/:id/delete', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
 
@@ -605,7 +606,7 @@ router.patch('/v1/reports/:id/delete', authenticateToken, requireAdminOrEditor, 
 });
 
 // Optional: Restore section (for future admin functionality)
-router.patch('/v1/sections/:id/restore', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/sections/:id/restore', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
 
@@ -648,7 +649,7 @@ router.patch('/v1/sections/:id/restore', authenticateToken, requireAdminOrEditor
 });
 
 // Optional: Restore report (for future admin functionality)
-router.patch('/v1/reports/:id/restore', authenticateToken, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
+router.patch('/v1/reports/:id/restore', authenticateToken, rejectDemoWrites, requireAdminOrEditor, async (req: AuthenticatedRequest, res, next) => {
   try {
     const { id } = req.params;
 
