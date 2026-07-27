@@ -8,6 +8,7 @@ import {
   reconcileOutcome,
   reconcileReceiptOutcome,
   sessionAwaitsReply,
+  sessionIsAwaitingReply,
   UNCERTAIN_DELIVERY_NOTICE,
 } from '../turnDelivery';
 import type { AgentTurn, ChatBubble } from '@/types/agent';
@@ -318,5 +319,52 @@ describe('countMatchingUserTurns', () => {
     expect(countMatchingUserTurns(history, 'other')).toBe(1);
     expect(countMatchingUserTurns(history, 'missing')).toBe(0);
     expect(countMatchingUserTurns([], 'refresh')).toBe(0);
+  });
+});
+
+/**
+ * review !62 round 12, Important 4. The server applies the guard's TTL, so an
+ * ABANDONED turn — one whose process died between the user append and the
+ * assistant append — stops counting as active there. The transcript-derived
+ * answer has no notion of age, so it said "awaiting" forever: polling gave up
+ * after 48 attempts and a reload re-read the same unmatched row, leaving the
+ * composer locked with nothing the user could do about it.
+ */
+describe('sessionIsAwaitingReply — the server is the authority', () => {
+  const session = (over: Record<string, unknown>) => ({
+    session_id: 's', persisted: true, messages: [], ...over,
+  });
+
+  it('takes the server\'s FALSE even when the transcript still looks unanswered', () => {
+    // THE FIX: an expired abandoned turn. The row is still there and still
+    // unmatched, but the server no longer counts it — so neither may the client.
+    expect(sessionIsAwaitingReply(session({
+      awaiting_reply: false,
+      supports_turn_ids: true,
+      messages: [userWithId('abandoned', 't1')],
+    }))).toBe(false);
+  });
+
+  it('takes the server\'s TRUE even when the transcript looks settled', () => {
+    expect(sessionIsAwaitingReply(session({
+      awaiting_reply: true,
+      messages: [user('hi'), assistant('done')],
+    }))).toBe(true);
+  });
+
+  it('falls back to the transcript when the server does not say (legacy response)', () => {
+    expect(sessionIsAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('running', 't1')],
+    }))).toBe(true);
+    expect(sessionIsAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('done', 't1'), assistantWithId('reply', 't1')],
+    }))).toBe(false);
+  });
+
+  it('is false with no session at all', () => {
+    expect(sessionIsAwaitingReply(null)).toBe(false);
+    expect(sessionIsAwaitingReply(undefined)).toBe(false);
   });
 });

@@ -7,7 +7,7 @@ import {
 import { useAuth } from '@/contexts/AuthContext';
 import { getAuthSessionId, getAuthToken, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
-import { countMatchingUserTurns, sessionAwaitsReply } from '@/components/ai-chat/turnDelivery';
+import { countMatchingUserTurns, sessionIsAwaitingReply } from '@/components/ai-chat/turnDelivery';
 import type {
   AgentChatRequest,
   AgentChatResponse,
@@ -201,7 +201,7 @@ export async function createAgentChatContext(
   if (
     hasAuthoritativeSnapshot &&
     snapshotAtSend &&
-    sessionAwaitsReply(snapshotAtSend.messages, snapshotAtSend.supports_turn_ids === true)
+    sessionIsAwaitingReply(snapshotAtSend)
   ) {
     throw new Error(
       'A previous message is still awaiting a reply. Reload the page before sending again.',

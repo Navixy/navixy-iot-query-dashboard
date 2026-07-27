@@ -86,6 +86,20 @@ export interface AgentSessionResponse {
    *  from THIS flag rather than inferring it from a visible row; false only on an
    *  older 002 without the column. Absent on legacy responses (treat as false). */
   supports_turn_ids?: boolean;
+  /**
+   * AUTHORITATIVE "is a turn still running in this session" (review !62 round 12,
+   * Important 4), judged server-side by the SAME TTL the single-active-turn guard
+   * applies on POST /chat.
+   *
+   * Deriving it here from an unmatched user turn — which is what sessionAwaitsReply
+   * does — has no notion of AGE, so a turn abandoned between its user append and
+   * its assistant append locked the composer FOREVER: the server stopped counting
+   * it after ~200 s, but the transcript row stayed unmatched, polling gave up after
+   * 48 attempts, and a reload re-read the same row. Two definitions of "awaiting"
+   * is one too many; prefer this one whenever it is present. Absent only on a
+   * legacy response, where the transcript-derived fallback still applies.
+   */
+  awaiting_reply?: boolean;
   messages: AgentTurn[];
 }
 
