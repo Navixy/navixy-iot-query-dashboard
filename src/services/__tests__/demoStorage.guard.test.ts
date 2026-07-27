@@ -259,3 +259,76 @@ describe('demo ownership is a tri-state, and only two of them may act', () => {
     expect((await demoStorageService.getSections()).map((s) => s.name)).toEqual(['legacy']);
   });
 });
+
+/**
+ * review !62 round 11, Important 3. Round 10 put the OWNERSHIP check inside the
+ * write transaction but left the lookup, the version/duplicate validation and any
+ * dependent reads outside it. A check that a concurrent write can invalidate
+ * before the write lands is not a check.
+ */
+describe('demo writes are atomic read-modify-write', () => {
+  const seedOne = async () => {
+    const owner = await demoStorageService.claimDemoOwnership();
+    anchorDemoOwnership(owner);
+    await demoStorageService.seedFromBackend(
+      { sections: [{ id: 'sec-1', name: 'Original', user_id: 'A', version: 1 }],
+        reports: [], globalVariables: [], chartCatalog: null, userId: 'A' },
+      owner,
+    );
+    return owner;
+  };
+
+  it('two same-version updates cannot both win — one loses the version check', async () => {
+    await seedOne();
+
+    // Both tabs read version 1 and race. Optimistic locking only means anything if
+    // the read and the write are one transaction: otherwise both pass the check
+    // and both write version 2, silently losing one edit.
+    const results = await Promise.allSettled([
+      demoStorageService.updateSection('sec-1', { name: 'From tab A', userId: 'A', version: 1 }),
+      demoStorageService.updateSection('sec-1', { name: 'From tab B', userId: 'A', version: 1 }),
+    ]);
+
+    const won = results.filter((r) => r.status === 'fulfilled');
+    const lost = results.filter((r) => r.status === 'rejected');
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(1);
+    expect((lost[0] as PromiseRejectedResult).reason).toMatchObject({
+      message: expect.stringMatching(/version conflict/i),
+    });
+
+    // ...and the survivor is at version 2, not 2-written-twice.
+    const [section] = await demoStorageService.getSections();
+    expect(section.version).toBe(2);
+    expect(['From tab A', 'From tab B']).toContain(section.name);
+  });
+
+  it('a REVOKED tab cannot even read the row it was about to modify', async () => {
+    await seedOne();
+    revokeDemoOwnership(); // the cross-tab teardown fired mid-operation
+
+    // The pre-read used to happen before the guard, so a revoked tab still saw the
+    // successor's state on its way to being refused.
+    await expect(
+      demoStorageService.updateSection('sec-1', { name: 'stale', userId: 'A', version: 1 }),
+    ).rejects.toThrow(/newer sign-in/i);
+
+    // Not "Section not found" or "Version conflict" — those would mean the lookup
+    // ran first and leaked whether the row exists and what version it is at.
+    await expect(
+      demoStorageService.updateSection('does-not-exist', { name: 'x', userId: 'A', version: 9 }),
+    ).rejects.toThrow(/newer sign-in/i);
+  });
+
+  it('a duplicate global-variable label cannot slip through two concurrent creates', async () => {
+    await seedOne();
+
+    const results = await Promise.allSettled([
+      demoStorageService.createGlobalVariable({ label: 'same' }),
+      demoStorageService.createGlobalVariable({ label: 'same' }),
+    ]);
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(await demoStorageService.getGlobalVariables()).toHaveLength(1);
+  });
+});
