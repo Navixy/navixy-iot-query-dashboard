@@ -14,6 +14,7 @@ import { createElement } from 'react';
 import { act, cleanup, render } from '@testing-library/react';
 import { AuthProvider, useAuth } from '../AuthContext';
 import { endAuthSession } from '@/lib/authSession';
+import { setDemoMode } from '@/services/demoApi';
 
 const navigateMock = vi.fn();
 vi.mock('@/services/demoStorage', () => ({
@@ -49,10 +50,15 @@ function stubFetch() {
   }) as unknown as typeof fetch;
 }
 
-let ctx: { signInDemo: ReturnType<typeof useAuth>['signInDemo']; user: ReturnType<typeof useAuth>['user'] };
+let ctx: {
+  signInDemo: ReturnType<typeof useAuth>['signInDemo'];
+  signOut: ReturnType<typeof useAuth>['signOut'];
+  user: ReturnType<typeof useAuth>['user'];
+  demoMode: boolean;
+};
 function Grab() {
   const c = useAuth();
-  ctx = { signInDemo: c.signInDemo, user: c.user };
+  ctx = { signInDemo: c.signInDemo, signOut: c.signOut, user: c.user, demoMode: c.demoMode };
   return null;
 }
 const CREDS = ['demo@navixy.io', 'admin', 'iot-url', 'user-url'] as const;
@@ -105,5 +111,45 @@ describe('storage-event stale-tab ender (round 8, finding 1)', () => {
     fireStorage('some_other_key', 'whatever');
     expect(ctx.user).not.toBeNull();
     expect(navigateMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * review !62 round 9, finding 2. Round 8's ender reused the sign-out teardown
+ * wholesale, including setDemoMode(false) — but demo_mode and demo_user_id are
+ * ORIGIN-WIDE localStorage keys just like auth_token. In the A-demo -> B-demo
+ * sequence B writes those flags first and the token second, so A's storage event
+ * arrives AFTER B is established and deletes B's OWN flags: B's React state stays
+ * demo while the api layer reads the shared isDemoMode() as false and starts
+ * routing B's CRUD to the real backend. A tab that lost the origin may only tear
+ * down what is tab-local.
+ */
+describe('stale-tab teardown leaves the successor\'s shared state alone (round 9, finding 2)', () => {
+  it('does NOT clear the origin-wide demo flags when ending a stale tab', async () => {
+    await signedInTab();
+    vi.mocked(setDemoMode).mockClear();
+
+    localStorage.setItem('auth_token', 'successor-token');
+    fireStorage('auth_token', 'successor-token');
+
+    // Tab-local session is gone...
+    expect(ctx.user).toBeNull();
+    expect(ctx.demoMode).toBe(false);
+    // ...but demo_mode / demo_user_id belong to the successor now.
+    expect(setDemoMode).not.toHaveBeenCalled();
+    expect(localStorage.getItem('auth_token')).toBe('successor-token');
+  });
+
+  it('an EXPLICIT sign-out still clears the origin-wide state it owns', async () => {
+    await signedInTab();
+    vi.mocked(setDemoMode).mockClear();
+
+    await act(async () => {
+      await ctx.signOut();
+    });
+
+    expect(setDemoMode).toHaveBeenCalledWith(false);
+    expect(localStorage.getItem('auth_token')).toBeNull();
+    expect(navigateMock).toHaveBeenCalledWith('/login');
   });
 });

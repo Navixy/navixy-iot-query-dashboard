@@ -4,6 +4,7 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { demoStorageService } from '@/services/demoStorage';
+import { setDemoOwnerToken } from '@/lib/authSession';
 
 const seed = (userId: string) => ({
   sections: [{ id: `sec-${userId}`, name: `Section ${userId}`, user_id: userId }],
@@ -14,6 +15,9 @@ const seed = (userId: string) => ({
 });
 
 beforeEach(async () => {
+  // No tab anchor by default — the legacy/bootstrap state these older tests run
+  // in, and the one the round-9 guard deliberately leaves unconditional.
+  setDemoOwnerToken(null);
   // Fresh data each test: no expected owner → an unconditional clear.
   await demoStorageService.clearAllData();
 });
@@ -84,5 +88,102 @@ describe('demoStorage origin-wide ownership guard', () => {
     const b = await demoStorageService.claimDemoOwnership();
     expect(await demoStorageService.readDemoOwner()).toBe(b);
     expect(b).not.toBe(a);
+  });
+});
+
+/**
+ * review !62 round 9, finding 2. Rounds 7-8 guarded only the DESTRUCTIVE entry
+ * points (clear/seed), so ordinary CRUD — the whole of demo mode's day-to-day
+ * traffic — could still read and write the singleton store on behalf of a tab
+ * whose identity had been superseded: an in-flight or not-yet-torn-down tab
+ * editing the SUCCESSOR's reports, or rendering them. Every operation now
+ * asserts the token THIS TAB claimed, with the check for writes made INSIDE the
+ * same transaction as the write so a claim cannot interleave between them.
+ *
+ * The rule is deny-on-PROVEN-supersession, not deny-unless-proven-ownership: a
+ * tab holding no anchor at all (a legacy store predating the owner row, or the
+ * bootstrap window before AuthContext restores a session) keeps the previous
+ * unconditional behaviour rather than the app bricking itself.
+ */
+describe('demoStorage per-operation ownership assertion (round 9, finding 2)', () => {
+  const supersededTab = async () => {
+    const mine = await demoStorageService.claimDemoOwnership();
+    setDemoOwnerToken(mine); // this tab anchors to its own claim
+    await demoStorageService.seedFromBackend(seed('A'), mine);
+    await demoStorageService.claimDemoOwnership(); // another sign-in takes over
+  };
+
+  it('a superseded tab cannot CREATE into the successor\'s store', async () => {
+    await supersededTab();
+    await expect(
+      demoStorageService.createSection({ name: 'stale', userId: 'A' }),
+    ).rejects.toThrow(/newer sign-in/i);
+    // Nothing was written on top of the successor's data.
+    setDemoOwnerToken(null);
+    expect((await demoStorageService.getSections()).map((s) => s.id)).toEqual(['sec-A']);
+  });
+
+  it('a superseded tab cannot UPDATE or DELETE the successor\'s rows', async () => {
+    await supersededTab();
+    await expect(
+      demoStorageService.updateSection('sec-A', { name: 'renamed', userId: 'A', version: 1 }),
+    ).rejects.toThrow(/newer sign-in/i);
+    await expect(
+      demoStorageService.deleteSection('sec-A', 'delete_children', 'A'),
+    ).rejects.toThrow(/newer sign-in/i);
+
+    setDemoOwnerToken(null);
+    const sections = await demoStorageService.getSections();
+    expect(sections.map((s) => s.name)).toEqual(['Section A']); // untouched
+  });
+
+  it('a superseded tab cannot create/update/delete REPORTS or GLOBAL VARIABLES', async () => {
+    await supersededTab();
+    await expect(
+      demoStorageService.createReport({ title: 'stale', reportSchema: {}, userId: 'A' }),
+    ).rejects.toThrow(/newer sign-in/i);
+    await expect(
+      demoStorageService.createGlobalVariable({ label: 'stale' }),
+    ).rejects.toThrow(/newer sign-in/i);
+
+    setDemoOwnerToken(null);
+    expect(await demoStorageService.getReports()).toEqual([]);
+    expect(await demoStorageService.getGlobalVariables()).toEqual([]);
+  });
+
+  it('a superseded tab READS nothing — the successor\'s data never crosses identities', async () => {
+    await supersededTab();
+    expect(await demoStorageService.getSections()).toEqual([]);
+    expect(await demoStorageService.getReports()).toEqual([]);
+    expect(await demoStorageService.getGlobalVariables()).toEqual([]);
+    expect(await demoStorageService.getReportById('sec-A')).toBeNull();
+    expect(await demoStorageService.getChartCatalog()).toBeNull();
+    const tree = await demoStorageService.getMenuTree('A');
+    expect(tree.sections).toEqual([]);
+    expect(tree.rootReports).toEqual([]);
+  });
+
+  it('the CURRENT owner reads and writes normally', async () => {
+    const mine = await demoStorageService.claimDemoOwnership();
+    setDemoOwnerToken(mine);
+    await demoStorageService.seedFromBackend(seed('A'), mine);
+
+    const created = await demoStorageService.createSection({ name: 'mine', userId: 'A' });
+    expect(created.name).toBe('mine');
+    expect((await demoStorageService.getSections()).map((s) => s.name).sort()).toEqual([
+      'Section A',
+      'mine',
+    ]);
+  });
+
+  it('a tab with NO anchor keeps the unconditional legacy behaviour', async () => {
+    const other = await demoStorageService.claimDemoOwnership();
+    await demoStorageService.seedFromBackend(seed('A'), other);
+    setDemoOwnerToken(null); // e.g. the bootstrap window, or a pre-owner store
+
+    await expect(
+      demoStorageService.createSection({ name: 'legacy', userId: 'A' }),
+    ).resolves.toBeTruthy();
+    expect((await demoStorageService.getSections()).length).toBe(2);
   });
 });
