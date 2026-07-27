@@ -8,6 +8,7 @@ import {
 } from '../services/userPreferences.js';
 import { authenticateToken, requireAdmin, requireAdminOrEditor } from '../middleware/auth.js';
 import { rejectDemoWrites } from '../middleware/demoGuard.js';
+import { assertDemoCleanupAllowed, deleteEphemeralDemoUser } from '../services/demoUserCleanup.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { CustomError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
@@ -128,42 +129,31 @@ router.delete('/auth/demo-user', authenticateToken, async (req: AuthenticatedReq
       throw new CustomError('User ID not found', 400);
     }
 
+    // THIS ENDPOINT DELETES A USER AND ALL THEIR SECTIONS AND REPORTS. It is
+    // excluded from rejectDemoWrites because the demo flow itself calls it — so
+    // it carries its own, STRICTER guard (review !62 round 11, Critical 1). The
+    // decision and the row match live in services/demoUserCleanup.ts, where they
+    // are unit-testable; see there for why each condition exists.
+    const cleanupToken = assertDemoCleanupAllowed(req.user);
+
     const client = await req.settingsPool.connect();
-    
+
     try {
       await client.query('BEGIN');
-
-      // Delete user roles
-      await client.query(
-        'DELETE FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1',
-        [userId]
-      );
-
-      // Delete user's sections (by user_id and client_id)
-      await client.query(
-        'DELETE FROM dashboard_studio_meta_data.sections WHERE user_id = $1 OR client_id = $1',
-        [userId]
-      );
-
-      // Delete user's reports (by user_id and client_id)
-      await client.query(
-        'DELETE FROM dashboard_studio_meta_data.reports WHERE user_id = $1 OR client_id = $1',
-        [userId]
-      );
-
-      // Delete the user
-      await client.query(
-        'DELETE FROM dashboard_studio_meta_data.users WHERE id = $1',
-        [userId]
-      );
-
+      const deleted = await deleteEphemeralDemoUser(client, userId, cleanupToken);
       await client.query('COMMIT');
 
-      logger.info('Demo user deleted successfully', { userId, email: req.user?.email });
+      if (deleted) {
+        logger.info('Demo user deleted successfully', { userId, email: req.user?.email });
+      }
 
+      // A skipped cleanup is a NO-OP, not an error: the row was adopted by a real
+      // login, or a previous attempt already removed it. The client treats both
+      // the same way, so there is nothing for it to recover from.
       res.json({
         success: true,
-        message: 'Demo user deleted successfully'
+        deleted,
+        message: deleted ? 'Demo user deleted successfully' : 'Demo user cleanup skipped',
       });
     } catch (error) {
       await client.query('ROLLBACK');

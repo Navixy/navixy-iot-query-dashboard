@@ -19,6 +19,13 @@ export interface AuthenticatedRequest extends Request {
      *  agent chat store honours that server-side by degrading to its
      *  in-memory path (routes/agent.ts, DO-313 review !62). */
     demo?: boolean;
+    /** Single-use proof that THIS demo login CREATED the user row it
+     *  authenticated as (review !62 round 11, Critical 1). Present only when
+     *  `demo` is true and the row was new; DELETE /auth/demo-user matches it
+     *  against the marker stored on the row and refuses without it, so a demo
+     *  login that reused a REAL user's row (login matches by email) cannot
+     *  delete their data. */
+    demoCleanupToken?: string;
   };
   settingsPool?: Pool;
 }
@@ -44,6 +51,7 @@ export const authenticateToken = async (
       userDbUrl: string;
       session_id?: string | number;
       demo?: boolean;
+      demo_cleanup_token?: string;
     };
     
     // Validate that both database URLs are present in the token
@@ -80,6 +88,10 @@ export const authenticateToken = async (
       userDbUrl: decoded.userDbUrl,
       ...(sessionId && { session_id: sessionId }),
       ...(decoded.demo === true && { demo: true }),
+      // Only meaningful together with demo:true — the endpoint requires both.
+      ...(decoded.demo === true && decoded.demo_cleanup_token
+        ? { demoCleanupToken: decoded.demo_cleanup_token }
+        : {}),
     };
     
     // Attach the settings pool to the request for use in routes

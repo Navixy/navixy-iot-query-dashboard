@@ -50,3 +50,32 @@ describe('buildAuthTokenPayload', () => {
     expect('session_id' in buildAuthTokenPayload({ ...CLAIMS, sessionId: '' })).toBe(false);
   });
 });
+
+/**
+ * review !62 round 11, Critical 1. Login matches by EMAIL and REUSES an existing
+ * row, so a demo sign-in with a real user's address authenticates AS that user —
+ * and the demo cleanup that follows used to delete whatever userId the token
+ * carried, taking their roles, sections and reports with it. The marker is the
+ * server-side proof that this login CREATED the row it is about to delete.
+ */
+describe('buildAuthTokenPayload — demo cleanup marker', () => {
+  it('carries the marker when one was minted', () => {
+    const payload = buildAuthTokenPayload({
+      ...CLAIMS, demo: true, demoCleanupToken: 'marker-1',
+    });
+    expect(payload.demo_cleanup_token).toBe('marker-1');
+  });
+
+  it('omits the claim entirely when no marker was minted', () => {
+    // A demo login that REUSED a pre-existing identity gets no marker, so the
+    // cleanup endpoint refuses it — this absence is the whole guarantee.
+    expect('demo_cleanup_token' in buildAuthTokenPayload({ ...CLAIMS, demo: true })).toBe(false);
+    expect('demo_cleanup_token' in buildAuthTokenPayload(CLAIMS)).toBe(false);
+  });
+
+  it('is unique per login, like the jti', () => {
+    const a = buildAuthTokenPayload({ ...CLAIMS, demo: true, demoCleanupToken: 'm1' });
+    const b = buildAuthTokenPayload({ ...CLAIMS, demo: true, demoCleanupToken: 'm2' });
+    expect(a.demo_cleanup_token).not.toBe(b.demo_cleanup_token);
+  });
+});

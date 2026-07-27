@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import type { PoolClient, FieldDef } from 'pg';
+import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { CustomError } from '../middleware/errorHandler.js';
 import { SQLSelectGuard } from '../utils/sqlSelectGuard.js';
@@ -275,10 +276,31 @@ export class DatabaseService {
           await client.query('INSERT INTO dashboard_studio_meta_data.user_roles (user_id, role) VALUES ($1, $2)', [user.id, role]);
         }
 
-        // Update last sign in and store both URLs in metadata
+        // EPHEMERAL-ROW MARKER (review !62 round 11, Critical 1). Login matches by
+        // EMAIL and REUSES an existing row, so a demo sign-in with a real user's
+        // address authenticates AS that user — and the demo cleanup that follows
+        // deleted whatever userId the token carried, taking their roles, sections
+        // and reports with it. The marker is minted ONLY when this DEMO login
+        // created the row, and the cleanup endpoint deletes only a row whose
+        // stored marker still matches the one in the token. A demo login that
+        // reused a pre-existing identity therefore carries no marker and can
+        // delete nothing.
+        //
+        // DO NOT change this UPDATE to MERGE into raw_user_meta_data. Replacing it
+        // wholesale is load-bearing: it is what makes ANY later login on this row
+        // — normal or demo — drop an outstanding marker, which is what closes the
+        // race where a real user signs in while a demo cleanup is still in flight.
+        const demoCleanupToken = demo && isNewUser ? randomUUID() : undefined;
         await client.query(
           'UPDATE dashboard_studio_meta_data.users SET last_sign_in_at = NOW(), raw_user_meta_data = $1 WHERE id = $2',
-          [JSON.stringify({ iotDbUrl, userDbUrl }), user.id]
+          [
+            JSON.stringify({
+              iotDbUrl,
+              userDbUrl,
+              ...(demoCleanupToken && { demo_cleanup_token: demoCleanupToken }),
+            }),
+            user.id,
+          ]
         );
 
         logger.info('Updated user metadata with database URLs', {
@@ -300,6 +322,7 @@ export class DatabaseService {
           userDbUrl: userDbUrl,
           demo: demo,
           sessionId: sessionId != null ? String(sessionId) : undefined,
+          demoCleanupToken,
         });
 
         const token = jwt.sign(

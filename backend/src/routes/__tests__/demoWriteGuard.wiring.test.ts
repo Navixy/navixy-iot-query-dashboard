@@ -27,6 +27,9 @@ const routesDir = join(process.cwd(), 'src', 'routes');
 const ALLOWED_WITHOUT_GUARD = new Set([
   // Deleting the temporary demo user is part of the demo sign-in flow itself:
   // the frontend seeds IndexedDB and then removes the throwaway row it created.
+  // It carries a STRICTER guard of its own instead (review !62 round 11): demo
+  // session + a single-use marker proving this login CREATED the row, matched
+  // against the row inside the transaction before anything is deleted.
   "delete /auth/demo-user",
   // Not a tenant-database write: runs a connectivity probe against iotDbUrl.
   "post /auth/test-iot-connection",

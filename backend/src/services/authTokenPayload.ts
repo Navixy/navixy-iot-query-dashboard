@@ -11,6 +11,18 @@ export interface AuthTokenClaims {
   /** Host-supplied session id, forwarded verbatim when present. NOTE: this is
    *  the HOST's session, unrelated to the chat session. */
   sessionId?: string | undefined;
+  /**
+   * Single-use proof that THIS demo login CREATED the user row it authenticated
+   * as, and may therefore delete it afterwards (review !62 round 11, Critical 1).
+   *
+   * Set ONLY when `demo` is true AND the row did not exist before. The same value
+   * is written into the row's raw_user_meta_data, and the cleanup endpoint deletes
+   * only a row whose stored marker still matches this claim — so a demo login that
+   * REUSED a real user's row (login matches by email) carries no claim and can
+   * delete nothing, and any later login on that row overwrites the metadata,
+   * invalidating an outstanding claim.
+   */
+  demoCleanupToken?: string | undefined;
 }
 
 /**
@@ -44,6 +56,9 @@ export function buildAuthTokenPayload(claims: AuthTokenClaims): Record<string, u
   };
   if (claims.sessionId) {
     payload.session_id = claims.sessionId;
+  }
+  if (claims.demoCleanupToken) {
+    payload.demo_cleanup_token = claims.demoCleanupToken;
   }
   return payload;
 }
