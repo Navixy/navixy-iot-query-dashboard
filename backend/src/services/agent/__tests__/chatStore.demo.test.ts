@@ -67,6 +67,10 @@ function makeHealthyPool() {
       if (q.includes('information_schema.key_column_usage')) {
         return { rows: [{ column_name: 'user_id' }, { column_name: 'client_turn_id' }] };
       }
+      // The awaiting-reply probe GET /session now makes (round 12, Important 4).
+      if (q.includes('FROM dashboard_studio_meta_data.chat_turn_receipts')) {
+        return { rows: [] };
+      }
 
       if (q.includes('INSERT INTO dashboard_studio_meta_data.chat_sessions')) {
         const userId = String(params[0]);

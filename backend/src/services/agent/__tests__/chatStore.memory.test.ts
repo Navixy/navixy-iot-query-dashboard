@@ -508,3 +508,49 @@ describe('chatStore — the memory guard refuses a replayed id too (round 12)', 
     ).toBe('appended');
   });
 });
+
+/**
+ * review !62 round 12, Important 4. The client derived "a turn is still running"
+ * from an unmatched user row in the transcript, with no notion of age — so a turn
+ * abandoned between its user append and its assistant append (crashed process,
+ * timed-out agent call) locked the composer FOREVER: the backend stopped counting
+ * it after the TTL, but polling gave up after 48 attempts and a reload re-read the
+ * same row. loadHistory now answers the question itself, with the SAME TTL the
+ * guard applies on append.
+ */
+describe('chatStore — loadHistory reports awaitingReply on the guard\'s TTL (round 12)', () => {
+  const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const replyWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+
+  it('is false for an empty session', async () => {
+    expect((await loadHistory(null, ident('u1'), null)).awaitingReply).toBe(false);
+  });
+
+  it('is true while a turn is unanswered', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('working', 't1')]);
+    expect((await loadHistory(null, ident('u1'), sessionId)).awaitingReply).toBe(true);
+  });
+
+  it('is false once the reply lands', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('working', 't1')]);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('done', 't1')]);
+    expect((await loadHistory(null, ident('u1'), sessionId)).awaitingReply).toBe(false);
+  });
+
+  it('is FALSE for an EXPIRED unanswered turn — the composer must unlock', async () => {
+    // The whole point: the row is still there and still unmatched, but the server
+    // no longer counts it as running, so the client must not either.
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('abandoned', 't1')]);
+
+    expect((await loadHistory(null, ident('u1'), sessionId, 0)).awaitingReply).toBe(false);
+    // ...and the transcript still shows the turn, so nothing was hidden from the user.
+    expect((await loadHistory(null, ident('u1'), sessionId, 0)).history).toHaveLength(1);
+  });
+});

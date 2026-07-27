@@ -45,6 +45,19 @@ export interface ChatStoreResult {
    *  column; false only on an older 002 whose column is absent. Surfaced so the
    *  client trusts id reconciliation from an explicit capability, not inference. */
   supportsTurnIds: boolean;
+  /**
+   * Does this session have a turn still awaiting its reply, JUDGED BY THE SAME TTL
+   * THE GUARD USES? (review !62 round 12, Important 4.)
+   *
+   * The client derived this itself, from an unmatched user row in the transcript
+   * with no notion of age — so once a turn was abandoned between its user append
+   * and its assistant append (a crashed process, a timed-out agent call), the
+   * composer locked FOREVER. The backend stopped counting that turn as active
+   * after ~200 s, but nothing said so: polling gave up after 48 attempts and a
+   * reload re-read the same row. Two definitions of "awaiting" is one too many;
+   * this is the authoritative one, and the client uses it.
+   */
+  awaitingReply: boolean;
 }
 
 /**
@@ -510,12 +523,16 @@ function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
 /** The supplied session_id is deliberately not consulted here: one dialogue per user
  *  (D7) means the user's own live session IS the resolution for any id — unknown,
  *  expired or foreign ids silently land on it (D13). Never throws. */
-function memoryLoad(ident: ChatIdentity): ChatStoreResult {
+function memoryLoad(ident: ChatIdentity, activeTurnTtlMs?: number): ChatStoreResult {
   const session = memoryResolveOrCreate(ident);
   return {
     sessionId: session.sessionId,
     history: session.entries.map((e) => e.turn),
     persisted: false,
+    // Same predicate and same TTL the guard applies on append (round 12).
+    awaitingReply: memoryHasActiveTurn(
+      session, Date.now(), activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS,
+    ),
     // The in-memory store carries client_turn_id on the turn objects it holds, so
     // ids round-trip here too (review !62 round 7, finding 5a).
     supportsTurnIds: true,
@@ -922,6 +939,7 @@ function rowToTurn(row: ChatMessageRow): AgentTurn {
 
 async function pgLoadHistory(
   pool: Pool, ident: ChatIdentity, sessionId: string | null, schema: ChatSchema,
+  activeTurnTtlMs?: number,
 ): Promise<ChatStoreResult> {
   const { userId } = ident;
   // Wrapped in the transient retry like getGlobalVariables' whole read path
@@ -997,7 +1015,17 @@ async function pgLoadHistory(
         const missing = unreplayed.filter((e) => !present.has(e.id)).map((e) => e.turn);
         history = [...history, ...missing].slice(-MAX_TURNS);
       }
-      return { sessionId: resolved, history, persisted: true, supportsTurnIds: schema.clientTurnId };
+      // The SERVER's own awaiting verdict, from the receipts table and the SAME
+      // TTL the guard applies on append (review !62 round 12, Important 4). The
+      // client used to derive this from an unmatched transcript row with no
+      // notion of age, so an abandoned turn locked its composer forever.
+      const awaitingReply = await pgHasActiveTurn(
+        client, userId, resolved, activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS, schema,
+      );
+      return {
+        sessionId: resolved, history, persisted: true,
+        supportsTurnIds: schema.clientTurnId, awaitingReply,
+      };
     } finally {
       client.release();
     }
@@ -1139,6 +1167,7 @@ async function pgAppendTurns(
  *  degrades to the bounded in-memory path with persisted: false. */
 export async function loadHistory(
   pool: Pool | null, ident: ChatIdentity, sessionId: string | null,
+  activeTurnTtlMs?: number,
 ): Promise<ChatStoreResult> {
   // A demo identity NEVER reaches Postgres, even when handed a live pool
   // (review !62 round 2, Critical 1). Enforced HERE, in the store, so no route
@@ -1148,7 +1177,7 @@ export async function loadHistory(
     try {
       const schema = await probeChatSchema(pool);
       if (schema.tables) {
-        return await pgLoadHistory(pool, ident, sessionId, schema);
+        return await pgLoadHistory(pool, ident, sessionId, schema, activeTurnTtlMs);
       }
     } catch (error) {
       logger.warn('chatStore.loadHistory degraded to in-memory history', {
@@ -1156,7 +1185,7 @@ export async function loadHistory(
       });
     }
   }
-  return memoryLoad(ident);
+  return memoryLoad(ident, activeTurnTtlMs);
 }
 
 /**

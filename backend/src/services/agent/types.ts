@@ -87,6 +87,19 @@ export interface AgentSessionResponse {
    *  in-memory path (it carries ids) and for Postgres WITH the round-6 column;
    *  false only for a tenant on an older 002 whose column is absent. */
   supports_turn_ids: boolean;
+  /**
+   * AUTHORITATIVE "is a turn still running in this session" (review !62 round 12,
+   * Important 4), judged by the SAME TTL the single-active-turn guard applies on
+   * POST /chat.
+   *
+   * The client used to derive this itself from an unmatched user row in the
+   * transcript, with no notion of age — so a turn abandoned between its user
+   * append and its assistant append (crashed process, timed-out agent call)
+   * locked the composer FOREVER: the backend stopped counting it after ~200 s,
+   * but polling gave up after 48 attempts and a reload re-read the same row. Two
+   * definitions of "awaiting" is one too many.
+   */
+  awaiting_reply: boolean;
   messages: AgentTurn[];
 }
 

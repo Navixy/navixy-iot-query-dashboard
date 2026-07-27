@@ -307,7 +307,10 @@ router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Respo
   // memory namespace, so demo reads must not surface the real user's persisted
   // transcript (or their degraded-mode buffer — review !62 round 2, Critical 1).
   const pool = req.user.demo ? null : (req.settingsPool ?? null);
-  const { sessionId, history, persisted, supportsTurnIds } = await loadHistory(pool, ident, null);
+  const { sessionId, history, persisted, supportsTurnIds, awaitingReply } =
+    // Same TTL the POST path guards with, so the client and the server can never
+    // disagree about whether a turn is still running (round 12, Important 4).
+    await loadHistory(pool, ident, null, ACTIVE_TURN_TTL_MS);
   // supports_turn_ids (review !62 round 7, finding 5a): an EXPLICIT capability so
   // the client trusts id reconciliation from the server's own answer, not from
   // inferring "some visible row has an id" (which breaks when only legacy rows show).
@@ -315,6 +318,10 @@ router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Respo
     session_id: sessionId,
     persisted,
     supports_turn_ids: supportsTurnIds,
+    // AUTHORITATIVE (review !62 round 12, Important 4): the client locks its
+    // composer on THIS rather than re-deriving it from the transcript, where an
+    // abandoned turn has no age and so never stops looking active.
+    awaiting_reply: awaitingReply,
     messages: history,
   });
 }));
