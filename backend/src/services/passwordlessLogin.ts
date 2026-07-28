@@ -76,7 +76,7 @@ export async function resolveLoginIdentity(
     if (found.rows.length === 0) {
       identity = await createUser(client, params);
     } else if (demo) {
-      identity = await adoptExistingAsDemo(client, found.rows[0] as LoginUserRow, role);
+      identity = await adoptExistingAsDemo(client, found.rows[0] as LoginUserRow);
     } else {
       identity = await adoptExistingAsUser(
         client, found.rows[0] as LoginUserRow, role, iotDbUrl, userDbUrl,
@@ -144,7 +144,6 @@ async function createUser(client: PoolClient, params: LoginParams): Promise<Logi
 async function adoptExistingAsDemo(
   client: PoolClient,
   user: LoginUserRow,
-  requestedRole: 'admin' | 'editor' | 'viewer',
 ): Promise<LoginIdentity> {
   logger.info('Found existing user for passwordless auth', { userId: user.id, demo: true });
 
@@ -152,8 +151,19 @@ async function adoptExistingAsDemo(
     'SELECT role FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1 LIMIT 1',
     [user.id],
   );
-  const effectiveRole =
-    (roleRow.rows[0]?.role as 'admin' | 'editor' | 'viewer' | undefined) ?? requestedRole;
+  const storedRole = roleRow.rows[0]?.role as 'admin' | 'editor' | 'viewer' | undefined;
+  // FAIL CLOSED, never back to the REQUESTED role (review !62 round 13,
+  // Important 3). Falling back to it undid this whole lookup for any row with no
+  // user_roles entry: a demo login on a real user's address could then ask for
+  // 'admin' and be handed it, in the JWT, on an account that may hold nothing of
+  // the sort. An account whose role we cannot prove is a viewer — the least
+  // privilege the app has. Every row this login path CREATES gets a user_roles
+  // entry in the same transaction, so this is reached only for rows seeded
+  // outside it.
+  const effectiveRole: 'admin' | 'editor' | 'viewer' = storedRole ?? 'viewer';
+  if (!storedRole) {
+    logger.warn('Demo login found no stored role; falling back to viewer', { userId: user.id });
+  }
 
   const existingMarker = (user.raw_user_meta_data as { demo_cleanup_token?: string } | undefined)
     ?.demo_cleanup_token;

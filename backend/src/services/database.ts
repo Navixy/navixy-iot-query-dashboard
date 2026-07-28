@@ -237,7 +237,7 @@ export class DatabaseService {
     userDbUrl: string,
     demo: boolean = false,
     sessionId?: string
-  ): Promise<{ user: User; token: string }> {
+  ): Promise<{ user: User; token: string; effectiveRole: 'admin' | 'editor' | 'viewer' }> {
     const pool = this.getClientSettingsPool(userDbUrl);
 
     try {
@@ -285,7 +285,12 @@ export class DatabaseService {
           { expiresIn: '24h' }
         );
 
-        return { user: user as unknown as User, token };
+        // effectiveRole travels back to the ROUTE, not just into the token
+        // (review !62 round 13, Important 3). The login response used to echo the
+        // requested role while the JWT carried this one, so a demo sign-in that
+        // asked for 'admin' on a viewer account rendered admin-only affordances
+        // (Apply) against a token the backend would refuse.
+        return { user: user as unknown as User, token, effectiveRole };
       } finally {
         client.release();
       }

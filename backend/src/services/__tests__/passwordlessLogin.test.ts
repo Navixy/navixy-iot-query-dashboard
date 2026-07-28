@@ -200,6 +200,39 @@ describe('a demo login on an EXISTING identity is read-only', () => {
     expect(calls.some((q) => q.includes('SET last_sign_in_at'))).toBe(false);
   });
 
+  /**
+   * review !62 round 13, Important 3. The stored-role lookup fell back to the
+   * REQUESTED role when the account had no user_roles row — which handed the
+   * lookup's entire purpose back to the caller. A demo login could then ask for
+   * 'admin' on someone else's address and be issued an admin JWT.
+   */
+  it('FAILS CLOSED to viewer when the account has no stored role', async () => {
+    const db = makeDb();
+    // A row with no user_roles entry — seeded outside this login path (every row
+    // it creates itself gets one in the same transaction).
+    await resolveLoginIdentity(db.client('real'), { ...LOGIN, role: 'admin', demo: false });
+    db.roles.delete(db.rows[0].id);
+
+    const identity = await resolveLoginIdentity(
+      db.client('demo'), { ...LOGIN, role: 'admin', demo: true },
+    );
+
+    expect(identity.effectiveRole).toBe('viewer');
+    // And it did not WRITE one either — the row stays as read-only as before.
+    expect(db.roles.has(db.rows[0].id)).toBe(false);
+  });
+
+  it('never escalates: a demo login asking for admin on a viewer account stays viewer', async () => {
+    const db = makeDb();
+    await resolveLoginIdentity(db.client('real'), { ...LOGIN, role: 'viewer', demo: false });
+
+    const identity = await resolveLoginIdentity(
+      db.client('demo'), { ...LOGIN, role: 'admin', demo: true },
+    );
+
+    expect(identity.effectiveRole).toBe('viewer');
+  });
+
   it('DOES take over a row that is itself ephemeral, with a fresh marker', async () => {
     const db = makeDb();
     const first = await resolveLoginIdentity(

@@ -75,7 +75,12 @@ router.post('/auth/login', async (req, res, next) => {
       user: {
         id: result.user.id,
         email: result.user.email,
-        role: role
+        // The role the account ACTUALLY holds — the SAME value the JWT carries
+        // (review !62 round 13, Important 3). Echoing the requested `role` here
+        // let the UI and the token disagree: AuthContext stores this object, so a
+        // demo login asking for 'admin' on a viewer account showed admin-only
+        // affordances that every API call would then reject.
+        role: result.effectiveRole
       },
       token: result.token,
       demo: isDemoMode,
