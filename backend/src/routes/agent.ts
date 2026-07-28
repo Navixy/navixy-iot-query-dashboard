@@ -21,10 +21,10 @@ import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { logger } from '../utils/logger.js';
 import { agentService } from '../services/agent/index.js';
 import { loadHistory, appendTurns, getTurnStatus, tenantKeyFor } from '../services/agent/chatStore.js';
-import type { ChatIdentity } from '../services/agent/chatStore.js';
+import type { ChatIdentity, ChatStoreResult } from '../services/agent/chatStore.js';
 import { validateDashboard } from '../services/agent/validateDashboard.js';
 import { envInt } from '../services/agent/artifactStore.js';
-import type { AgentTurn } from '../services/agent/types.js';
+import type { AgentTurn, AgentSessionResponse } from '../services/agent/types.js';
 
 const router = Router();
 
@@ -84,6 +84,36 @@ const chatLimiter = rateLimit({
 });
 
 export interface ChatBody { session_id: string | null; message: string; client_turn_id: string | null }
+
+/**
+ * Map a store result onto the GET /session wire body.
+ *
+ * Exported so the ONE thing that is easy to get wrong here is testable without
+ * supertest: `awaiting_reply` must be OMITTED — never sent as `false` — when the
+ * store could not determine it (review !62 round 13, Important 1).
+ *
+ * The client treats any boolean in that field as the server's final word and
+ * stops deriving the state from the transcript. Round 12 typed the store's
+ * verdict as a plain boolean, so a tenant with no usable receipts table
+ * (including 003-without-004) and a read that failed both answered `false` —
+ * switching off the client's only remaining guard on exactly the tenants whose
+ * SERVER-side guard is also off. Absence is what puts the fallback back.
+ */
+export function buildSessionResponse(result: ChatStoreResult): AgentSessionResponse {
+  return {
+    session_id: result.sessionId,
+    persisted: result.persisted,
+    // supports_turn_ids (review !62 round 7, finding 5a): an EXPLICIT capability so
+    // the client trusts id reconciliation from the server's own answer, not from
+    // inferring "some visible row has an id" (which breaks when only legacy rows show).
+    supports_turn_ids: result.supportsTurnIds,
+    // AUTHORITATIVE when present (review !62 round 12, Important 4): the client
+    // locks its composer on THIS rather than re-deriving it from the transcript,
+    // where an abandoned turn has no age and so never stops looking active.
+    ...(result.awaitingReply !== undefined && { awaiting_reply: result.awaitingReply }),
+    messages: result.history,
+  };
+}
 
 /** Throws CustomError(…, 400) — the ONLY things that 400 (§3.2). 400 < 500, so the
  *  message survives errorHandler (C7). Pure; no req, no res, no I/O. */
@@ -307,23 +337,11 @@ router.get('/session', asyncHandler(async (req: AuthenticatedRequest, res: Respo
   // memory namespace, so demo reads must not surface the real user's persisted
   // transcript (or their degraded-mode buffer — review !62 round 2, Critical 1).
   const pool = req.user.demo ? null : (req.settingsPool ?? null);
-  const { sessionId, history, persisted, supportsTurnIds, awaitingReply } =
+  const result =
     // Same TTL the POST path guards with, so the client and the server can never
     // disagree about whether a turn is still running (round 12, Important 4).
     await loadHistory(pool, ident, null, ACTIVE_TURN_TTL_MS);
-  // supports_turn_ids (review !62 round 7, finding 5a): an EXPLICIT capability so
-  // the client trusts id reconciliation from the server's own answer, not from
-  // inferring "some visible row has an id" (which breaks when only legacy rows show).
-  return res.json({
-    session_id: sessionId,
-    persisted,
-    supports_turn_ids: supportsTurnIds,
-    // AUTHORITATIVE (review !62 round 12, Important 4): the client locks its
-    // composer on THIS rather than re-deriving it from the transcript, where an
-    // abandoned turn has no age and so never stops looking active.
-    awaiting_reply: awaitingReply,
-    messages: history,
-  });
+  return res.json(buildSessionResponse(result));
 }));
 
 // DURABLE per-turn status (review !62 round 7, finding 5b). The client calls this

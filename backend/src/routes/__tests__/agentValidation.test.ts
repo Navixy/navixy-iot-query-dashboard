@@ -1,5 +1,6 @@
 import { describe, it, expect } from '@jest/globals';
-import { validateChatBody, MAX_MESSAGE_LENGTH } from '../agent.js';
+import { validateChatBody, buildSessionResponse, MAX_MESSAGE_LENGTH } from '../agent.js';
+import type { AgentTurn } from '../../services/agent/types.js';
 import { CustomError } from '../../middleware/errorHandler.js';
 
 // validateChatBody is exported pure precisely so the 400 taxonomy is testable
@@ -140,6 +141,55 @@ describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
       expect(validateChatBody({ message: 'hi', client_turn_id: 'not-a-uuid' }).client_turn_id).toBe(
         'not-a-uuid',
       );
+    });
+  });
+});
+
+/**
+ * review !62 round 13, Important 1. The store can now answer "I could not
+ * determine that" (undefined), and the wire body has to carry that distinction as
+ * ABSENCE. Serializing it as `awaiting_reply: false` is the bug: the client takes
+ * any boolean as the server's final word and stops deriving the state from the
+ * transcript, so a tenant with no usable receipts table — whose server-side guard
+ * is off for exactly the same reason — loses its last guard too.
+ */
+describe('buildSessionResponse — awaiting_reply is OMITTED when unknown', () => {
+  const base = {
+    sessionId: 'sess-1',
+    history: [] as AgentTurn[],
+    persisted: true,
+    supportsTurnIds: true,
+  };
+
+  it('OMITS the key entirely when the store could not determine it', () => {
+    const body = buildSessionResponse({ ...base });
+
+    expect('awaiting_reply' in body).toBe(false);
+    expect(body.awaiting_reply).toBeUndefined();
+    // JSON.stringify drops an undefined value, but an explicit `false` would
+    // survive it — assert on the serialized body, since that is what ships.
+    expect(JSON.parse(JSON.stringify(body))).not.toHaveProperty('awaiting_reply');
+  });
+
+  it('sends false when the store actually PROVED the session idle', () => {
+    const body = buildSessionResponse({ ...base, awaitingReply: false });
+
+    expect('awaiting_reply' in body).toBe(true);
+    expect(body.awaiting_reply).toBe(false);
+  });
+
+  it('sends true when a turn is still running', () => {
+    expect(buildSessionResponse({ ...base, awaitingReply: true }).awaiting_reply).toBe(true);
+  });
+
+  it('passes the rest of the store result through unchanged', () => {
+    const history: AgentTurn[] = [{ role: 'user', content: 'hi' }];
+    const body = buildSessionResponse({
+      sessionId: 'sess-9', history, persisted: false, supportsTurnIds: false,
+    });
+
+    expect(body).toEqual({
+      session_id: 'sess-9', persisted: false, supports_turn_ids: false, messages: history,
     });
   });
 });

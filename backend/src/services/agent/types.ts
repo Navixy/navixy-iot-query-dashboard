@@ -98,8 +98,15 @@ export interface AgentSessionResponse {
    * locked the composer FOREVER: the backend stopped counting it after ~200 s,
    * but polling gave up after 48 attempts and a reload re-read the same row. Two
    * definitions of "awaiting" is one too many.
+   *
+   * OMITTED WHEN THE SERVER CANNOT DETERMINE IT (review !62 round 13, Important 1):
+   * a tenant with no usable receipts table (including 003-without-004), or a read
+   * that failed. Round 12 sent a plain boolean, so all of those answered `false` —
+   * and since the client treats a boolean as final, that switched off its
+   * transcript fallback on exactly the tenants whose server-side guard is also
+   * off. Absence is the signal to fall back, so never default this to false.
    */
-  awaiting_reply: boolean;
+  awaiting_reply?: boolean;
   messages: AgentTurn[];
 }
 

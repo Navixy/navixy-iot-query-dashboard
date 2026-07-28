@@ -54,6 +54,10 @@ interface Script {
   receiptsPerUserKey: boolean;
   /** Every chat_messages INSERT throws while true. */
   failMessageInsert: boolean;
+  /** The single-active-turn probe throws while true (review !62 round 13,
+   *  Important 1) — the ONE read that decides awaiting_reply, failing on its own
+   *  while the transcript read succeeds. */
+  failActiveTurnProbe: boolean;
   /** Emulates an in-doubt COMMIT once: the server APPLIES the transaction, but the
    *  client sees an error — the classic case where "retry the INSERT" duplicates. */
   failCommitOnceAfterApply: boolean;
@@ -71,6 +75,7 @@ function makeScriptedPool() {
     receiptsTable: true,
     receiptsPerUserKey: true,
     failMessageInsert: false,
+    failActiveTurnProbe: false,
     failCommitOnceAfterApply: false,
   };
   // Every normalized statement, in issue order — lets a test assert the LOCK →
@@ -169,6 +174,9 @@ function makeScriptedPool() {
         q.includes('FROM dashboard_studio_meta_data.chat_turn_receipts') &&
         q.includes("status = 'received'")
       ) {
+        if (script.failActiveTurnProbe) {
+          throw new Error('active-turn probe failed (scripted)');
+        }
         const ttlMs = Number(params[2]) * 1000;
         const cutoff = Date.now() - ttlMs;
         const hit = db.receipts.some(
@@ -905,5 +913,94 @@ describe('chatStore — an unprobed tenant is not an unguarded one (round 12)', 
     expect(
       await appendTurns(pool, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
     ).toBe('unavailable'); // known receipts-capable => fail closed, not degrade
+  });
+});
+
+/**
+ * review !62 round 13, Important 1. Round 12 typed awaitingReply as a plain
+ * boolean, so every path with no way to answer answered `false`: a tenant whose
+ * receipts table is unusable (no 003, or 003 without 004), and a read that failed
+ * and degraded to an empty memory buffer. The client treats any boolean as final
+ * and stops deriving the state from the transcript — so the one guard those
+ * tenants still had was switched off by a claim the server could not back up.
+ *
+ * `undefined` is the third state: "could not determine". It is what puts the
+ * client back on its fallback.
+ */
+describe('chatStore — awaitingReply is UNKNOWN when it cannot be proved (round 13)', () => {
+  const guard = { rejectWhenTurnActive: true };
+
+  it('answers with a boolean when receipts CAN answer', async () => {
+    const { pool } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('hi', 't1')], guard);
+
+    const loaded = await loadHistory(pool, ident('u1'), sessionId);
+    expect(loaded.awaitingReply).toBe(true);
+    expect(loaded.persisted).toBe(true);
+  });
+
+  it('says UNKNOWN — not false — on 003 WITHOUT 004', async () => {
+    // The globally-keyed receipts table is refused (round 12, Important 3), so
+    // there is no state to read. Saying "nothing is running" here is the claim
+    // that unlocked a composer whose server-side guard is also off.
+    const { pool, script } = makeScriptedPool();
+    script.receiptsPerUserKey = false;
+
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('hi', 't1')]);
+
+    const loaded = await loadHistory(pool, ident('u1'), sessionId);
+    expect(loaded.awaitingReply).toBeUndefined();
+    // The transcript still loads, and still shows the unanswered turn the client
+    // will now derive its own verdict from.
+    expect(loaded.persisted).toBe(true);
+    expect(loaded.history.map((t) => t.content)).toEqual(['hi']);
+  });
+
+  it('says UNKNOWN when the tenant has no receipts table at all', async () => {
+    const { pool, script } = makeScriptedPool();
+    script.receiptsTable = false;
+
+    const loaded = await loadHistory(pool, ident('u1'), null);
+    expect(loaded.awaitingReply).toBeUndefined();
+    expect(loaded.persisted).toBe(true);
+  });
+
+  it('says UNKNOWN when the active-turn read FAILS, and still returns the transcript', async () => {
+    const { pool, script } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+    await appendTurns(pool, ident('u1'), sessionId, [userWithId('hi', 't1')], guard);
+
+    script.failActiveTurnProbe = true;
+    const loaded = await loadHistory(pool, ident('u1'), sessionId);
+
+    expect(loaded.awaitingReply).toBeUndefined();
+    // Letting that read throw would degrade the WHOLE load to memory, which for a
+    // real user is an empty buffer — answering "nothing is running" with even less
+    // basis, and losing the history too.
+    expect(loaded.persisted).toBe(true);
+    expect(loaded.history.map((t) => t.content)).toEqual(['hi']);
+  });
+
+  it('says UNKNOWN when the whole read fails and it degrades to memory', async () => {
+    const failingPool = {
+      connect: async () => { throw new Error('settings DB unreachable'); },
+    } as unknown as Pool;
+
+    const loaded = await loadHistory(failingPool, ident('u1'), null);
+    expect(loaded.awaitingReply).toBeUndefined();
+    expect(loaded.persisted).toBe(false);
+  });
+
+  it('STILL answers authoritatively when memory legitimately IS the store', async () => {
+    // A demo identity, or a tenant without the chat tables, has no Postgres to
+    // consult — the buffer is the whole truth, so it can speak for itself.
+    const demo = { tenantKey: 'tenant-1', userId: 'u1', demo: true };
+    const { sessionId } = await loadHistory(null, demo, null);
+    await appendTurns(null, demo, sessionId, [userWithId('hi', 't1')], guard);
+
+    const loaded = await loadHistory(null, demo, null);
+    expect(loaded.awaitingReply).toBe(true);
   });
 });

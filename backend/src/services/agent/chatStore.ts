@@ -56,8 +56,21 @@ export interface ChatStoreResult {
    * after ~200 s, but nothing said so: polling gave up after 48 attempts and a
    * reload re-read the same row. Two definitions of "awaiting" is one too many;
    * this is the authoritative one, and the client uses it.
+   *
+   * UNDEFINED MEANS "COULD NOT BE DETERMINED" (review !62 round 13, Important 1),
+   * and is NOT the same claim as `false`. Round 12 returned a plain boolean, so
+   * every path that had no way to answer — a tenant with no usable receipts table
+   * (including 003-without-004, which we deliberately treat as no receipts), or a
+   * failed read that degraded to an empty memory buffer — answered `false`. The
+   * client trusts any boolean absolutely, so that unlocked the composer and the
+   * pre-send guard on exactly the tenants whose SERVER-side guard is also off: on
+   * an old schema a second stateful turn was then genuinely accepted.
+   *
+   * Callers must propagate the distinction rather than defaulting it: the route
+   * OMITS the wire field when this is undefined, which is what puts the client
+   * back on its transcript-derived fallback.
    */
-  awaitingReply: boolean;
+  awaitingReply?: boolean;
 }
 
 /**
@@ -523,16 +536,28 @@ function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
 /** The supplied session_id is deliberately not consulted here: one dialogue per user
  *  (D7) means the user's own live session IS the resolution for any id — unknown,
  *  expired or foreign ids silently land on it (D13). Never throws. */
-function memoryLoad(ident: ChatIdentity, activeTurnTtlMs?: number): ChatStoreResult {
+function memoryLoad(
+  ident: ChatIdentity, activeTurnTtlMs?: number, opts?: { authoritative?: boolean },
+): ChatStoreResult {
   const session = memoryResolveOrCreate(ident);
   return {
     sessionId: session.sessionId,
     history: session.entries.map((e) => e.turn),
     persisted: false,
     // Same predicate and same TTL the guard applies on append (round 12).
-    awaitingReply: memoryHasActiveTurn(
-      session, Date.now(), activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS,
-    ),
+    //
+    // Authoritative only when this buffer IS the store — a demo identity, a null
+    // pool, or a tenant without the chat tables. When we land here because a
+    // Postgres read FAILED (review !62 round 13, Important 1), the real turns are
+    // in a database we could not read and this buffer is empty; answering "false"
+    // from it would unlock the composer on the strength of no evidence at all.
+    ...(opts?.authoritative === false
+      ? {}
+      : {
+        awaitingReply: memoryHasActiveTurn(
+          session, Date.now(), activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS,
+        ),
+      }),
     // The in-memory store carries client_turn_id on the turn objects it holds, so
     // ids round-trip here too (review !62 round 7, finding 5a).
     supportsTurnIds: true,
@@ -1019,12 +1044,34 @@ async function pgLoadHistory(
       // TTL the guard applies on append (review !62 round 12, Important 4). The
       // client used to derive this from an unmatched transcript row with no
       // notion of age, so an abandoned turn locked its composer forever.
-      const awaitingReply = await pgHasActiveTurn(
-        client, userId, resolved, activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS, schema,
-      );
+      //
+      // Only a receipts-capable schema can answer at all (review !62 round 13,
+      // Important 1). Without one there is no state to read, and `false` would be
+      // a claim rather than an answer — so stay silent and let the client keep
+      // its transcript guard, which is the only guard such a tenant has.
+      let awaitingReply: boolean | undefined;
+      if (schema.receipts) {
+        try {
+          awaitingReply = await pgHasActiveTurn(
+            client, userId, resolved, activeTurnTtlMs ?? DEFAULT_ACTIVE_TURN_TTL_MS, schema,
+          );
+        } catch (error) {
+          // The transcript already loaded; only the verdict failed. Report UNKNOWN
+          // and return the history anyway — letting this throw would degrade the
+          // whole read to the in-memory path, which for a real user is an EMPTY
+          // buffer and would answer "nothing is running" with even less basis.
+          logger.warn('chatStore.loadHistory could not determine awaitingReply', {
+            error: toErrorMeta(error).message,
+          });
+        }
+      }
       return {
         sessionId: resolved, history, persisted: true,
-        supportsTurnIds: schema.clientTurnId, awaitingReply,
+        supportsTurnIds: schema.clientTurnId,
+        // Spread, not `awaitingReply,`: under exactOptionalPropertyTypes an
+        // explicit `undefined` is not the same as an absent key, and ABSENT is the
+        // representation of "unknown" this contract is built on.
+        ...(awaitingReply !== undefined && { awaitingReply }),
       };
     } finally {
       client.release();
@@ -1173,19 +1220,30 @@ export async function loadHistory(
   // (review !62 round 2, Critical 1). Enforced HERE, in the store, so no route
   // wiring mistake can read the tenant's persisted transcript into a demo
   // session — or replay a demo buffer out of memory into their database.
+  // Whether we fell back to memory because Postgres FAILED, as opposed to because
+  // this identity legitimately has no Postgres store (review !62 round 13,
+  // Important 1). Only the latter can speak for whether a turn is running.
+  let pgReadFailed = false;
   if (pool && !ident.demo) {
     try {
       const schema = await probeChatSchema(pool);
       if (schema.tables) {
         return await pgLoadHistory(pool, ident, sessionId, schema, activeTurnTtlMs);
       }
+      // probeChatSchema swallows its own errors and reports all-false, so
+      // `known` is the only thing that separates "this tenant has no chat tables"
+      // from "we could not find out" (review !62 round 12, Important 2). Without
+      // this check a failed probe would still answer awaitingReply from an empty
+      // buffer — the very claim round 13 is about.
+      pgReadFailed = !schema.known;
     } catch (error) {
+      pgReadFailed = true;
       logger.warn('chatStore.loadHistory degraded to in-memory history', {
         error: toErrorMeta(error).message,
       });
     }
   }
-  return memoryLoad(ident, activeTurnTtlMs);
+  return memoryLoad(ident, activeTurnTtlMs, { authoritative: !pgReadFailed });
 }
 
 /**
