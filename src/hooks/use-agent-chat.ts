@@ -8,6 +8,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { getAuthSessionId, getAuthToken, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { countMatchingUserTurns, sessionIsAwaitingReply } from '@/components/ai-chat/turnDelivery';
+import { recordSessionObservation } from '@/components/ai-chat/sessionObservation';
 import type {
   AgentChatRequest,
   AgentChatResponse,
@@ -88,6 +89,11 @@ export async function fetchAgentSession(): Promise<AgentSessionResponse> {
   if (response.error) {
     throw new Error(response.error.message);
   }
+  // Stamp the reading HERE — where it arrived (review !62 round 14, Important 1).
+  // Downstream nothing can tell a fresh read from a re-publish: structural sharing
+  // keeps the OLD object when a refetch is deep-equal, and setQueryData makes an
+  // old response look new. The composer lock's release turns on that distinction.
+  recordSessionObservation(response.data!);
   return response.data!;
 }
 

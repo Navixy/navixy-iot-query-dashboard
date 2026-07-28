@@ -174,6 +174,27 @@ export function locksComposerAwaitingReply(
 }
 
 /**
+ * Must the page keep re-reading GET /session (review !62 round 14, Important 1)?
+ *
+ * The obvious half is the server's own verdict: while it shows a turn in flight,
+ * poll until the reply lands. The half that was missing is the MOUNT-LOCAL lock —
+ * and it is the one that cannot do without polling. That lock is released only by
+ * a reading NEWER than the lock itself, so a page that holds one and stops reading
+ * can never learn what would free it; the composer stays disabled until a reload.
+ *
+ * The two conditions do not overlap. Reconciliation takes a local lock exactly
+ * when the server's verdict is NOT 'awaiting' — an 'uncertain' turn the server
+ * cannot show, or a durable receipt that outran the capped transcript — which is
+ * precisely when polling on the server verdict alone has already stopped.
+ */
+export function shouldPollSession(
+  serverAwaitingReply: boolean,
+  locallyLocked: boolean,
+): boolean {
+  return serverAwaitingReply || locallyLocked;
+}
+
+/**
  * Fold a DURABLE-RECEIPT lookup into a poll's delivery verdict (review !62 round
  * 7, finding 5b). Only a 'lost' verdict is reconsidered — a positive delivery
  * already saw the turn, and a receipt cannot un-happen it. On the id path a 'lost'
@@ -300,12 +321,31 @@ export function sessionAwaitsReply(messages: AgentTurn[], supportsTurnIds = fals
   if (messages[messages.length - 1].role === 'user') return true;
   if (!supportsTurnIds) return false;
   // Interleaved concurrency: is there a user turn whose id was never answered?
-  const answered = new Set(
-    messages
-      .filter((m) => m.role === 'assistant' && m.client_turn_id)
-      .map((m) => m.client_turn_id),
-  );
+  const answered = new Set(answeredTurnIds(messages));
   return messages.some(
     (m) => m.role === 'user' && m.client_turn_id != null && !answered.has(m.client_turn_id),
   );
+}
+
+/**
+ * The client_turn_ids this transcript shows an ASSISTANT reply for — i.e. the
+ * turns it PROVES are finished.
+ *
+ * The reply is stamped with the originating user turn's id (round 7, finding 3),
+ * so an id in here means that exact send has been answered. That fact is
+ * MONOTONE: a turn cannot go back to running once its reply is persisted, which
+ * is what lets a lock held for one specific turn be released by it even from an
+ * old observation (review !62 round 14, Important 1) — and what lets a legacy
+ * tenant, whose server sends no awaiting_reply at all, release a lock at all.
+ *
+ * One definition, three readers (this, sessionAwaitsReply's pairing test, and
+ * classifyTurnDelivery's completion test) — they disagreeing is its own class of
+ * bug.
+ */
+export function answeredTurnIds(messages: readonly AgentTurn[] | null | undefined): string[] {
+  const ids: string[] = [];
+  for (const turn of messages ?? []) {
+    if (turn.role === 'assistant' && turn.client_turn_id) ids.push(turn.client_turn_id);
+  }
+  return ids;
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  answeredTurnIds,
   appendUncertainNotice,
   applyReceiptToDelivery,
   classifyTurnDelivery,
@@ -10,6 +11,7 @@ import {
   resolveAwaitingReply,
   sessionAwaitsReply,
   sessionIsAwaitingReply,
+  shouldPollSession,
   UNCERTAIN_DELIVERY_NOTICE,
 } from '../turnDelivery';
 import type { AgentTurn, ChatBubble } from '@/types/agent';
@@ -435,5 +437,55 @@ describe('resolveAwaitingReply — idle and unknown are not the same answer', ()
     ]) {
       expect(sessionIsAwaitingReply(s)).toBe(resolveAwaitingReply(s) === 'awaiting');
     }
+  });
+});
+
+/**
+ * review !62 round 14, Important 1. Extracted from sessionAwaitsReply's pairing
+ * test so the composer lock's IDENTITY release reads the same definition of "this
+ * turn has been answered" that the awaiting check does.
+ */
+describe('answeredTurnIds — which turns the transcript proves are finished', () => {
+  it('returns the ids stamped on ASSISTANT turns only', () => {
+    // The user turn carries the id too; it is the REPLY that proves completion.
+    expect(answeredTurnIds([userWithId('a', 'id-A'), assistantWithId('a reply', 'id-A')]))
+      .toEqual(['id-A']);
+    expect(answeredTurnIds([userWithId('a', 'id-A')])).toEqual([]);
+  });
+
+  it('skips legacy id-less rows', () => {
+    expect(answeredTurnIds([user('a'), assistant('b')])).toEqual([]);
+  });
+
+  it('is empty for an empty, null or undefined transcript', () => {
+    expect(answeredTurnIds([])).toEqual([]);
+    expect(answeredTurnIds(null)).toEqual([]);
+    expect(answeredTurnIds(undefined)).toEqual([]);
+  });
+
+  it('keeps every answered id when turns interleave', () => {
+    expect(answeredTurnIds([
+      userWithId('a', 'id-A'),
+      userWithId('b', 'id-B'),
+      assistantWithId('b reply', 'id-B'),
+      assistantWithId('a reply', 'id-A'),
+    ])).toEqual(['id-B', 'id-A']);
+  });
+});
+
+describe('shouldPollSession — the page must keep reading while it is locked (review !62 round 14)', () => {
+  it('polls while the server shows a turn in flight', () => {
+    expect(shouldPollSession(true, false)).toBe(true);
+  });
+
+  it('polls while a MOUNT-LOCAL lock is held, though the server says nothing', () => {
+    // The case that deadlocked: the release can only arrive in a LATER reading,
+    // and round 13 stopped reading the moment the server verdict left 'awaiting'.
+    expect(shouldPollSession(false, true)).toBe(true);
+  });
+
+  it('stops only when neither holds', () => {
+    expect(shouldPollSession(false, false)).toBe(false);
+    expect(shouldPollSession(true, true)).toBe(true);
   });
 });

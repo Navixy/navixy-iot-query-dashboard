@@ -1,112 +1,267 @@
 /**
  * @vitest-environment jsdom
  *
- * review !62 round 13, Important 2.
+ * review !62 round 13, Important 2 — the release exists at all; round 14,
+ * Important 1 — the release is scoped to an OBSERVATION.
  *
- * Reconciliation locks the composer for a 'received' or 'uncertain' turn, and the
- * flag was SET-ONLY — the comment said so outright: "sticky once set: only a
- * reload (fresh mount) clears it". AiChat ORs it with the server's verdict, so
- * once it was set, a poll that came back `awaiting_reply: false` — the reply had
- * landed, or the TTL had written the turn off as abandoned — could not re-enable
- * the composer. The user stayed locked out for the whole mount, which is the very
- * deadlock round 12's TTL was introduced to end.
+ * Round 13 keyed the release on the verdict STRING, which says neither when it
+ * was read nor which turn it is about. Both directions broke, and this file pins
+ * both plus the two rules that replaced it:
  *
- * The transition these tests pin is `received/uncertain -> awaiting_reply: false`
- * WITHOUT a remount.
+ *  - FRESHNESS: a lock taken while the last read already said 'idle' was
+ *    unreleasable, because the next successful GET returned the same string and
+ *    the effect dependency never changed. Locked for the whole mount.
+ *  - and in reverse, an OLDER 'idle' reading republished into the query cache
+ *    after the lock cancelled it — opening the composer for a turn a fresher
+ *    receipt had just proved was still running.
+ *  - IDENTITY: on a legacy tenant the server omits awaiting_reply entirely, so the
+ *    verdict can be 'awaiting' or 'unknown' but never 'idle' — round 13 left such
+ *    a mount locked until a reload even with the matching reply in the transcript.
+ *
+ * The ledger is module-global on purpose (see sessionObservation), so these tests
+ * drive it exactly as production does: by recording readings.
  */
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { useAwaitingReplyLock } from '@/hooks/use-awaiting-reply-lock';
-import type { AwaitingReplyVerdict } from '@/components/ai-chat/turnDelivery';
+import { releasesLock, useAwaitingReplyLock } from '@/hooks/use-awaiting-reply-lock';
+import {
+  currentObservationGeneration,
+  getSessionObservation,
+  recordSessionObservation,
+  type SessionObservation,
+} from '@/components/ai-chat/sessionObservation';
+import type { AgentSessionResponse, AgentTurn } from '@/types/agent';
 
-function setup(initial: AwaitingReplyVerdict = 'unknown') {
-  return renderHook(
-    ({ verdict }: { verdict: AwaitingReplyVerdict }) => useAwaitingReplyLock(verdict),
-    { initialProps: { verdict: initial } },
-  );
+function session(overrides: Partial<AgentSessionResponse> = {}): AgentSessionResponse {
+  return {
+    session_id: 'sess-1',
+    persisted: true,
+    supports_turn_ids: true,
+    messages: [],
+    ...overrides,
+  };
+}
+
+/** The server PROVED nothing is running. */
+const idleRead = () => session({ awaiting_reply: false });
+/** The server says a turn is in flight. */
+const awaitingRead = () => session({ awaiting_reply: true });
+
+const userTurn = (id: string): AgentTurn => ({ role: 'user', content: 'hi', client_turn_id: id });
+const assistantTurn = (id: string): AgentTurn => ({
+  role: 'assistant',
+  content: 'there',
+  client_turn_id: id,
+});
+
+/** A tenant with no usable receipts table: awaiting_reply is OMITTED, so the
+ *  verdict comes from the transcript and can never be 'idle'. */
+const legacyRead = (messages: AgentTurn[]) => session({ messages });
+
+/** Record a reading the way the query fetcher and the reconciler's poll do. */
+function observe(response: AgentSessionResponse) {
+  act(() => {
+    recordSessionObservation(response);
+  });
 }
 
 describe('useAwaitingReplyLock', () => {
+  // The ledger is module-global and monotonic, so start every case from a reading
+  // that releases nothing — otherwise the previous case's answered ids are still
+  // the newest thing the hook can see.
+  beforeEach(() => {
+    recordSessionObservation(awaitingRead());
+  });
+
   it('starts unlocked', () => {
-    expect(setup().result.current.locked).toBe(false);
+    expect(renderHook(() => useAwaitingReplyLock()).result.current.locked).toBe(false);
   });
 
   it('locks when reconciliation says the turn may still be running', () => {
-    const { result } = setup();
+    const { result } = renderHook(() => useAwaitingReplyLock());
 
-    act(() => result.current.lock());
+    act(() => result.current.lock('turn-A'));
 
     expect(result.current.locked).toBe(true);
   });
 
-  it('RELEASES on a proven idle, with no remount', () => {
-    // THE FIX. Same mount throughout: lock as 'received', then the poll returns
-    // awaiting_reply: false.
-    const { result, rerender } = setup('awaiting');
-    act(() => result.current.lock());
+  it('RELEASES on a fresh idle read that repeats the value already cached', () => {
+    // THE ROUND-14 DEADLOCK. The page was already holding an idle read when
+    // reconciliation locked; the next successful GET says idle again. Round 13 saw
+    // no change in the verdict string and never re-ran its effect.
+    observe(idleRead());
+    const { result } = renderHook(() => useAwaitingReplyLock());
+    act(() => result.current.lock('turn-A'));
     expect(result.current.locked).toBe(true);
 
-    rerender({ verdict: 'idle' });
+    observe(idleRead());
 
     expect(result.current.locked).toBe(false);
   });
 
-  it('HOLDS the lock while the verdict is unknown', () => {
-    // The server omits awaiting_reply when it has no usable receipts table or its
-    // read failed. That is not permission to unlock.
-    const { result, rerender } = setup('awaiting');
-    act(() => result.current.lock());
+  it('does NOT release from an idle read taken BEFORE the lock, on any re-render', () => {
+    // The dangerous direction: the reconciler's poll read idle, the receipt lookup
+    // AFTER it upgraded the turn to 'received', and the lock was taken on that
+    // fresher evidence. Publishing the older read into the query cache re-renders
+    // this mount — and must not cancel the lock.
+    observe(awaitingRead());
+    const { result, rerender } = renderHook(() => useAwaitingReplyLock());
 
-    rerender({ verdict: 'unknown' });
-
-    expect(result.current.locked).toBe(true);
-  });
-
-  it('HOLDS the lock while the server still shows the turn running', () => {
-    const { result, rerender } = setup('unknown');
-    act(() => result.current.lock());
-
-    rerender({ verdict: 'awaiting' });
+    observe(idleRead()); // the poll's own GET
+    act(() => result.current.lock('turn-A')); // receipt says 'received'
+    rerender(); // setQueryData publishes that older GET
 
     expect(result.current.locked).toBe(true);
   });
 
-  it('does not let a STALE idle read undo a lock taken after it', () => {
-    // Ordering matters: the page may already be holding an 'idle' session read
-    // when reconciliation classifies a turn 'uncertain'. That earlier read says
-    // nothing about the turn just classified, so it must not cancel the lock.
-    const { result, rerender } = setup('idle');
-    rerender({ verdict: 'idle' });
+  it('releases a LEGACY lock when the locked turn own reply appears', () => {
+    // No receipts table: awaiting_reply is omitted throughout, so the verdict goes
+    // 'awaiting' -> 'unknown' and never 'idle'. The matching assistant is the only
+    // proof such a tenant can offer, and it is proof.
+    observe(legacyRead([userTurn('turn-A')]));
+    const { result } = renderHook(() => useAwaitingReplyLock());
+    act(() => result.current.lock('turn-A'));
+    expect(result.current.locked).toBe(true);
 
-    act(() => result.current.lock());
+    observe(legacyRead([userTurn('turn-A'), assistantTurn('turn-A')]));
+
+    // The verdict here really is 'unknown', not a smuggled 'idle' — the release
+    // came from identity.
+    expect(getSessionObservation().verdict).toBe('unknown');
+    expect(result.current.locked).toBe(false);
+  });
+
+  it('HOLDS while the verdict is unknown and the locked turn is unanswered', () => {
+    const { result } = renderHook(() => useAwaitingReplyLock());
+    act(() => result.current.lock('turn-A'));
+
+    // A legacy reading that settles — every id it shows is answered — but says
+    // nothing about ours, which the 100-turn window may simply have evicted. That
+    // is 'unknown', and 'unknown' is not permission to unlock.
+    observe(legacyRead([userTurn('turn-Z'), assistantTurn('turn-Z')]));
+
+    expect(getSessionObservation().verdict).toBe('unknown');
+    expect(result.current.locked).toBe(true);
+  });
+
+  it('HOLDS while the server still shows a turn running', () => {
+    const { result } = renderHook(() => useAwaitingReplyLock());
+    act(() => result.current.lock('turn-A'));
+
+    observe(awaitingRead());
 
     expect(result.current.locked).toBe(true);
   });
 
-  it('unlocks again on the NEXT transition into idle', () => {
-    // The release is edge-triggered, so prove the edge can recur — a second turn
-    // in the same mount must not inherit a spent release.
-    const { result, rerender } = setup('idle');
-    act(() => result.current.lock());
+  it('releases an UNCERTAIN, id-less lock without a remount', () => {
+    // 'uncertain' can arrive with no usable id (a tenant that does not round-trip
+    // them). Freshness is then the only rule left, and it must still work.
+    const { result } = renderHook(() => useAwaitingReplyLock());
+    act(() => result.current.lock(null));
     expect(result.current.locked).toBe(true);
 
-    rerender({ verdict: 'awaiting' });
-    expect(result.current.locked).toBe(true);
-    rerender({ verdict: 'idle' });
+    observe(idleRead());
 
     expect(result.current.locked).toBe(false);
   });
 
-  it('survives the round trip: lock, unknown, awaiting, idle', () => {
-    const { result, rerender } = setup('unknown');
-    act(() => result.current.lock());
+  it('releases a lock whose reply is ALREADY in the newest reading', () => {
+    // Identity is monotone: a turn cannot resume once answered, so proof from a
+    // reading older than the lock still counts.
+    observe(legacyRead([userTurn('turn-A'), assistantTurn('turn-A')]));
+    const { result } = renderHook(() => useAwaitingReplyLock());
 
-    for (const verdict of ['unknown', 'awaiting', 'unknown'] as AwaitingReplyVerdict[]) {
-      rerender({ verdict });
+    act(() => result.current.lock('turn-A'));
+
+    expect(result.current.locked).toBe(false);
+  });
+
+  it('does not let one turn reply release ANOTHER turn lock', () => {
+    // Two failed turns can be outstanding at once. B being answered says nothing
+    // about A, which may still be running on the stateful agent.
+    const { result } = renderHook(() => useAwaitingReplyLock());
+    act(() => {
+      result.current.lock('turn-A');
+      result.current.lock('turn-B');
+    });
+
+    observe(legacyRead([userTurn('turn-B'), assistantTurn('turn-B')]));
+
+    expect(result.current.locked).toBe(true);
+
+    // ...and the session going idle clears both, because that verdict is about the
+    // whole session.
+    observe(idleRead());
+
+    expect(result.current.locked).toBe(false);
+  });
+
+  it('can be locked and released repeatedly in one mount', () => {
+    // The release must not be a spent edge: a second turn in the same mount gets
+    // the same treatment as the first.
+    const { result } = renderHook(() => useAwaitingReplyLock());
+
+    for (const turnId of ['turn-A', 'turn-B']) {
+      act(() => result.current.lock(turnId));
       expect(result.current.locked).toBe(true);
+      observe(awaitingRead());
+      expect(result.current.locked).toBe(true);
+      observe(idleRead());
+      expect(result.current.locked).toBe(false);
     }
+  });
+});
 
-    rerender({ verdict: 'idle' });
-    expect(result.current.locked).toBe(false);
+describe('releasesLock — the rule on its own', () => {
+  const at = (generation: number, over: Partial<SessionObservation> = {}): SessionObservation => ({
+    generation,
+    verdict: 'idle',
+    answeredTurnIds: [],
+    ...over,
+  });
+
+  it('requires an idle reading STRICTLY newer than the lock', () => {
+    const held = { clientTurnId: 'turn-A', baseline: 5 };
+    expect(releasesLock(held, at(6))).toBe(true);
+    expect(releasesLock(held, at(5))).toBe(false);
+    expect(releasesLock(held, at(4))).toBe(false);
+  });
+
+  it('never releases on unknown or awaiting, however fresh', () => {
+    const held = { clientTurnId: 'turn-A', baseline: 1 };
+    expect(releasesLock(held, at(99, { verdict: 'unknown' }))).toBe(false);
+    expect(releasesLock(held, at(99, { verdict: 'awaiting' }))).toBe(false);
+  });
+
+  it('releases on the locked id being answered, at any generation', () => {
+    const held = { clientTurnId: 'turn-A', baseline: 5 };
+    expect(
+      releasesLock(held, at(1, { verdict: 'unknown', answeredTurnIds: ['turn-A'] })),
+    ).toBe(true);
+    expect(
+      releasesLock(held, at(1, { verdict: 'unknown', answeredTurnIds: ['turn-B'] })),
+    ).toBe(false);
+  });
+
+  it('has no identity rule to apply when the lock carries no id', () => {
+    const held = { clientTurnId: null, baseline: 5 };
+    expect(
+      releasesLock(held, at(1, { verdict: 'unknown', answeredTurnIds: ['turn-A'] })),
+    ).toBe(false);
+  });
+});
+
+describe('the lock baseline', () => {
+  it('is the generation current when lock() is called', () => {
+    observe(idleRead());
+    const before = currentObservationGeneration();
+    const { result } = renderHook(() => useAwaitingReplyLock());
+
+    observe(idleRead());
+    // A reading that lands between the mount and the lock still predates the lock.
+    act(() => result.current.lock('turn-A'));
+
+    expect(currentObservationGeneration()).toBe(before + 1);
+    expect(result.current.locked).toBe(true);
   });
 });
