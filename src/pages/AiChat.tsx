@@ -13,6 +13,7 @@ import {
   type AgentChatMutationContext,
 } from '@/hooks/use-agent-chat';
 import { useAwaitingReplyLock } from '@/hooks/use-awaiting-reply-lock';
+import { recordSessionObservation } from '@/components/ai-chat/sessionObservation';
 import { getAuthSessionId, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
@@ -26,7 +27,8 @@ import {
   locksComposerAwaitingReply,
   reconcileOutcome,
   reconcileReceiptOutcome,
-  resolveAwaitingReply,
+  sessionIsAwaitingReply,
+  shouldPollSession,
   type ReconcileOutcome,
   type TurnDelivery,
 } from '@/components/ai-chat/turnDelivery';
@@ -158,18 +160,19 @@ const AiChat = () => {
   // process died between the user and assistant appends locked this composer
   // forever — the poll gives up after 48 attempts and a reload re-reads the same
   // unmatched row.
-  const awaitingVerdict = resolveAwaitingReply(sessionQuery.data);
-  const serverAwaitingReply = awaitingVerdict === 'awaiting';
+  const serverAwaitingReply = sessionIsAwaitingReply(sessionQuery.data);
 
   // A delivered-but-unanswered turn ('received') or one reconciliation could not
   // confirm ('uncertain') leaves the composer LOCKED (review !62 round 6,
   // Important 4). Mount-local — it covers THIS mount, chiefly the uncertain case
   // whose turn the server may not even show. See locksComposerAwaitingReply.
   //
-  // RELEASED by the server proving the session idle (review !62 round 13,
-  // Important 2) — see useAwaitingReplyLock for why only that verdict may do it.
-  const { locked: awaitingServerReply, lock: lockAwaitingServerReply } =
-    useAwaitingReplyLock(awaitingVerdict);
+  // RELEASED by a LATER reading proving the session idle, or by the locked turn's
+  // own reply appearing (review !62 round 13, Important 2; round 14, Important 1).
+  // It reads those from the observation ledger rather than from this render's
+  // verdict, because a rendered verdict cannot say WHEN it was read — see
+  // useAwaitingReplyLock and sessionObservation.
+  const { locked: awaitingServerReply, lock: lockAwaitingServerReply } = useAwaitingReplyLock();
 
   const isChatPending =
     pendingChatTurns.length > 0 ||
@@ -183,9 +186,16 @@ const AiChat = () => {
   // 4: "retain/poll the received turn until its matching assistant row exists").
   // Bounded past the 190 s transport ceiling; stops the moment the reply arrives
   // (serverAwaitingReply flips false) or the page unmounts.
+  //
+  // ALSO WHILE A MOUNT-LOCAL LOCK IS HELD (review !62 round 14, Important 1). That
+  // lock is released only by a reading NEWER than the lock — so a page holding one
+  // and not reading anything can never learn what would free it. The reconciler
+  // takes such a lock precisely when the server's own verdict is NOT 'awaiting'
+  // (an 'uncertain' turn, or a receipt that outran the transcript), which is
+  // exactly when the condition above would have stopped polling.
   const refetchSession = sessionQuery.refetch;
   useEffect(() => {
-    if (!serverAwaitingReply) return;
+    if (!shouldPollSession(serverAwaitingReply, awaitingServerReply)) return;
     let attempts = 0;
     const timer = setInterval(() => {
       attempts += 1;
@@ -196,7 +206,7 @@ const AiChat = () => {
       void refetchSession();
     }, 5000);
     return () => clearInterval(timer);
-  }, [serverAwaitingReply, refetchSession]);
+  }, [serverAwaitingReply, awaitingServerReply, refetchSession]);
 
   // D13: the SERVER is authoritative. Seeded from the session query, then
   // OVERWRITTEN from every single response — including error responses, which
@@ -314,6 +324,12 @@ const AiChat = () => {
             }
             lastGetSucceeded = response?.data != null;
             if (!response?.data) continue; // this GET failed; keep the last good one
+            // Stamp it as read NOW (review !62 round 14, Important 1). This is a
+            // real reading of the server, and the lock taken further down must
+            // count it as OLDER than itself — the receipt lookup that follows can
+            // overturn what this said, and the same response is re-published into
+            // the query cache below, where it would otherwise pass for fresh.
+            recordSessionObservation(response.data);
             authoritative = response.data;
             supportsTurnIds = response.data.supports_turn_ids === true;
             delivery = classifyTurnDelivery(
@@ -360,12 +376,14 @@ const AiChat = () => {
           }
           // Lock the composer if this turn may still be running on the agent
           // ('received') or its fate is unknown ('uncertain') — a second POST now
-          // would race it (review !62 round 6, Important 4). Released only by the
-          // server PROVING the session idle (the effect above, review !62 round 13,
-          // Important 2); it used to be sticky until a reload, which outlived the
-          // very TTL that was supposed to end the wait.
+          // would race it (review !62 round 6, Important 4). Released by a reading
+          // NEWER than this moment proving the session idle, or by this turn's own
+          // reply appearing — hence the id (review !62 round 13, Important 2; round
+          // 14, Important 1). Taken AFTER the receipt lookup above deliberately: the
+          // baseline it captures must be newer than every reading that fed this
+          // decision, including the poll response about to be published below.
           if (locksComposerAwaitingReply(outcome, delivery)) {
-            lockAwaitingServerReply();
+            lockAwaitingServerReply(failed.clientTurnId);
           }
           if (authoritative && outcome === 'delivered') {
             // The server HAS the turn. Render server truth wholesale: the
