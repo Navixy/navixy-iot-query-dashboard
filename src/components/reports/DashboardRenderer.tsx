@@ -65,7 +65,8 @@ import {
   Area,
 } from 'recharts';
 import { chartColors } from '@/lib/chartColors';
-import { buildLineChartSeries, detectSeriesColumnIndex, seriesDataKey } from '@/lib/chartSeries';
+import type { ChartSeries } from '@/lib/chartSeries';
+import { assignSeriesKeys, buildLineChartSeries, detectSeriesColumnIndex } from '@/lib/chartSeries';
 import { formatChartAxisLabel } from '@/utils/datetime';
 import { TablePanel } from './TablePanel';
 import { TextPanel } from './visualizations/TextPanel';
@@ -1167,40 +1168,51 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
 
     // Detect a long-format series column (col 3) via the shared helper so the
     // same query groups identically in bar and line/time-series panels (DO-273).
-    const seriesColumnIndex = detectSeriesColumnIndex(data.columns, data.rows);
+    // `seriesColumn` lets a dashboard override the detector when the shape is
+    // ambiguous (a numeric grouping key reads like a second metric column).
+    const seriesColumnIndex = detectSeriesColumnIndex(
+      data.columns,
+      data.rows,
+      visualization?.seriesColumn,
+    );
 
     const categoryColumnIndex = 0;
     const valueColumnIndex = 1;
 
     // Process data
     let chartData: Array<Record<string, number | string>> = [];
-    let seriesNames: string[] = [];
+    // Values are stored under generated keys, never under the series label
+    // itself: a group named "__proto__" would otherwise be written onto
+    // Object.prototype instead of onto the row, and one named "category" would
+    // overwrite the x value. The label reaches the legend via each Bar's
+    // `name` — see assignSeriesKeys.
+    let series: ChartSeries[] = [];
 
     if (seriesColumnIndex !== null) {
-      // Group data by category and series
-      const groupedData: Record<string, Record<string, number>> = {};
+      series = assignSeriesKeys(
+        data.rows.map(row => String(row[seriesColumnIndex])),
+      );
+      const keyByLabel = new Map(series.map(({ key, label }) => [label, key]));
 
+      // Group data by category and series
+      const byCategory = new Map<string, Record<string, number>>();
       data.rows.forEach((row) => {
         const category = String(row[categoryColumnIndex]);
-        const series = String(row[seriesColumnIndex]);
-        const value = Number(row[valueColumnIndex]) || 0;
-
-        if (!groupedData[category]) {
-          groupedData[category] = {};
+        let group = byCategory.get(category);
+        if (!group) {
+          group = {};
+          byCategory.set(category, group);
         }
-        groupedData[category][series] = value;
+        group[keyByLabel.get(String(row[seriesColumnIndex]))!] =
+          Number(row[valueColumnIndex]) || 0;
       });
 
-      // Get all unique series names
-      seriesNames = Array.from(new Set(
-        data.rows.map(row => String(row[seriesColumnIndex])),
-      ));
-
-      // Convert to chart data format
-      chartData = Object.keys(groupedData).map(category => {
+      // Convert to chart data format. Every series gets a slot in every
+      // category: a bar chart draws an absent pair as zero, not as a hole.
+      chartData = Array.from(byCategory.entries()).map(([category, group]) => {
         const item: Record<string, number | string> = { category };
-        seriesNames.forEach(series => {
-          item[series] = groupedData[category][series] || 0;
+        series.forEach(({ key }) => {
+          item[key] = group[key] || 0;
         });
         return item;
       });
@@ -1208,10 +1220,10 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
       // Normalize to percentages if percent stacking
       if (stacking === 'percent') {
         chartData = chartData.map(item => {
-          const total = seriesNames.reduce((sum, series) => sum + (Number(item[series]) || 0), 0);
+          const total = series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
           const normalized: Record<string, number | string> = { category: item.category };
-          seriesNames.forEach(series => {
-            normalized[series] = total > 0 ? ((Number(item[series]) || 0) / total) * 100 : 0;
+          series.forEach(({ key }) => {
+            normalized[key] = total > 0 ? ((Number(item[key]) || 0) / total) * 100 : 0;
           });
           return normalized;
         });
@@ -1223,19 +1235,19 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
         const value = Number(row[valueColumnIndex]) || 0;
         return { category, value };
       });
-      seriesNames = ['value'];
     }
 
     // Apply sorting
     if (sortOrder !== 'none') {
       const hasMultipleSeries = seriesColumnIndex !== null;
+      // Grouped bars sort by the height of the whole group, summed over the
+      // series keys rather than over every own property — the row also carries
+      // its category, which is not a value.
+      const groupTotal = (item: Record<string, number | string>) =>
+        series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
       chartData.sort((a, b) => {
-        const aVal = hasMultipleSeries
-          ? Object.values(a).filter((v, i) => i > 0).reduce((sum: number, v) => sum + (Number(v) || 0), 0)
-          : a.value;
-        const bVal = hasMultipleSeries
-          ? Object.values(b).filter((v, i) => i > 0).reduce((sum: number, v) => sum + (Number(v) || 0), 0)
-          : b.value;
+        const aVal = hasMultipleSeries ? groupTotal(a) : a.value;
+        const bVal = hasMultipleSeries ? groupTotal(b) : b.value;
 
         if (sortOrder === 'asc') {
           return aVal > bVal ? 1 : -1;
@@ -1260,7 +1272,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
         const values = seriesColumnIndex === null
           ? chartData.map(d => Number(d.value) || 0)
           : chartData.flatMap(d =>
-            seriesNames.map(series => Number(d[series]) || 0),
+            series.map(({ key }) => Number(d[key]) || 0),
           );
         const maxVal = Math.max(...values);
         // Add 5% padding above max value - matching working test configuration
@@ -1343,11 +1355,11 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
           ) }
           { seriesColumnIndex !== null ? (
             // Multiple series - render multiple Bar components
-            seriesNames.map((seriesName, index) => (
+            series.map(({ key, label }, index) => (
               <Bar
-                key={ seriesName }
-                dataKey={ seriesDataKey(seriesName) }
-                name={ seriesName }
+                key={ key }
+                dataKey={ key }
+                name={ label }
                 stackId={ stacking !== 'none' ? 'stack' : undefined }
                 fill={ colors[index % colors.length] }
               >
@@ -1424,12 +1436,16 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     //   • Wide format  [x, value1, value2, ...]  -> one line per value column
     // Shared with the bar panel's detector so the same query groups identically
     // in both (DO-273).
-    const { xKey, chartData, seriesNames, isLongFormat } = buildLineChartSeries(
+    // `seriesColumn` (visualization config) overrides the detector for the
+    // shapes it cannot call: a numeric grouping key whose series never share an
+    // x looks exactly like a second metric column (DO-273).
+    const { xKey, chartData, series, isLongFormat } = buildLineChartSeries(
       data.columns || [],
       data.rows,
+      visualization?.seriesColumn,
     );
 
-    if (seriesNames.length === 0) {
+    if (series.length === 0) {
       return <div className="text-gray-500">No data series found</div>;
     }
 
@@ -1543,18 +1559,17 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                 missing value is a real one, and joining across it would invent
                 data. Matches how the composite report plots its grouped
                 series. */ }
-            { seriesNames.map((seriesName, index) => {
+            { series.map(({ key, label }, index) => {
               const color = colors[index % colors.length];
-              const dataKey = seriesDataKey(seriesName);
               const dot = shouldShowPoints
                 ? { r: pointSize, fill: color, strokeWidth: 2, stroke: 'var(--surface-1)' }
                 : false;
               return fillArea !== 'none' ? (
                 <Area
-                  key={ `series-${ seriesName }` }
+                  key={ key }
                   type={ getCurveType() }
-                  dataKey={ dataKey }
-                  name={ seriesName }
+                  dataKey={ key }
+                  name={ label }
                   stroke={ color }
                   strokeWidth={ lineWidth }
                   strokeDasharray={ getStrokeDasharray() }
@@ -1569,10 +1584,10 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                 />
               ) : (
                 <Line
-                  key={ `series-${ seriesName }` }
+                  key={ key }
                   type={ getCurveType() }
-                  dataKey={ dataKey }
-                  name={ seriesName }
+                  dataKey={ key }
+                  name={ label }
                   stroke={ color }
                   strokeWidth={ lineWidth }
                   strokeDasharray={ getStrokeDasharray() }

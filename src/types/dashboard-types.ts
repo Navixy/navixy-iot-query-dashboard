@@ -333,6 +333,17 @@ export interface VisualizationConfig {
   colorPalette?: 'classic' | 'modern' | 'pastel' | 'vibrant';
   showLegend?: boolean;
   legendPosition?: 'top' | 'bottom' | 'left' | 'right';
+  /**
+   * Which column groups the result into series, for bar and line/time-series
+   * panels: a column name, a column index (>= 2), or `'none'` to plot every
+   * value column as its own series (DO-273).
+   *
+   * Omitted, the shape is detected from the data — which cannot always be
+   * right: `[ts, value, device_id]` and `[ts, avg, sample_count]` are the same
+   * three columns of numbers, and only the author knows which is a grouping
+   * key. A value that names no column falls back to detection.
+   */
+  seriesColumn?: string | number;
   // Line chart settings
   lineStyle?: 'solid' | 'dashed' | 'dotted';
   lineWidth?: number;

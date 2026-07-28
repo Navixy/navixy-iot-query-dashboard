@@ -11,9 +11,13 @@
  */
 
 /**
- * Fraction of distinct col-3 values below which the column is treated as a
- * grouping key rather than per-row identifiers. Shared by every panel so tuning
- * it can't silently change one chart type and not another.
+ * Fraction of distinct col-3 values at or below which the column is treated as
+ * a grouping key rather than per-row identifiers. Shared by every panel so
+ * tuning it can't silently change one chart type and not another.
+ *
+ * The comparison is inclusive: 4 groups across 5 rows is one series sampling
+ * twice while three sample once — sparse long format, which is exactly the
+ * shape this ticket is about — and an exclusive `<` sent that to wide format.
  */
 export const LONG_FORMAT_REPETITION_THRESHOLD = 0.8;
 
@@ -29,29 +33,90 @@ const NUMERIC_COLUMN_TYPES = new Set([
   'money', 'serial', 'bigserial', 'smallserial',
 ]);
 
+// Names a numeric column carries when it identifies *what* was measured rather
+// than a measurement: device_id, object_label, sensor, series, group. Matched
+// on whole trailing words so "unit_count" or "id_error_total" stay metrics.
+const GROUPING_COLUMN_NAME_RE =
+  /(^|_)(id|uuid|key|code|name|label|title|type|kind|group|series|category|class|sensor|device|object|tracker|vehicle|unit|channel|source)s?$/i;
+
 interface ColumnMeta {
   name?: string;
   type?: string;
 }
 
 /**
- * Decide whether the result describes long format with a series-grouping column
- * at index 2. Returns SERIES_COLUMN_INDEX when it does, otherwise null (wide or
- * simple two-column data).
+ * Panel-level override for which column groups the result (DO-273).
  *
- * A numeric 3rd column is treated as a grouping key only when the x-axis (col 1)
- * repeats — i.e. each series contributes a row per x. Without repeated x it is a
- * second metric (wide format), so numeric metrics aren't mistaken for groupings.
+ * A column name or a column index (>= 2 — index 0 is the x axis and index 1 the
+ * value), or the string `'none'` to plot the result as wide format. Anything
+ * that does not resolve to a real column falls back to the heuristic, so a typo
+ * in hand-edited dashboard JSON degrades to the old behaviour instead of
+ * blanking the panel.
+ */
+export type SeriesColumnSetting = string | number;
+
+type ResolvedSetting = number | 'none' | 'auto';
+
+function resolveSeriesColumnSetting(
+  columns: ReadonlyArray<ColumnMeta>,
+  setting: SeriesColumnSetting | undefined,
+): ResolvedSetting {
+  if (setting === undefined || setting === null) return 'auto';
+  if (typeof setting === 'number') {
+    return Number.isInteger(setting)
+      && setting >= SERIES_COLUMN_INDEX
+      && setting < columns.length
+      ? setting
+      : 'auto';
+  }
+  if (typeof setting !== 'string') return 'auto';
+  const trimmed = setting.trim();
+  if (trimmed.length === 0) return 'auto';
+  if (trimmed.toLowerCase() === 'none') return 'none';
+  const exact = columns.findIndex((column) => column?.name === trimmed);
+  const index = exact === -1
+    // Unquoted identifiers come back from Postgres lower-cased, so a config
+    // written as "Device_id" should still find the "device_id" column.
+    ? columns.findIndex(
+      (column) => column?.name?.toLowerCase() === trimmed.toLowerCase(),
+    )
+    : exact;
+  return index >= SERIES_COLUMN_INDEX ? index : 'auto';
+}
+
+/**
+ * Decide which column groups the result into series, or null for wide / simple
+ * two-column data.
+ *
+ * `seriesColumn` (from the panel's visualization config) wins when it names a
+ * real column: the shapes below are genuinely ambiguous, so a dashboard author
+ * needs a way to say which one they meant. Everything else is heuristic.
+ *
+ * A numeric 3rd column is treated as a grouping key when the x-axis (col 1)
+ * repeats — each series contributing a row per x — or when its *name* reads as
+ * an identifier (`device_id`, `object_label`). Without either signal it is
+ * taken for a second metric (wide format): `[ts, avg, sample_count]` repeats
+ * its counts as thoroughly as a device id repeats, and only the name and the
+ * x-axis tell the two apart. Series that sample at different times — the case
+ * this ticket is about — never repeat an x, which is why the name matters.
  */
 export function detectSeriesColumnIndex(
   columns: ReadonlyArray<ColumnMeta>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  seriesColumn?: SeriesColumnSetting,
 ): number | null {
-  if (columns.length <= SERIES_COLUMN_INDEX || rows.length === 0) {
+  if (rows.length === 0) return null;
+
+  const setting = resolveSeriesColumnSetting(columns, seriesColumn);
+  if (setting === 'none') return null;
+  if (setting !== 'auto') return setting;
+
+  if (columns.length <= SERIES_COLUMN_INDEX) {
     return null;
   }
 
-  const seriesType = String(columns[SERIES_COLUMN_INDEX]?.type || '').toLowerCase();
+  const seriesColumnMeta = columns[SERIES_COLUMN_INDEX];
+  const seriesType = String(seriesColumnMeta?.type || '').toLowerCase();
   const isNumericSeries = NUMERIC_COLUMN_TYPES.has(seriesType);
 
   // Single pass over rows: distinct series values and distinct x values.
@@ -62,10 +127,21 @@ export function detectSeriesColumnIndex(
     distinctX.add(String(row[0]));
   }
 
-  const seriesRepeats = distinctSeries.size < rows.length * LONG_FORMAT_REPETITION_THRESHOLD;
+  const seriesRepeats = distinctSeries.size <= rows.length * LONG_FORMAT_REPETITION_THRESHOLD;
   const xHasDuplicates = distinctX.size < rows.length;
+  const namedLikeGrouping = GROUPING_COLUMN_NAME_RE.test(seriesColumnMeta?.name || '');
 
-  return seriesRepeats && (!isNumericSeries || xHasDuplicates) ? SERIES_COLUMN_INDEX : null;
+  return seriesRepeats && (!isNumericSeries || xHasDuplicates || namedLikeGrouping)
+    ? SERIES_COLUMN_INDEX
+    : null;
+}
+
+/** One plotted series: where its values live, and what to call it. */
+export interface ChartSeries {
+  /** The key its value is stored under in every pivoted row. */
+  key: string;
+  /** Name for the legend and tooltip; its position also fixes the colour. */
+  label: string;
 }
 
 /** A line / time-series panel's plot-ready data. */
@@ -75,13 +151,45 @@ export interface LineChartSeries {
   /** One entry per distinct x, carrying every series that has a value there. */
   chartData: Array<Record<string, unknown>>;
   /** The series to plot, in the order that also assigns their colours. */
-  seriesNames: string[];
+  series: ChartSeries[];
   /**
    * True when the series came from a col-3 grouping key (long format) rather
    * than from separate value columns (wide format). Callers connect across
    * missing points only in long format — see {@link buildLineChartSeries}.
    */
   isLongFormat: boolean;
+}
+
+/**
+ * The key holding the x value in a pivoted row. Generated, like the series
+ * keys, so it cannot collide with a runtime label — see {@link assignSeriesKeys}.
+ */
+const X_KEY = '__x';
+
+const seriesKeyAt = (index: number): string => `__series_${ index }`;
+
+/**
+ * Give each distinct label, in first-seen order, a key to store its values
+ * under.
+ *
+ * The keys are generated rather than taken from the data because a pivoted row
+ * is an object and a series label is a runtime value: `"__proto__"` never
+ * becomes an own property (the series would silently vanish), a label equal to
+ * the x column's name would overwrite the x value, two columns can share a
+ * name, and Recharts resolves a string `dataKey` as a lodash path, so a label
+ * like a firmware `"2.1.0"` would be read as `row[2][1][0]`. Every key here is
+ * `__series_N`, and the label travels separately to the legend via the series
+ * element's `name` prop.
+ */
+export function assignSeriesKeys(labels: Iterable<string>): ChartSeries[] {
+  const series: ChartSeries[] = [];
+  const seen = new Set<string>();
+  for (const label of labels) {
+    if (seen.has(label)) continue;
+    seen.add(label);
+    series.push({ key: seriesKeyAt(series.length), label });
+  }
+  return series;
 }
 
 /** Parse a cell into a plottable number, or null when it is not one. */
@@ -101,10 +209,9 @@ function toPlottableNumber(raw: unknown): number | null {
  */
 function sortByX(
   points: Array<Record<string, unknown>>,
-  xKey: string,
 ): Array<Record<string, unknown>> {
   const keyed = points.map((point) => {
-    const raw = point[xKey] as string | number;
+    const raw = point[X_KEY] as string | number;
     const time = new Date(raw).getTime();
     return { point, raw, time: Number.isNaN(time) ? null : time };
   });
@@ -144,74 +251,67 @@ function sortByX(
 export function buildLineChartSeries(
   columns: ReadonlyArray<ColumnMeta>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  seriesColumn?: SeriesColumnSetting,
 ): LineChartSeries {
-  const xKey = columns[0]?.name || 'x';
-  const seriesColumnIndex = detectSeriesColumnIndex(columns, rows);
+  const seriesColumnIndex = detectSeriesColumnIndex(columns, rows, seriesColumn);
 
   if (seriesColumnIndex !== null) {
-    // A series label that happens to equal the x column's name would take the
-    // x value's slot in the pivoted row and break the axis for every point it
-    // appears at. Drop it instead, the way the wide branch keeps xKey out of
-    // its series list.
-    const seriesNames = Array.from(
-      new Set(rows.map((row) => String(row[seriesColumnIndex]))),
-    ).filter((name) => name !== xKey);
+    const series = assignSeriesKeys(
+      rows.map((row) => String(row[seriesColumnIndex])),
+    );
+    const keyByLabel = new Map(series.map(({ key, label }) => [label, key]));
     const byX = new Map<string, Record<string, unknown>>();
     for (const row of rows) {
       const xId = String(row[0]);
       let point = byX.get(xId);
       if (!point) {
-        point = { [xKey]: row[0] };
+        point = { [X_KEY]: row[0] };
         byX.set(xId, point);
       }
-      const seriesKey = String(row[seriesColumnIndex]);
-      if (seriesKey !== xKey) point[seriesKey] = toPlottableNumber(row[1]);
+      point[keyByLabel.get(String(row[seriesColumnIndex]))!] = toPlottableNumber(row[1]);
     }
     return {
-      xKey,
-      chartData: sortByX(Array.from(byX.values()), xKey),
-      seriesNames,
+      xKey: X_KEY,
+      chartData: sortByX(Array.from(byX.values())),
+      series,
       isLongFormat: true,
     };
   }
 
-  const chartData = rows.map((row) => {
-    const point: Record<string, unknown> = { [xKey]: row[0] };
-    if (columns.length > 0) {
-      for (let i = 1; i < row.length && i < columns.length; i++) {
-        point[columns[i]?.name || `series${ i }`] = toPlottableNumber(row[i]);
-      }
-    } else {
-      for (let i = 1; i < row.length; i++) {
-        point[`value${ i }`] = toPlottableNumber(row[i]);
-      }
+  // A wide result can have no value columns at all (a single-column query, or
+  // no rows to read a width from), which leaves nothing to plot; the long
+  // branch always yields >= 1 series for non-empty rows.
+  const labels: string[] = [];
+  if (columns.length > 0) {
+    for (let i = 1; i < columns.length; i++) {
+      labels.push(columns[i]?.name || `series${ i }`);
     }
+  } else {
+    const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    for (let i = 1; i < width; i++) {
+      labels.push(`value${ i }`);
+    }
+  }
+  // Keyed positionally rather than through assignSeriesKeys: here a series *is*
+  // a column, so two columns that share a name (`SELECT a.ts, b.ts`) are still
+  // two series, and de-duplicating the labels would shift every value after
+  // them into the wrong series.
+  const series = rows.length > 0
+    ? labels.map((label, index) => ({ key: seriesKeyAt(index), label }))
+    : [];
+
+  const chartData = rows.map((row) => {
+    const point: Record<string, unknown> = { [X_KEY]: row[0] };
+    series.forEach(({ key }, index) => {
+      point[key] = toPlottableNumber(row[index + 1]);
+    });
     return point;
   });
 
   return {
-    xKey,
-    chartData: sortByX(chartData, xKey),
-    // A wide result can have no value columns at all (a single-column query),
-    // which leaves nothing to plot; the long branch always yields >= 1 series
-    // for non-empty rows.
-    seriesNames:
-      chartData.length > 0
-        ? Object.keys(chartData[0]).filter((key) => key !== xKey)
-        : [],
+    xKey: X_KEY,
+    chartData: sortByX(chartData),
+    series,
     isLongFormat: false,
   };
-}
-
-/**
- * Build a Recharts `dataKey` for a series whose key is a runtime value (a series
- * label) or a column name. Recharts resolves string dataKeys with lodash `get`,
- * so a name containing "." or "[]" (e.g. a firmware label "2.1.0") would be read
- * as a nested path and render nothing. Use a function accessor only for such
- * names; plain strings keep Recharts' per-cell memoization for the common case.
- */
-export function seriesDataKey(
-  name: string,
-): string | ((row: Record<string, unknown>) => unknown) {
-  return /[.[\]]/.test(name) ? (row) => row[name] : name;
 }
