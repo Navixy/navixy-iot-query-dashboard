@@ -1536,10 +1536,13 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                 Grouped (long-format) series connect across the x values where
                 another series sampled — those are not gaps in this series, and
                 left as gaps a series whose sample times rarely coincide with
-                the others draws as isolated points, i.e. nothing at all. Wide
-                format keeps gap semantics: there a missing value is a real one,
-                and joining across it would invent data. Matches how the
-                composite report plots its grouped series. */ }
+                the others draws as isolated points, i.e. nothing at all. The
+                pivot cannot separate that from an explicit NULL reading, so an
+                outage inside a grouped series is drawn through as well; see
+                buildLineChartSeries. Wide format keeps gap semantics: there a
+                missing value is a real one, and joining across it would invent
+                data. Matches how the composite report plots its grouped
+                series. */ }
             { seriesNames.map((seriesName, index) => {
               const color = colors[index % colors.length];
               const dataKey = seriesDataKey(seriesName);

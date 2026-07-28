@@ -110,6 +110,10 @@ describe('buildLineChartSeries — long format', () => {
   });
 
   it('parses numeric strings and nulls what cannot be plotted', () => {
+    // Note the panel then connects across this null as well: pivoted, an
+    // explicit NULL reading and "this series did not sample here" are the same
+    // absent value. That trade-off is documented on buildLineChartSeries — the
+    // alternative was series that do not render at all.
     const mixed = [
       ['2026-07-01T10:00:00Z', '10.5', 'Sensor A'],
       ['2026-07-01T10:01:00Z', null, 'Sensor A'],
@@ -117,6 +121,23 @@ describe('buildLineChartSeries — long format', () => {
     expect(buildLineChartSeries(TIME_COLUMNS, mixed).chartData).toEqual([
       { ts: '2026-07-01T10:00:00Z', 'Sensor A': 10.5 },
       { ts: '2026-07-01T10:01:00Z', 'Sensor A': null },
+    ]);
+  });
+
+  it('keeps the x value when a series label collides with the x column name', () => {
+    // "ts" as a series label would otherwise land in the x slot and break the
+    // axis at every point it appears at.
+    const colliding = [
+      ['2026-07-01T10:00:00Z', 10, 'ts'],
+      ['2026-07-01T10:00:00Z', 60, 'Sensor B'],
+      ['2026-07-01T10:01:00Z', 11, 'ts'],
+      ['2026-07-01T10:01:00Z', 61, 'Sensor B'],
+    ];
+    const { chartData, seriesNames } = buildLineChartSeries(TIME_COLUMNS, colliding);
+    expect(seriesNames).toEqual(['Sensor B']);
+    expect(chartData).toEqual([
+      { ts: '2026-07-01T10:00:00Z', 'Sensor B': 60 },
+      { ts: '2026-07-01T10:01:00Z', 'Sensor B': 61 },
     ]);
   });
 });

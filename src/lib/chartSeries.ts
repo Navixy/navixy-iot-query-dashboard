@@ -87,24 +87,34 @@ export interface LineChartSeries {
 /** Parse a cell into a plottable number, or null when it is not one. */
 function toPlottableNumber(raw: unknown): number | null {
   const value = typeof raw === 'number' ? raw : parseFloat(String(raw));
-  return Number.isNaN(value) || !Number.isFinite(value) ? null : value;
+  return Number.isFinite(value) ? value : null;
 }
 
-/** Chronological where the x values parse as dates, lexicographic otherwise. */
+/**
+ * Chronological where the x values parse as dates, lexicographic otherwise, in
+ * a new array.
+ *
+ * Each x is parsed once rather than twice per comparison: these panels plot
+ * high-cardinality time axes — a day of 10-second samples is ~8.6k points —
+ * where a comparator that built two Dates per call would allocate hundreds of
+ * thousands of them per render.
+ */
 function sortByX(
   points: Array<Record<string, unknown>>,
   xKey: string,
 ): Array<Record<string, unknown>> {
-  return points.sort((a, b) => {
-    const aVal = a[xKey] as string | number;
-    const bVal = b[xKey] as string | number;
-    const aDate = new Date(aVal);
-    const bDate = new Date(bVal);
-    if (!Number.isNaN(aDate.getTime()) && !Number.isNaN(bDate.getTime())) {
-      return aDate.getTime() - bDate.getTime();
-    }
-    return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
+  const keyed = points.map((point) => {
+    const raw = point[xKey] as string | number;
+    const time = new Date(raw).getTime();
+    return { point, raw, time: Number.isNaN(time) ? null : time };
   });
+  // Array.prototype.sort is stable, so points that compare equal keep the
+  // order the query returned them in.
+  keyed.sort((a, b) => {
+    if (a.time !== null && b.time !== null) return a.time - b.time;
+    return a.raw > b.raw ? 1 : a.raw < b.raw ? -1 : 0;
+  });
+  return keyed.map((entry) => entry.point);
 }
 
 /**
@@ -119,6 +129,14 @@ function sortByX(
  * zero-length segment — invisible unless dots are on. That is the reported
  * symptom: the legend names every group while the plot area stays empty.
  *
+ * Connecting costs something the pivot cannot give back: once every series
+ * shares one row array, "absent because another series sampled here" and
+ * "explicit NULL reading" are both just null, so a real outage inside a grouped
+ * series is drawn straight through. Telling them apart needs a `data` array per
+ * series on each Line plus `allowDuplicatedCategory={false}` on the axis — more
+ * than the invisible-series bug warranted, and strictly better than the series
+ * not being drawn at all.
+ *
  * Wide format ([x, value1, value2, ...]) plots one line per value column. There
  * every column shares one x grid, so a missing value really is a gap and stays
  * one.
@@ -131,9 +149,13 @@ export function buildLineChartSeries(
   const seriesColumnIndex = detectSeriesColumnIndex(columns, rows);
 
   if (seriesColumnIndex !== null) {
+    // A series label that happens to equal the x column's name would take the
+    // x value's slot in the pivoted row and break the axis for every point it
+    // appears at. Drop it instead, the way the wide branch keeps xKey out of
+    // its series list.
     const seriesNames = Array.from(
       new Set(rows.map((row) => String(row[seriesColumnIndex]))),
-    );
+    ).filter((name) => name !== xKey);
     const byX = new Map<string, Record<string, unknown>>();
     for (const row of rows) {
       const xId = String(row[0]);
@@ -142,7 +164,8 @@ export function buildLineChartSeries(
         point = { [xKey]: row[0] };
         byX.set(xId, point);
       }
-      point[String(row[seriesColumnIndex])] = toPlottableNumber(row[1]);
+      const seriesKey = String(row[seriesColumnIndex]);
+      if (seriesKey !== xKey) point[seriesKey] = toPlottableNumber(row[1]);
     }
     return {
       xKey,

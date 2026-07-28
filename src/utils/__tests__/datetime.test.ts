@@ -228,6 +228,22 @@ describe('formatChartAxisLabel', () => {
     expect(formatChartAxisLabel('2026-05-12', prefsBerlin)).toBe('12.05.2026');
   });
 
+  // A bare day is a calendar day, not an instant. Routed through Date it would
+  // parse as UTC midnight, and every viewer behind UTC would see the label move
+  // to the previous day — the shape daily rollups (::date, date_trunc, to_char)
+  // produce. Berlin is ahead of UTC, so only a zone behind it catches this.
+  it('keeps a date-only tick on its own day west of UTC', () => {
+    expect(formatChartAxisLabel('2026-05-12', prefsNY)).toBe('05-12-2026');
+  });
+
+  it('still renders midnight-with-a-clock as the instant it is', () => {
+    // Unlike a bare day, "00:00:00" is a real timestamp: it is UTC midnight and
+    // reads as the previous evening in New York.
+    expect(formatChartAxisLabel('2026-05-12 00:00:00', prefsNY)).toMatch(
+      /05-11-2026.*08:00\s?PM/,
+    );
+  });
+
   it('accepts a naive timestamp (treated as UTC, like every other cell)', () => {
     expect(formatChartAxisLabel('2026-05-12 03:00:00', prefsBerlin)).toBe(
       '12.05.2026 05:00',

@@ -383,16 +383,23 @@ export function formatTimestamp(
   return `${datePart} ${timePart}`;
 }
 
-/** A time-of-day inside a timestamp-shaped string ("...T09:41", "... 09:41"). */
-const TIME_PART_RE = /[T ]\d{2}:\d{2}/;
+/** A calendar day with no clock — the shape a daily rollup buckets to. */
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /**
  * Format a value for a chart axis tick or tooltip label.
  *
- * Timestamp-shaped values render through {@link formatTimestamp}, so a time
- * axis reads in the user's zone and date/time format — the same rendering
- * table cells and exports use — instead of the raw server string. The clock is
- * shown only when the value carries one, keeping a date-only axis compact.
+ * Timestamps render through {@link formatTimestamp}, so a time axis reads in
+ * the user's zone and date/time format — the same rendering table cells and
+ * exports use — instead of the raw server string.
+ *
+ * A bare day ("2026-05-12", what `::date` / `date_trunc` / `to_char` rollups
+ * return) is *not* an instant and must not become one: parsed it would be UTC
+ * midnight, so a viewer behind UTC would see the label move to the previous
+ * day. It is also already local — the SQL session runs in the viewer's zone
+ * (DO-352) — so converting it would subtract that offset a second time. Its
+ * own year/month/day therefore go straight into the date pattern.
+ *
  * Anything else (category labels, numbers) is stringified untouched.
  */
 export function formatChartAxisLabel(
@@ -400,11 +407,18 @@ export function formatChartAxisLabel(
   prefs: DatetimePrefs,
 ): string {
   if (value == null) return '';
-  if (isTimestampLike(value)) {
-    const formatted = formatTimestamp(value, prefs, {
-      includeTime: TIME_PART_RE.test(value),
-    });
-    if (formatted) return formatted;
+  if (typeof value === 'string') {
+    const day = DATE_ONLY_RE.exec(value.trim());
+    if (day) {
+      return renderDatePattern(
+        { year: Number(day[1]), month: Number(day[2]), day: Number(day[3]) },
+        prefs.dateFormat ?? 'dd/mm/yyyy',
+      );
+    }
+    if (isTimestampLike(value)) {
+      const formatted = formatTimestamp(value, prefs);
+      if (formatted) return formatted;
+    }
   }
   return String(value);
 }
@@ -596,6 +610,19 @@ function formatDateWithPattern(
 ): string {
   const c = getZoneComponents(date, timeZone);
   if (!c) return date.toISOString();
+  return renderDatePattern(c, fmt);
+}
+
+/**
+ * Render calendar fields in the user's date pattern. Split out from
+ * {@link formatDateWithPattern} so a value that is already a calendar day —
+ * with no instant behind it — can be rendered without inventing one; see
+ * {@link formatChartAxisLabel}.
+ */
+function renderDatePattern(
+  c: { year: number; month: number; day: number },
+  fmt: DateFormat,
+): string {
   const dd = pad2(c.day);
   const mm = pad2(c.month);
   const yyyy = String(c.year);
