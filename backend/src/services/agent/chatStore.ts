@@ -202,6 +202,11 @@ export function tenantKeyFor(userDbUrl: string): string {
  *  heap. Sizes are serialized-turn byte lengths, computed once per buffered turn. */
 const MAX_SESSIONS = 500;
 const MAX_TURNS = 100;
+/** How many admitted client_turn_ids a memory session remembers (review !62
+ *  round 13, Important 4). Deliberately well past MAX_TURNS: the whole point is
+ *  to outlive transcript eviction. 500 ids ≈ 20 KB per session at worst, and the
+ *  ids are bounded to 100 chars by the route's validator. */
+const MAX_SEEN_TURN_IDS = 500;
 const MAX_SESSION_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 h
@@ -252,6 +257,21 @@ interface MemorySession {
   bytes: number;
   /** Last write (or creation). Feeds both the TTL sweep and oldest-first eviction. */
   updatedAt: number;
+  /**
+   * Every client_turn_id this session has ADMITTED, retained past the point its
+   * turns fall out of `entries` (review !62 round 13, Important 4).
+   *
+   * The duplicate check used to scan `entries`, which MAX_TURNS caps at 100 — so
+   * after ~51 completed exchanges the oldest ids were evicted and replaying one
+   * was admitted as a new turn, double-feeding the stateful agent. The durable
+   * path has no such hole because its receipts table lives OUTSIDE the transcript
+   * window; this is the memory/demo equivalent of that separation.
+   *
+   * Insertion-ordered, so the oldest key is the first one out. Ids only — never
+   * turns — so MAX_SEEN_TURN_IDS entries cost ~40 bytes each and stay off the
+   * MAX_SESSION_BYTES ledger, which exists to bound TRANSCRIPT size.
+   */
+  seenTurnIds: Set<string>;
 }
 
 /** Keyed by `${mode}:${tenantKey}:${userId}` (memKey) — bare userId leaked
@@ -527,6 +547,7 @@ function memoryResolveOrCreate(ident: ChatIdentity): MemorySession {
 
   const created: MemorySession = {
     sessionId: randomUUID(), entries: [], bytes: 0, updatedAt: now,
+    seenTurnIds: new Set(),
   };
   memorySessions.set(memKey(ident), created);
   evictIfOverflow();
@@ -618,10 +639,21 @@ function memoryAppend(
     // 11 added this check only to the Postgres path, so on the memory/demo path a
     // repeat of an already-answered id was admitted — and its OLD assistant turn
     // immediately made the new user turn look answered, blinding the guard again.
+    //
+    // Checked against the ID REGISTRY, not the transcript (review !62 round 13,
+    // Important 4). Scanning `entries` alone meant the check expired with the
+    // turns: MAX_TURNS caps the buffer at 100, so after ~51 completed exchanges
+    // the oldest ids were evicted and replaying one came back 'appended'. The
+    // registry outlives that window, which is what the durable path gets for free
+    // by keeping receipts in a separate table. `entries` is still consulted for
+    // ids that arrived before this session started tracking them.
     const replayedId = entries.find(
       (e) => e.turn.role === 'user' && e.turn.client_turn_id,
     )?.turn.client_turn_id;
-    if (replayedId && session.entries.some((e) => e.turn.client_turn_id === replayedId)) {
+    if (replayedId && (
+      session.seenTurnIds.has(replayedId) ||
+      session.entries.some((e) => e.turn.client_turn_id === replayedId)
+    )) {
       return 'duplicate';
     }
   }
@@ -629,7 +661,7 @@ function memoryAppend(
     // A degraded Postgres append (e.g. read-only standby) lands here carrying a
     // Postgres-minted sessionId. Adopt it: if the outage persists, the next
     // loadHistory degrades too, resolves this session and the transcript survives.
-    session = { sessionId, entries: [], bytes: 0, updatedAt: now };
+    session = { sessionId, entries: [], bytes: 0, updatedAt: now, seenTurnIds: new Set() };
     memorySessions.set(memKey(ident), session);
   } else if (session.sessionId !== sessionId) {
     // The id from THIS request's loadHistory is authoritative (D13). Same user,
@@ -657,9 +689,32 @@ function memoryAppend(
   while (session.entries.length > MAX_TURNS) {
     dropOldestEntry(session);
   }
+  // Record every id this append admitted, BEFORE the transcript eviction below can
+  // take the turns away (review !62 round 13, Important 4). Done unconditionally,
+  // not only under the guard: an UNGUARDED append (the assistant reply, a replayed
+  // buffer) still establishes that the id has been seen, and a later guarded
+  // replay of it must be refused.
+  for (const entry of entries) {
+    const id = entry.turn.client_turn_id;
+    if (id) rememberTurnId(session, id);
+  }
   session.updatedAt = now;
   evictIfOverflow(); // the create above and the bytes just added, in one place
   return 'appended';
+}
+
+/** Add an id to the session's bounded seen-id registry, evicting oldest-first.
+ *  Insertion-ordered Set: the first key is the oldest, and an id already present
+ *  keeps its original position rather than being refreshed — retention is about
+ *  age of FIRST sighting, which is what a replay window means. */
+function rememberTurnId(session: MemorySession, id: string): void {
+  if (session.seenTurnIds.has(id)) return;
+  session.seenTurnIds.add(id);
+  while (session.seenTurnIds.size > MAX_SEEN_TURN_IDS) {
+    const oldest = session.seenTurnIds.values().next().value;
+    if (oldest === undefined) break;
+    session.seenTurnIds.delete(oldest);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -554,3 +554,92 @@ describe('chatStore — loadHistory reports awaitingReply on the guard\'s TTL (r
     expect((await loadHistory(null, ident('u1'), sessionId, 0)).history).toHaveLength(1);
   });
 });
+
+/**
+ * review !62 round 13, Important 4. The memory/demo duplicate check scanned the
+ * TRANSCRIPT, which MAX_TURNS caps at 100 entries — so after ~51 completed
+ * exchanges the oldest user turns were evicted and replaying one of their ids came
+ * back 'appended', double-feeding the stateful agent with a turn it had already
+ * answered. The durable path never had this hole: its receipts live in a separate
+ * table, outside the transcript window. The registry is that separation, in memory.
+ */
+describe('chatStore — a replayed id is refused after transcript eviction (round 13)', () => {
+  const guard = { rejectWhenTurnActive: true };
+  const u = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const a = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+
+  /** Complete `n` exchanges, each with its own id. */
+  async function runExchanges(sessionId: string, n: number, from = 0): Promise<void> {
+    for (let i = from; i < from + n; i++) {
+      expect(
+        await appendTurns(null, ident('u1'), sessionId, [u(`ask ${i}`, `t${i}`)], guard),
+      ).toBe('appended');
+      await appendTurns(null, ident('u1'), sessionId, [a(`reply ${i}`, `t${i}`)]);
+    }
+  }
+
+  it('refuses an id whose turns have fallen out of the capped transcript', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    // 60 exchanges = 120 entries, so MAX_TURNS (100) has evicted the earliest.
+    await runExchanges(sessionId, 60);
+
+    const { history } = await loadHistory(null, ident('u1'), null);
+    expect(history.length).toBe(100);
+    // t0's turns are demonstrably GONE from the transcript — the old check had
+    // nothing left to match on.
+    expect(history.some((t) => t.client_turn_id === 't0')).toBe(false);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('ask 0 again', 't0')], guard),
+    ).toBe('duplicate');
+  });
+
+  it('still refuses a replay whose turns ARE still in the transcript', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await runExchanges(sessionId, 2);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('ask 0 again', 't0')], guard),
+    ).toBe('duplicate');
+  });
+
+  it('admits a genuinely NEW id after the same eviction', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await runExchanges(sessionId, 60);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('something new', 'fresh')], guard),
+    ).toBe('appended');
+  });
+
+  it('forgets ids only past the registry bound, well beyond MAX_TURNS', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    // 300 exchanges: 600 transcript entries (evicted down to 100) but only 300
+    // distinct ids, so every one of them is still inside the 500-id registry.
+    await runExchanges(sessionId, 300);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('replay of the first', 't0')], guard),
+    ).toBe('duplicate');
+  });
+
+  it('records ids from UNGUARDED appends too, past eviction', async () => {
+    // A buffered assistant reply, or a replayed outage buffer, arrives without the
+    // guard — but it still proves the id has been seen, and must keep proving it
+    // once its turn has aged out of the transcript.
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [a('reply for a lost turn', 'ghost')]);
+    await runExchanges(sessionId, 60);
+
+    const { history } = await loadHistory(null, ident('u1'), null);
+    expect(history.some((t) => t.client_turn_id === 'ghost')).toBe(false);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('the lost turn', 'ghost')], guard),
+    ).toBe('duplicate');
+  });
+});
