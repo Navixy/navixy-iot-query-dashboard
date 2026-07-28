@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   __resetObservedHostZoneForTests,
   detectDefaultPrefs,
+  formatChartAxisLabel,
   formatLocalInputInZone,
   formatTimestamp,
   isDateLikeParam,
@@ -208,6 +209,39 @@ describe('formatTimestamp', () => {
     expect(formatTimestamp(utcInstant, prefsBerlin, { includeTime: false })).toBe(
       '12.05.2026',
     );
+  });
+});
+
+describe('formatChartAxisLabel', () => {
+  // DO-273: a time axis used to print the raw server string — 24 characters
+  // per tick, in UTC rather than the viewer's zone.
+  it('renders a timestamp tick in the viewer zone and format', () => {
+    expect(formatChartAxisLabel('2026-05-12T03:00:00.000Z', prefsBerlin)).toBe(
+      '12.05.2026 05:00',
+    );
+    expect(formatChartAxisLabel('2026-05-12T03:00:00.000Z', prefsNY)).toMatch(
+      /05-11-2026.*11:00\s?PM/,
+    );
+  });
+
+  it('drops the clock for a date-only tick', () => {
+    expect(formatChartAxisLabel('2026-05-12', prefsBerlin)).toBe('12.05.2026');
+  });
+
+  it('accepts a naive timestamp (treated as UTC, like every other cell)', () => {
+    expect(formatChartAxisLabel('2026-05-12 03:00:00', prefsBerlin)).toBe(
+      '12.05.2026 05:00',
+    );
+  });
+
+  it('leaves category labels and numbers alone', () => {
+    expect(formatChartAxisLabel('Sensor A', prefsBerlin)).toBe('Sensor A');
+    expect(formatChartAxisLabel(42, prefsBerlin)).toBe('42');
+  });
+
+  it('renders nullish input as an empty label', () => {
+    expect(formatChartAxisLabel(null, prefsBerlin)).toBe('');
+    expect(formatChartAxisLabel(undefined, prefsBerlin)).toBe('');
   });
 });
 

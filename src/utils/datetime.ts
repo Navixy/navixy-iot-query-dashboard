@@ -383,6 +383,32 @@ export function formatTimestamp(
   return `${datePart} ${timePart}`;
 }
 
+/** A time-of-day inside a timestamp-shaped string ("...T09:41", "... 09:41"). */
+const TIME_PART_RE = /[T ]\d{2}:\d{2}/;
+
+/**
+ * Format a value for a chart axis tick or tooltip label.
+ *
+ * Timestamp-shaped values render through {@link formatTimestamp}, so a time
+ * axis reads in the user's zone and date/time format — the same rendering
+ * table cells and exports use — instead of the raw server string. The clock is
+ * shown only when the value carries one, keeping a date-only axis compact.
+ * Anything else (category labels, numbers) is stringified untouched.
+ */
+export function formatChartAxisLabel(
+  value: unknown,
+  prefs: DatetimePrefs,
+): string {
+  if (value == null) return '';
+  if (isTimestampLike(value)) {
+    const formatted = formatTimestamp(value, prefs, {
+      includeTime: TIME_PART_RE.test(value),
+    });
+    if (formatted) return formatted;
+  }
+  return String(value);
+}
+
 interface ZoneComponents {
   year: number;
   month: number;

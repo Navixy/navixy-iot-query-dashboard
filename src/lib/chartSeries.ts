@@ -68,6 +68,118 @@ export function detectSeriesColumnIndex(
   return seriesRepeats && (!isNumericSeries || xHasDuplicates) ? SERIES_COLUMN_INDEX : null;
 }
 
+/** A line / time-series panel's plot-ready data. */
+export interface LineChartSeries {
+  /** The key holding the x value in every {@link chartData} entry. */
+  xKey: string;
+  /** One entry per distinct x, carrying every series that has a value there. */
+  chartData: Array<Record<string, unknown>>;
+  /** The series to plot, in the order that also assigns their colours. */
+  seriesNames: string[];
+  /**
+   * True when the series came from a col-3 grouping key (long format) rather
+   * than from separate value columns (wide format). Callers connect across
+   * missing points only in long format — see {@link buildLineChartSeries}.
+   */
+  isLongFormat: boolean;
+}
+
+/** Parse a cell into a plottable number, or null when it is not one. */
+function toPlottableNumber(raw: unknown): number | null {
+  const value = typeof raw === 'number' ? raw : parseFloat(String(raw));
+  return Number.isNaN(value) || !Number.isFinite(value) ? null : value;
+}
+
+/** Chronological where the x values parse as dates, lexicographic otherwise. */
+function sortByX(
+  points: Array<Record<string, unknown>>,
+  xKey: string,
+): Array<Record<string, unknown>> {
+  return points.sort((a, b) => {
+    const aVal = a[xKey] as string | number;
+    const bVal = b[xKey] as string | number;
+    const aDate = new Date(aVal);
+    const bDate = new Date(bVal);
+    if (!Number.isNaN(aDate.getTime()) && !Number.isNaN(bDate.getTime())) {
+      return aDate.getTime() - bDate.getTime();
+    }
+    return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
+  });
+}
+
+/**
+ * Pivot a query result into Recharts rows plus the series to plot (DO-273).
+ *
+ * Long format ([x, value, series]) groups by the series column, so the x axis
+ * becomes the union of every series' x values and a series carries a value only
+ * where it actually sampled. Those holes are *not* gaps in the data — they are
+ * another series' sample times — which is why {@link isLongFormat} comes back
+ * with the data: rendered as gaps, series whose sample times rarely coincide
+ * become runs of isolated points, and Recharts draws an isolated point as a
+ * zero-length segment — invisible unless dots are on. That is the reported
+ * symptom: the legend names every group while the plot area stays empty.
+ *
+ * Wide format ([x, value1, value2, ...]) plots one line per value column. There
+ * every column shares one x grid, so a missing value really is a gap and stays
+ * one.
+ */
+export function buildLineChartSeries(
+  columns: ReadonlyArray<ColumnMeta>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): LineChartSeries {
+  const xKey = columns[0]?.name || 'x';
+  const seriesColumnIndex = detectSeriesColumnIndex(columns, rows);
+
+  if (seriesColumnIndex !== null) {
+    const seriesNames = Array.from(
+      new Set(rows.map((row) => String(row[seriesColumnIndex]))),
+    );
+    const byX = new Map<string, Record<string, unknown>>();
+    for (const row of rows) {
+      const xId = String(row[0]);
+      let point = byX.get(xId);
+      if (!point) {
+        point = { [xKey]: row[0] };
+        byX.set(xId, point);
+      }
+      point[String(row[seriesColumnIndex])] = toPlottableNumber(row[1]);
+    }
+    return {
+      xKey,
+      chartData: sortByX(Array.from(byX.values()), xKey),
+      seriesNames,
+      isLongFormat: true,
+    };
+  }
+
+  const chartData = rows.map((row) => {
+    const point: Record<string, unknown> = { [xKey]: row[0] };
+    if (columns.length > 0) {
+      for (let i = 1; i < row.length && i < columns.length; i++) {
+        point[columns[i]?.name || `series${ i }`] = toPlottableNumber(row[i]);
+      }
+    } else {
+      for (let i = 1; i < row.length; i++) {
+        point[`value${ i }`] = toPlottableNumber(row[i]);
+      }
+    }
+    return point;
+  });
+
+  return {
+    xKey,
+    chartData: sortByX(chartData, xKey),
+    // A wide result can have no value columns at all (a single-column query),
+    // which leaves nothing to plot; the long branch always yields >= 1 series
+    // for non-empty rows.
+    seriesNames:
+      chartData.length > 0
+        ? Object.keys(chartData[0]).filter((key) => key !== xKey)
+        : [],
+    isLongFormat: false,
+  };
+}
+
 /**
  * Build a Recharts `dataKey` for a series whose key is a runtime value (a series
  * label) or a column name. Recharts resolves string dataKeys with lodash `get`,
