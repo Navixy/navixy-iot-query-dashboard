@@ -7,6 +7,7 @@ import {
   locksComposerAwaitingReply,
   reconcileOutcome,
   reconcileReceiptOutcome,
+  resolveAwaitingReply,
   sessionAwaitsReply,
   sessionIsAwaitingReply,
   UNCERTAIN_DELIVERY_NOTICE,
@@ -366,5 +367,73 @@ describe('sessionIsAwaitingReply — the server is the authority', () => {
   it('is false with no session at all', () => {
     expect(sessionIsAwaitingReply(null)).toBe(false);
     expect(sessionIsAwaitingReply(undefined)).toBe(false);
+  });
+});
+
+/**
+ * review !62 round 13, Important 1 & 2. `sessionIsAwaitingReply` collapsed three
+ * situations into two answers, and the missing one is load-bearing:
+ *
+ * - the server PROVED the session idle          -> may release a local lock
+ * - the server could not tell (field omitted)   -> must NOT release anything
+ * - the transcript shows no unmatched turn      -> also not proof: that transcript
+ *   may be a degraded, empty buffer from a failed read
+ *
+ * Only the first of those can unlock a composer that reconciliation locked.
+ */
+describe('resolveAwaitingReply — idle and unknown are not the same answer', () => {
+  const session = (over: Record<string, unknown>) => ({
+    session_id: 's', persisted: true, messages: [], ...over,
+  });
+
+  it('is IDLE only when the server sent an explicit false', () => {
+    expect(resolveAwaitingReply(session({
+      awaiting_reply: false,
+      supports_turn_ids: true,
+      messages: [userWithId('abandoned', 't1')],
+    }))).toBe('idle');
+  });
+
+  it('is AWAITING on the server\'s explicit true', () => {
+    expect(resolveAwaitingReply(session({
+      awaiting_reply: true,
+      messages: [user('hi'), assistant('done')],
+    }))).toBe('awaiting');
+  });
+
+  it('is AWAITING from the transcript when the server omits the field', () => {
+    // The legacy guard still LOCKS — it is all such a tenant has.
+    expect(resolveAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('running', 't1')],
+    }))).toBe('awaiting');
+  });
+
+  it('is UNKNOWN — never idle — when the field is omitted and the transcript looks settled', () => {
+    // THE FIX. A settled-looking transcript is not proof: the server omits the
+    // field precisely when it could not read receipts, and the same failure can
+    // leave the transcript itself degraded and empty.
+    expect(resolveAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('done', 't1'), assistantWithId('reply', 't1')],
+    }))).toBe('unknown');
+    expect(resolveAwaitingReply(session({ messages: [] }))).toBe('unknown');
+  });
+
+  it('is UNKNOWN when there is no session at all', () => {
+    expect(resolveAwaitingReply(null)).toBe('unknown');
+    expect(resolveAwaitingReply(undefined)).toBe('unknown');
+  });
+
+  it('keeps sessionIsAwaitingReply as the lock half of the same verdict', () => {
+    // The two must never disagree — that was the round-12 bug class.
+    for (const s of [
+      session({ awaiting_reply: false }),
+      session({ awaiting_reply: true }),
+      session({ supports_turn_ids: true, messages: [userWithId('running', 't1')] }),
+      session({ messages: [] }),
+    ]) {
+      expect(sessionIsAwaitingReply(s)).toBe(resolveAwaitingReply(s) === 'awaiting');
+    }
   });
 });

@@ -12,6 +12,7 @@ import {
   useAgentSession,
   type AgentChatMutationContext,
 } from '@/hooks/use-agent-chat';
+import { useAwaitingReplyLock } from '@/hooks/use-awaiting-reply-lock';
 import { getAuthSessionId, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
@@ -25,7 +26,7 @@ import {
   locksComposerAwaitingReply,
   reconcileOutcome,
   reconcileReceiptOutcome,
-  sessionIsAwaitingReply,
+  resolveAwaitingReply,
   type ReconcileOutcome,
   type TurnDelivery,
 } from '@/components/ai-chat/turnDelivery';
@@ -140,11 +141,6 @@ const AiChat = () => {
     (f) => !handledFailedTurnsRef.current.has(f.mutationId),
   ).length;
 
-  // A delivered-but-unanswered turn ('received') or one reconciliation could not
-  // confirm ('uncertain') leaves the composer LOCKED (review !62 round 6,
-  // Important 4). Mount-local — it covers THIS mount, chiefly the uncertain case
-  // whose turn the server may not even show. See locksComposerAwaitingReply.
-  const [awaitingServerReply, setAwaitingServerReply] = useState(false);
 
   // SERVER-DERIVED lock that SURVIVES a remount (review !62 round 7, finding 4):
   // the round-6 mount-local flag reset on navigate-away, and a 'received' turn's
@@ -162,7 +158,18 @@ const AiChat = () => {
   // process died between the user and assistant appends locked this composer
   // forever — the poll gives up after 48 attempts and a reload re-reads the same
   // unmatched row.
-  const serverAwaitingReply = sessionIsAwaitingReply(sessionQuery.data);
+  const awaitingVerdict = resolveAwaitingReply(sessionQuery.data);
+  const serverAwaitingReply = awaitingVerdict === 'awaiting';
+
+  // A delivered-but-unanswered turn ('received') or one reconciliation could not
+  // confirm ('uncertain') leaves the composer LOCKED (review !62 round 6,
+  // Important 4). Mount-local — it covers THIS mount, chiefly the uncertain case
+  // whose turn the server may not even show. See locksComposerAwaitingReply.
+  //
+  // RELEASED by the server proving the session idle (review !62 round 13,
+  // Important 2) — see useAwaitingReplyLock for why only that verdict may do it.
+  const { locked: awaitingServerReply, lock: lockAwaitingServerReply } =
+    useAwaitingReplyLock(awaitingVerdict);
 
   const isChatPending =
     pendingChatTurns.length > 0 ||
@@ -353,10 +360,12 @@ const AiChat = () => {
           }
           // Lock the composer if this turn may still be running on the agent
           // ('received') or its fate is unknown ('uncertain') — a second POST now
-          // would race it (review !62 round 6, Important 4). Sticky once set: only
-          // a reload (fresh mount) clears it, having re-read the session.
+          // would race it (review !62 round 6, Important 4). Released only by the
+          // server PROVING the session idle (the effect above, review !62 round 13,
+          // Important 2); it used to be sticky until a reload, which outlived the
+          // very TTL that was supposed to end the wait.
           if (locksComposerAwaitingReply(outcome, delivery)) {
-            setAwaitingServerReply(true);
+            lockAwaitingServerReply();
           }
           if (authoritative && outcome === 'delivered') {
             // The server HAS the turn. Render server truth wholesale: the
@@ -443,7 +452,9 @@ const AiChat = () => {
       }
     };
     void run();
-  }, [failedChatTurns, queryClient, authSessionId]);
+    // lockAwaitingServerReply is a stable useCallback([]) — listed to satisfy the
+    // exhaustive-deps rule without re-running this reconciliation pass.
+  }, [failedChatTurns, queryClient, authSessionId, lockAwaitingServerReply]);
 
   // With gcTime: Infinity keeping unresolved turns alive across remounts (review
   // !62 round 6, Important 3), SUCCEEDED turns would otherwise pile up in the

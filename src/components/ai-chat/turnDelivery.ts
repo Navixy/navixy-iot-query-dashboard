@@ -220,30 +220,59 @@ export function reconcileReceiptOutcome(
 }
 
 /**
- * Is a turn still running in this session?
+ * What the server says about whether a turn is still running in this session.
  *
- * THE SERVER'S OWN ANSWER WINS (review !62 round 12, Important 4). It applies the
- * same TTL as the single-active-turn guard, so an ABANDONED turn — one whose
- * process died between the user append and the assistant append — stops counting
- * as active there. The transcript-derived answer below has no notion of age, so it
- * kept saying "awaiting" forever: polling gave up after 48 attempts and a reload
- * re-read the same unmatched row, leaving the composer locked with nothing the
- * user could do about it.
+ * TRI-STATE (review !62 round 13, Important 1 & 2), because two callers need
+ * things a boolean cannot express:
  *
- * The fallback stays for a legacy response that omits the field, and is what every
- * round before this one relied on.
+ * - 'awaiting' — a turn is in flight. Lock the composer.
+ * - 'idle'     — the server PROVED nothing is running. Only a boolean
+ *                `awaiting_reply` in the response can produce this, and it is
+ *                the only thing allowed to RELEASE a lock taken locally.
+ * - 'unknown'  — nobody could tell. The server omits the field when it has no
+ *                usable receipts table or its read failed, and a
+ *                transcript-derived "no unmatched turn" is not proof either: the
+ *                transcript may itself be a degraded, empty buffer. Hold whatever
+ *                lock is already held; do not take a new one.
  *
- * ONE resolver for both consumers — the composer lock and the pre-send guard —
- * because those two disagreeing is its own class of bug.
+ * The server's answer wins whenever it has one, because it applies the same TTL
+ * as the single-active-turn guard — so an ABANDONED turn, one whose process died
+ * between the user append and the assistant append, stops counting as active
+ * there. The transcript fallback has no notion of age, so it said "awaiting"
+ * forever: polling gave up after 48 attempts and a reload re-read the same
+ * unmatched row, leaving the composer locked with nothing the user could do.
+ *
+ * ONE resolver for every consumer — the composer lock, the lock RELEASE and the
+ * pre-send guard — because those disagreeing is its own class of bug.
  */
+export type AwaitingReplyVerdict = 'awaiting' | 'idle' | 'unknown';
+
+export function resolveAwaitingReply(session: {
+  awaiting_reply?: boolean;
+  supports_turn_ids?: boolean;
+  messages?: AgentTurn[];
+} | null | undefined): AwaitingReplyVerdict {
+  // No session read at all: not evidence of an idle server.
+  if (!session) return 'unknown';
+  if (typeof session.awaiting_reply === 'boolean') {
+    return session.awaiting_reply ? 'awaiting' : 'idle';
+  }
+  // Legacy/degraded response. An unmatched turn still locks — that guard predates
+  // round 12 and is all such a tenant has — but its ABSENCE proves nothing, so it
+  // can never be the thing that unlocks.
+  return sessionAwaitsReply(session.messages ?? [], session.supports_turn_ids === true)
+    ? 'awaiting'
+    : 'unknown';
+}
+
+/** Should the composer be locked because a turn is running? Convenience over
+ *  resolveAwaitingReply for the callers that only ever needed the lock half. */
 export function sessionIsAwaitingReply(session: {
   awaiting_reply?: boolean;
   supports_turn_ids?: boolean;
   messages?: AgentTurn[];
 } | null | undefined): boolean {
-  if (!session) return false;
-  if (typeof session.awaiting_reply === 'boolean') return session.awaiting_reply;
-  return sessionAwaitsReply(session.messages ?? [], session.supports_turn_ids === true);
+  return resolveAwaitingReply(session) === 'awaiting';
 }
 
 /**
