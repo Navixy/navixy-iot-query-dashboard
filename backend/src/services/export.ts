@@ -6,7 +6,12 @@
 import ExcelJS from 'exceljs';
 import type { Writable } from 'stream';
 import { logger } from '../utils/logger.js';
-import { isTimestampLikeValue, parseTimestampValue } from '../utils/datetime.js';
+import {
+  isTimestampLikeValue,
+  parseCalendarDay,
+  parseTimestampValue,
+  type CalendarDay,
+} from '../utils/datetime.js';
 import { isDisplayableCoordinate } from '../utils/gpsDetection.js';
 import type { DateFormat, TimeFormat } from './userPreferences.js';
 
@@ -228,6 +233,39 @@ function buildExcelNumFmt(
 }
 
 /**
+ * Render calendar fields in the user's date format. Shared by
+ * {@link formatDateWithPrefs}, which takes them from an instant read in the
+ * export's timezone, and by the date-only path, where the value is already a
+ * calendar day and there is no instant to read (DO-273).
+ */
+/** A calendar day as the Date whose UTC fields are that day, midnight. */
+function calendarDayToUtcDate(c: CalendarDay): Date {
+  return new Date(Date.UTC(c.year, c.month - 1, c.day));
+}
+
+function formatCalendarDay(c: CalendarDay, dateFmt: DateFormat | undefined): string {
+  const dd = String(c.day).padStart(2, '0');
+  const mm = String(c.month).padStart(2, '0');
+  const yyyy = String(c.year);
+
+  switch (dateFmt) {
+    case 'dd.mm.yyyy':
+      return `${dd}.${mm}.${yyyy}`;
+    case 'mm-dd-yyyy':
+      return `${mm}-${dd}-${yyyy}`;
+    case 'yyyy-mm-dd':
+      return `${yyyy}-${mm}-${dd}`;
+    case 'dd-mmm-yyyy':
+      return `${c.day} ${MONTHS_SHORT[c.month - 1]} ${yyyy}`;
+    case 'dd-mmmm-yyyy':
+      return `${c.day} ${MONTHS_LONG[c.month - 1]} ${yyyy}`;
+    case 'dd/mm/yyyy':
+    default:
+      return `${dd}/${mm}/${yyyy}`;
+  }
+}
+
+/**
  * Render `date` for CSV/HTML/info-sheet output using the user's date/time
  * format preferences. When both are 'default' (or unset), keeps the legacy
  * `dd/mm/yy hh:mm` shape.
@@ -258,31 +296,7 @@ function formatDateWithPrefs(
     minute = date.getMinutes();
   }
 
-  const dd = String(day).padStart(2, '0');
-  const mm = String(month).padStart(2, '0');
-  const yyyy = String(year);
-
-  let datePart: string;
-  switch (dateFmt) {
-    case 'dd.mm.yyyy':
-      datePart = `${dd}.${mm}.${yyyy}`;
-      break;
-    case 'mm-dd-yyyy':
-      datePart = `${mm}-${dd}-${yyyy}`;
-      break;
-    case 'yyyy-mm-dd':
-      datePart = `${yyyy}-${mm}-${dd}`;
-      break;
-    case 'dd-mmm-yyyy':
-      datePart = `${day} ${MONTHS_SHORT[month - 1]} ${yyyy}`;
-      break;
-    case 'dd-mmmm-yyyy':
-      datePart = `${day} ${MONTHS_LONG[month - 1]} ${yyyy}`;
-      break;
-    case 'dd/mm/yyyy':
-    default:
-      datePart = `${dd}/${mm}/${yyyy}`;
-  }
+  const datePart = formatCalendarDay({ year, month, day }, dateFmt);
 
   const mm2 = String(minute).padStart(2, '0');
   let timePart: string;
@@ -572,6 +586,13 @@ export class ExportService {
       return { value: '', isDate: false };
     }
     if (isDateType || value instanceof Date || isTimestampLikeValue(value)) {
+      // A calendar day is stored at UTC midnight and never zone-shifted:
+      // ExcelJS converts a Date to a serial through its UTC fields, so those
+      // are exactly the fields the cell should carry (DO-273).
+      const day = parseCalendarDay(value);
+      if (day) {
+        return { value: calendarDayToUtcDate(day), isDate: true };
+      }
       const dateValue = value instanceof Date ? value : parseTimestampValue(String(value));
       if (!dateValue) {
         return { value: value as ExcelJS.CellValue, isDate: false };
@@ -645,15 +666,9 @@ export class ExportService {
 
         // Format dates in short locale format
         if (isDateColumnByType(col) || value instanceof Date || isTimestampLikeValue(value)) {
-          const dateValue = value instanceof Date
-            ? value
-            : parseTimestampValue(String(value));
-          if (dateValue) {
-            csvRow.push(
-              this.escapeCSVField(
-                this.formatShortDateTime(dateValue, timeZone, dateFormat, timeFormat),
-              ),
-            );
+          const text = this.formatDateCell(value, timeZone, dateFormat, timeFormat);
+          if (text !== null) {
+            csvRow.push(this.escapeCSVField(text));
             return;
           }
         }
@@ -713,6 +728,27 @@ export class ExportService {
     timeFormat?: TimeFormat,
   ): string {
     return formatDateWithPrefs(date, timeZone, dateFormat, timeFormat);
+  }
+
+  /**
+   * Display text for a date-ish cell, or null when the value is not one (so the
+   * caller can fall through to its numeric/plain-string handling).
+   *
+   * A bare "YYYY-MM-DD" renders as that day: it is a calendar day, not an
+   * instant, so reading it in the export's timezone would move it to the
+   * previous day west of UTC and append a clock the query never returned. Every
+   * other date-ish value is an instant and is rendered in that zone (DO-273).
+   */
+  private formatDateCell(
+    value: unknown,
+    timeZone?: string,
+    dateFormat?: DateFormat,
+    timeFormat?: TimeFormat,
+  ): string | null {
+    const day = parseCalendarDay(value);
+    if (day) return formatCalendarDay(day, dateFormat);
+    const date = value instanceof Date ? value : parseTimestampValue(String(value ?? ''));
+    return date ? this.formatShortDateTime(date, timeZone, dateFormat, timeFormat) : null;
   }
 
   /**
@@ -1030,10 +1066,7 @@ export class ExportService {
             value = this.formatNumericValue(num);
           }
         } else if (typeof value === 'string' && (isDateColumnByType(col) || isTimestampLikeValue(value))) {
-          const date = parseTimestampValue(value);
-          if (date) {
-            value = this.formatShortDateTime(date, timeZone, dateFormat, timeFormat);
-          }
+          value = this.formatDateCell(value, timeZone, dateFormat, timeFormat) ?? value;
         } else if (typeof value === 'object') {
           value = JSON.stringify(value);
         }
@@ -1085,8 +1118,8 @@ export class ExportService {
     const labels = rows.map(row => {
       const val = row[xColumn];
       if (xIsDate) {
-        const d = val instanceof Date ? val : parseTimestampValue(String(val ?? ''));
-        if (d) return this.formatShortDateTime(d, timeZone, dateFormat, timeFormat);
+        const text = this.formatDateCell(val, timeZone, dateFormat, timeFormat);
+        if (text !== null) return text;
       }
       return String(val ?? '');
     });
@@ -1215,12 +1248,9 @@ export class ExportService {
       const val = row[xColumn];
       if (val !== null && val !== undefined) {
         if (xIsDate) {
-          const d = val instanceof Date ? val : parseTimestampValue(String(val));
-          if (d) {
-            xValuesSet.add(this.formatShortDateTime(d, timeZone, dateFormat, timeFormat));
-          } else {
-            xValuesSet.add(String(val));
-          }
+          xValuesSet.add(
+            this.formatDateCell(val, timeZone, dateFormat, timeFormat) ?? String(val),
+          );
         } else {
           xValuesSet.add(String(val));
         }
@@ -1242,8 +1272,7 @@ export class ExportService {
         const xVal = row[xColumn];
         let label: string;
         if (xIsDate) {
-          const d = xVal instanceof Date ? xVal : parseTimestampValue(String(xVal ?? ''));
-          label = d ? this.formatShortDateTime(d, timeZone, dateFormat, timeFormat) : String(xVal ?? '');
+          label = this.formatDateCell(xVal, timeZone, dateFormat, timeFormat) ?? String(xVal ?? '');
         } else {
           label = String(xVal ?? '');
         }

@@ -8,6 +8,12 @@ import jwt from 'jsonwebtoken';
 import { existsSync } from 'fs';
 import { toErrorMeta, isTransientDbError, type ErrorWithMeta } from '../utils/errors.js';
 import { sanitizeTimeZone } from '../utils/datetime.js';
+import { configurePgTypeParsers } from '../utils/pgTypeParsers.js';
+
+// Applied before the first pool is built: value parsing is a property of the
+// pg module, not of a connection, and every query in the process goes through
+// this service (DO-273).
+configurePgTypeParsers();
 
 export interface DatabaseConfig {
   user: string;

@@ -16,6 +16,33 @@ export const TIMESTAMP_LIKE_RE =
 
 export const TIMEZONE_SUFFIX_RE = /(Z|[+-]\d{2}:?\d{2})$/;
 
+// A calendar day with no clock: a `date` column (kept as Postgres' own string
+// by pgTypeParsers) or a `::date` / `to_char` rollup.
+export const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+export interface CalendarDay {
+  year: number;
+  month: number;
+  day: number;
+}
+
+/**
+ * Read a bare "YYYY-MM-DD" as the calendar fields it is, or null for anything
+ * else.
+ *
+ * Callers format those fields directly instead of going through a Date: a day
+ * has no instant behind it, so parsing it (as UTC midnight) and rendering it in
+ * the export's timezone would move it to the previous day for every zone west
+ * of UTC and add a clock the query never returned — the same rule the frontend
+ * applies in `formatTimestamp` (DO-273).
+ */
+export function parseCalendarDay(value: unknown): CalendarDay | null {
+  if (typeof value !== 'string') return null;
+  const match = DATE_ONLY_RE.exec(value.trim());
+  if (!match) return null;
+  return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+}
+
 /**
  * True for values that look like an ISO date/timestamp string. Non-strings
  * (numbers, Dates, objects, null) return false.

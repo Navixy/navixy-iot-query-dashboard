@@ -210,6 +210,28 @@ describe('formatTimestamp', () => {
       '12.05.2026',
     );
   });
+
+  // DO-273: a `date` column reaches the frontend as a bare day (the backend
+  // keeps Postgres' calendar string instead of letting pg turn it into a
+  // server-local instant). Every display path — table cells, parameter chips,
+  // chart ticks — formats it through here, so the day has to survive the
+  // rendering rather than be parsed as UTC midnight and shifted back a day for
+  // viewers behind UTC.
+  it('renders a bare day as that day, in every viewer zone', () => {
+    expect(formatTimestamp('2026-05-12', prefsBerlin)).toBe('12.05.2026');
+    expect(formatTimestamp('2026-05-12', prefsNY)).toBe('05-12-2026');
+    expect(formatTimestamp('2026-05-12', prefsNY, { includeTime: false })).toBe(
+      '05-12-2026',
+    );
+  });
+
+  it('still treats midnight-with-a-clock as the instant it is', () => {
+    // Unlike a bare day, "00:00:00" is a real timestamp: UTC midnight reads as
+    // the previous evening in New York.
+    expect(formatTimestamp('2026-05-12 00:00:00', prefsNY)).toMatch(
+      /05-11-2026.*08:00\s?PM/,
+    );
+  });
 });
 
 describe('formatChartAxisLabel', () => {

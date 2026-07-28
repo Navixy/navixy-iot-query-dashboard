@@ -236,3 +236,76 @@ describe('ExportService chart generation', () => {
     });
   });
 });
+
+/**
+ * DO-273: a Postgres `date` reaches the export pipeline as the calendar string
+ * Postgres sent ("2026-05-12"), not as an instant. A day has no clock and no
+ * zone, so rendering it in the export's timezone would move it to the previous
+ * day for every viewer west of UTC — the same shift the chart axis had.
+ */
+describe('ExportService calendar days', () => {
+  const csvService = ExportService.getInstance();
+  const DAY_COLUMNS: ExportColumn[] = [
+    { name: 'day', type: 'date' },
+    { name: 'total', type: 'integer' },
+  ];
+
+  const csvBody = (timeZone: string | undefined) =>
+    csvService.generateCSV({
+      title: 'daily',
+      columns: DAY_COLUMNS,
+      rows: [['2026-05-12', 7]],
+      executedAt: new Date('2026-05-12T10:00:00Z'),
+      timeZone,
+      dateFormat: 'mm-dd-yyyy',
+      timeFormat: 'h12',
+    }).toString('utf8').split('\n')[1];
+
+  it('renders a date cell as that day, in every export timezone', () => {
+    expect(csvBody('America/New_York')).toBe('05-12-2026,7');
+    expect(csvBody('Pacific/Auckland')).toBe('05-12-2026,7');
+    expect(csvBody(undefined)).toBe('05-12-2026,7');
+  });
+
+  it('still renders a timestamp cell in the export timezone', () => {
+    // The neighbouring case, so the day rule cannot swallow real instants:
+    // 03:00 UTC is the previous evening in New York.
+    const line = csvService.generateCSV({
+      title: 'events',
+      columns: [{ name: 'at', type: 'timestamptz' }],
+      rows: [['2026-05-12T03:00:00.000Z']],
+      executedAt: new Date('2026-05-12T10:00:00Z'),
+      timeZone: 'America/New_York',
+      dateFormat: 'mm-dd-yyyy',
+      timeFormat: 'h12',
+    }).toString('utf8').split('\n')[1];
+
+    expect(line).toMatch(/^05-11-2026 11:00 PM$/);
+  });
+
+  it('gives Excel the day itself, unshifted', () => {
+    // ExcelJS turns a Date into a serial through its UTC fields, so a cell
+    // showing 12 May must carry UTC midnight of 12 May.
+    type CellCoercion = {
+      coerceCellValue(
+        value: unknown, isDateType: boolean, isNumeric: boolean, timeZone: string | undefined,
+      ): { value: unknown; isDate: boolean };
+    };
+    const coerce = ExportService.getInstance() as unknown as CellCoercion;
+
+    const cell = coerce.coerceCellValue('2026-05-12', true, false, 'America/New_York');
+
+    expect(cell.isDate).toBe(true);
+    expect((cell.value as Date).toISOString()).toBe('2026-05-12T00:00:00.000Z');
+  });
+
+  it('labels an exported chart x axis with the day', () => {
+    const script = (ExportService.getInstance() as unknown as ChartGenerators)
+      .generateChartHTML(DAY_COLUMNS, [{ day: '2026-05-12', total: 7 }], {
+        xColumn: 'day',
+        yColumns: ['total'],
+      });
+
+    expect(parseLabels(script)).toEqual(['12/05/2026']);
+  });
+});
