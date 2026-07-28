@@ -96,8 +96,14 @@ export interface AgentSessionResponse {
    * its assistant append locked the composer FOREVER: the server stopped counting
    * it after ~200 s, but the transcript row stayed unmatched, polling gave up after
    * 48 attempts, and a reload re-read the same row. Two definitions of "awaiting"
-   * is one too many; prefer this one whenever it is present. Absent only on a
-   * legacy response, where the transcript-derived fallback still applies.
+   * is one too many; prefer this one whenever it is present.
+   *
+   * ABSENT MEANS "THE SERVER COULD NOT TELL" (review !62 round 13, Important 1) —
+   * a legacy response, a tenant with no usable receipts table (including 003
+   * without 004), or a read that failed. It is NEVER sent as `false` in those
+   * cases, because the client treats any boolean here as final and stops deriving
+   * the state from the transcript, which for such a tenant is the only guard left.
+   * On absence the transcript-derived fallback applies. See resolveAwaitingReply.
    */
   awaiting_reply?: boolean;
   messages: AgentTurn[];
