@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import {
-  currentObservationGeneration,
+  currentReadHighWaterMark,
   getSessionObservation,
   subscribeToSessionObservations,
   type SessionObservation,
 } from '@/components/ai-chat/sessionObservation';
+import { getAuthSessionId } from '@/lib/authSession';
 
 /**
  * The MOUNT-LOCAL half of the composer lock, and the rule for releasing it
@@ -28,11 +29,12 @@ import {
  *
  * Two ways out, and both are evidence rather than inference:
  *
- *  - FRESHNESS. Every reading of GET /session gets a monotonic generation at the
- *    moment it arrives (sessionObservation.ts). A lock records the generation
- *    current when it was taken, and only a reading NEWER than that may release it.
- *    An 'idle' the server proved after the lock is real news; the same value read
- *    before it is not.
+ *  - FRESHNESS. Every reading of GET /session draws a monotonic ticket BEFORE its
+ *    request goes out (sessionObservation.ts). A lock records the tickets already
+ *    issued when it was taken, and only a reading whose request left AFTER that
+ *    may release it. An 'idle' the server proved after the lock is real news; the
+ *    same value read before it is not — however late it arrives (round 15,
+ *    Important 1: ordering by arrival let a slow pre-lock GET pass for news).
  *  - IDENTITY. A lock knows the client_turn_id it was taken for. An assistant turn
  *    stamped with that id proves THAT send finished, and a finished turn cannot
  *    resume — so this holds at any generation. It is also the ONLY releaser a
@@ -52,9 +54,11 @@ import {
 interface HeldLock {
   /** The turn this lock is about; null when it was taken without one. */
   clientTurnId: string | null;
-  /** The newest generation observed when the lock was taken. Only something
-   *  strictly newer counts as news. */
+  /** Tickets issued when the lock was taken. Only a read dispatched after this
+   *  counts as news. */
   baseline: number;
+  /** The authenticated presence that took it. */
+  epoch: string | null;
 }
 
 export interface AwaitingReplyLock {
@@ -68,14 +72,18 @@ export interface AwaitingReplyLock {
 
 /** Does this reading release this lock? Pure, and the whole rule in one place. */
 export function releasesLock(held: HeldLock, observation: SessionObservation): boolean {
+  // ANOTHER PRESENCE ENTIRELY (round 15, Important 2). A reading requested by the
+  // previous tenant can still settle here — clear() drops the query, not the
+  // request — and it is not evidence about this one's turn under either rule.
+  if (observation.epoch !== held.epoch) return false;
   // IDENTITY — this exact send has been answered. Monotone, so any reading proves
   // it, including one older than the lock.
   if (held.clientTurnId !== null && observation.answeredTurnIds.includes(held.clientTurnId)) {
     return true;
   }
-  // FRESHNESS — the server proved the session idle, in a reading taken after the
+  // FRESHNESS — the server proved the session idle, in a read DISPATCHED after the
   // lock. 'unknown' is not a proof and never releases.
-  return observation.verdict === 'idle' && observation.generation > held.baseline;
+  return observation.verdict === 'idle' && observation.ticket > held.baseline;
 }
 
 export function useAwaitingReplyLock(): AwaitingReplyLock {
@@ -94,10 +102,14 @@ export function useAwaitingReplyLock(): AwaitingReplyLock {
 
   const lock = useCallback((clientTurnId?: string | null) => {
     // Read the baseline HERE, not inside the updater: this is the moment the lock
-    // decision is being made, and everything already observed — including the poll
-    // reading that led to this call — must count as older than it.
-    const baseline = currentObservationGeneration();
-    setHeld((current) => [...current, { clientTurnId: clientTurnId ?? null, baseline }]);
+    // decision is being made, and every read already DISPATCHED — including the
+    // poll reading that led to this call, and any still in flight — must count as
+    // older than it.
+    const baseline = currentReadHighWaterMark();
+    // getAuthSessionId(), not the auth context: the module is the single writer,
+    // so a lock taken from a settled callback cannot capture a stale render's epoch.
+    const epoch = getAuthSessionId();
+    setHeld((current) => [...current, { clientTurnId: clientTurnId ?? null, baseline, epoch }]);
   }, []);
 
   return { locked: held.length > 0, lock };

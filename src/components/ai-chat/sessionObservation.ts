@@ -1,9 +1,10 @@
+import { getAuthSessionId } from '@/lib/authSession';
 import type { AgentSessionResponse } from '@/types/agent';
 import { answeredTurnIds, resolveAwaitingReply, type AwaitingReplyVerdict } from './turnDelivery';
 
 /**
- * ONE READING of the session state, stamped WITH WHEN IT WAS READ (review !62
- * round 14, Important 1).
+ * ONE READING of the session state, stamped with WHEN IT WAS ASKED FOR and WHO
+ * ASKED (review !62 round 14, Important 1; corrected round 15, Important 1 & 2).
  *
  * Round 13 released the composer lock on the VERDICT STRING alone, and a bare
  * verdict cannot say WHICH observation produced it. Both directions broke:
@@ -18,14 +19,35 @@ import { answeredTurnIds, resolveAwaitingReply, type AwaitingReplyVerdict } from
  *    it looks brand new and cancels the lock that its own successor had just
  *    justified. A second turn then goes out at the stateful agent.
  *
- * So an observation carries a GENERATION, minted at the moment the response comes
- * back from the network. A lock records the generation it was taken at, and only
- * an observation NEWER than that baseline may release it.
+ * Round 14 answered both with a generation minted WHEN THE RESPONSE ARRIVED. That
+ * orders readings by COMPLETION, and completion order is not observation order:
+ *
+ *    GET dispatched ─────────(slow network)─────────► response recorded
+ *                    receipt proves 'received' → LOCK
+ *
+ * The lock's baseline is everything recorded so far, so the delayed response —
+ * whose server snapshot was taken BEFORE the turn even reached the agent — landed
+ * above it and passed for news. It says nothing about the turn the lock is about.
+ *
+ * So a reading is ordered by a TICKET DRAWN BEFORE ITS REQUEST GOES OUT, and a
+ * lock is measured against the tickets ISSUED at that moment rather than the ones
+ * already back. Only a read whose request LEFT after the lock can release it —
+ * whenever it happens to return, and however many faster reads overtake it.
  */
+export interface SessionReadTicket {
+  /** Monotonic, drawn before dispatch. */
+  id: number;
+  /** The auth epoch current at dispatch; null when nobody is signed in. */
+  epoch: string | null;
+}
+
 export interface SessionObservation {
-  /** Monotonic, minted at READ time and never re-minted by a later re-publish.
-   *  0 is "nothing has ever been read", which can release nothing. */
-  generation: number;
+  /** The ticket of the read that produced this. 0 is "nothing has ever been
+   *  read", which can release nothing. */
+  ticket: number;
+  /** The authenticated presence that asked. A reading belongs to the identity
+   *  that requested it, never to whoever happens to be signed in when it lands. */
+  epoch: string | null;
   verdict: AwaitingReplyVerdict;
   /** client_turn_ids this reading shows an assistant reply for. */
   answeredTurnIds: readonly string[];
@@ -49,31 +71,64 @@ export interface SessionObservation {
  *    awaiting_reply verbatim. It is not a reading of the server at all.
  *
  * Only the code that performs a GET /session knows it performed one, so that is
- * what records here: the query fetcher (fetchAgentSession) and the reconciler's
- * own poll. Everything else is rendering.
+ * what draws a ticket here: the query fetcher (fetchAgentSession) and the
+ * reconciler's own poll. Everything else is rendering.
  *
- * MODULE-LEVEL, and deliberately NOT epoch-scoped like the query keys are: locks
- * live in a mounted component, a sign-out unmounts it, and every lock's baseline
- * is taken when the lock is — so nothing observed before it, under any identity,
- * can release it. The ids are UUIDs, so the identity half cannot collide either.
+ * MODULE-LEVEL because the readings are made outside React's render cycle, but
+ * every entry carries its EPOCH (round 15, Important 2). Round 14 argued scoping
+ * was unnecessary — locks unmount at sign-out, so nothing observed earlier could
+ * outlive one — and that argument was the round-15 defect in miniature: it, too,
+ * assumed a read is over when the lock is taken. queryClient.clear() drops the
+ * QUERY but not the underlying request, which has no AbortSignal to cancel, so a
+ * previous tenant's GET really can settle into the next tenant's page. It is
+ * dropped here rather than being allowed to speak for an identity that never
+ * asked it anything.
  */
 const NOTHING_OBSERVED: SessionObservation = {
-  generation: 0,
+  ticket: 0,
+  epoch: null,
   verdict: 'unknown',
   answeredTurnIds: [],
 };
 
+/** High-water mark of tickets ISSUED — not of readings returned. */
+let issued = 0;
 let latest: SessionObservation = NOTHING_OBSERVED;
 const listeners = new Set<() => void>();
 
-/** Record a SUCCESSFUL GET /session. Call this where the response arrives, not
- *  where it is later rendered or re-published. A failed read records nothing —
- *  the absence of an answer is not an answer. */
+/** Draw a ticket for a GET /session that is ABOUT TO BE DISPATCHED, and bind it
+ *  to the identity dispatching it. Call this immediately before the request, so
+ *  that anything decided afterwards outranks it. */
+export function beginSessionRead(): SessionReadTicket {
+  issued += 1;
+  return { id: issued, epoch: getAuthSessionId() };
+}
+
+/** The baseline a lock taken NOW must be measured against: every read already ON
+ *  ITS WAY is, by definition, not evidence about a decision being made after it —
+ *  its snapshot of the server predates this moment no matter when it returns. */
+export function currentReadHighWaterMark(): number {
+  return issued;
+}
+
+/** Record a SUCCESSFUL GET /session against the ticket it was dispatched with.
+ *  A failed read records nothing — the absence of an answer is not an answer.
+ *  Returns the ledger's state, which is unchanged when this reading is dropped. */
 export function recordSessionObservation(
+  ticket: SessionReadTicket,
   response: AgentSessionResponse | null | undefined,
 ): SessionObservation {
+  // The identity that asked is gone: a sign-out, or another tenant signed in
+  // while this was in flight. Nobody here is entitled to this answer.
+  if (ticket.epoch !== getAuthSessionId()) return latest;
+  // A newer read already answered. Keeping the newest reading rather than the
+  // last-arrived one is the same rule as the release: order by ticket, not by
+  // completion.
+  if (ticket.id <= latest.ticket) return latest;
+
   latest = {
-    generation: latest.generation + 1,
+    ticket: ticket.id,
+    epoch: ticket.epoch,
     verdict: resolveAwaitingReply(response),
     answeredTurnIds: answeredTurnIds(response?.messages),
   };
@@ -81,13 +136,6 @@ export function recordSessionObservation(
   // iteration of the others.
   for (const listener of [...listeners]) listener();
   return latest;
-}
-
-/** The high-water mark — the baseline a lock taken NOW must be measured against.
- *  Everything already observed is, by definition, not evidence about a decision
- *  being made after it. */
-export function currentObservationGeneration(): number {
-  return latest.generation;
 }
 
 /** useSyncExternalStore's getSnapshot: a stable reference between records. */

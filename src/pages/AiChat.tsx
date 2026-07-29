@@ -13,7 +13,10 @@ import {
   type AgentChatMutationContext,
 } from '@/hooks/use-agent-chat';
 import { useAwaitingReplyLock } from '@/hooks/use-awaiting-reply-lock';
-import { recordSessionObservation } from '@/components/ai-chat/sessionObservation';
+import {
+  beginSessionRead,
+  recordSessionObservation,
+} from '@/components/ai-chat/sessionObservation';
 import { getAuthSessionId, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { ChatComposer } from '@/components/ai-chat/ChatComposer';
@@ -188,11 +191,11 @@ const AiChat = () => {
   // (serverAwaitingReply flips false) or the page unmounts.
   //
   // ALSO WHILE A MOUNT-LOCAL LOCK IS HELD (review !62 round 14, Important 1). That
-  // lock is released only by a reading NEWER than the lock — so a page holding one
-  // and not reading anything can never learn what would free it. The reconciler
-  // takes such a lock precisely when the server's own verdict is NOT 'awaiting'
-  // (an 'uncertain' turn, or a receipt that outran the transcript), which is
-  // exactly when the condition above would have stopped polling.
+  // lock is released only by a reading DISPATCHED after the lock — so a page
+  // holding one and not reading anything can never learn what would free it. The
+  // reconciler takes such a lock precisely when the server's own verdict is NOT
+  // 'awaiting' (an 'uncertain' turn, or a receipt that outran the transcript),
+  // which is exactly when the condition above would have stopped polling.
   const refetchSession = sessionQuery.refetch;
   useEffect(() => {
     if (!shouldPollSession(serverAwaitingReply, awaitingServerReply)) return;
@@ -315,6 +318,10 @@ const AiChat = () => {
             // the tab is torn down mid-poll the anchor is null, api.ts fails the
             // probe closed, and a failed probe is already treated as no proof —
             // the turn degrades to 'uncertain' instead of a confirmed loss.
+            // The ticket is drawn BEFORE the request (review !62 round 15,
+            // Important 1) — the lock taken further down must outrank this read
+            // even if the network makes it the last one to return.
+            const ticket = beginSessionRead();
             const response = await apiService
               .getAgentSession(getTabSessionToken())
               .catch(() => null);
@@ -324,12 +331,11 @@ const AiChat = () => {
             }
             lastGetSucceeded = response?.data != null;
             if (!response?.data) continue; // this GET failed; keep the last good one
-            // Stamp it as read NOW (review !62 round 14, Important 1). This is a
-            // real reading of the server, and the lock taken further down must
-            // count it as OLDER than itself — the receipt lookup that follows can
-            // overturn what this said, and the same response is re-published into
-            // the query cache below, where it would otherwise pass for fresh.
-            recordSessionObservation(response.data);
+            // A real reading of the server (review !62 round 14, Important 1): the
+            // receipt lookup that follows can overturn what it said, and the same
+            // response is re-published into the query cache below, where it would
+            // otherwise pass for fresh.
+            recordSessionObservation(ticket, response.data);
             authoritative = response.data;
             supportsTurnIds = response.data.supports_turn_ids === true;
             delivery = classifyTurnDelivery(
