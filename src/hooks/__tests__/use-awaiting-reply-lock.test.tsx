@@ -2,30 +2,33 @@
  * @vitest-environment jsdom
  *
  * review !62 round 13, Important 2 — the release exists at all; round 14,
- * Important 1 — the release is scoped to an OBSERVATION.
+ * Important 1 — the release is scoped to an OBSERVATION; round 15, Important 1 &
+ * 2 — that observation is ordered by DISPATCH and belongs to ONE identity.
  *
  * Round 13 keyed the release on the verdict STRING, which says neither when it
  * was read nor which turn it is about. Both directions broke, and this file pins
- * both plus the two rules that replaced it:
+ * both plus the rules that replaced it:
  *
  *  - FRESHNESS: a lock taken while the last read already said 'idle' was
  *    unreleasable, because the next successful GET returned the same string and
  *    the effect dependency never changed. Locked for the whole mount.
  *  - and in reverse, an OLDER 'idle' reading republished into the query cache
  *    after the lock cancelled it — opening the composer for a turn a fresher
- *    receipt had just proved was still running.
+ *    receipt had just proved was still running. Round 14 ordered readings by
+ *    ARRIVAL, which left the same hole for a slow GET dispatched before the lock.
  *  - IDENTITY: on a legacy tenant the server omits awaiting_reply entirely, so the
  *    verdict can be 'awaiting' or 'unknown' but never 'idle' — round 13 left such
  *    a mount locked until a reload even with the matching reply in the transcript.
  *
  * The ledger is module-global on purpose (see sessionObservation), so these tests
- * drive it exactly as production does: by recording readings.
+ * drive it exactly as production does: by drawing tickets and recording readings.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import { releasesLock, useAwaitingReplyLock } from '@/hooks/use-awaiting-reply-lock';
 import {
-  currentObservationGeneration,
+  beginSessionRead,
+  currentReadHighWaterMark,
   getSessionObservation,
   recordSessionObservation,
   type SessionObservation,
@@ -58,10 +61,11 @@ const assistantTurn = (id: string): AgentTurn => ({
  *  verdict comes from the transcript and can never be 'idle'. */
 const legacyRead = (messages: AgentTurn[]) => session({ messages });
 
-/** Record a reading the way the query fetcher and the reconciler's poll do. */
+/** A complete read the way the query fetcher and the reconciler's poll do it:
+ *  ticket drawn, request dispatched, response recorded. */
 function observe(response: AgentSessionResponse) {
   act(() => {
-    recordSessionObservation(response);
+    recordSessionObservation(beginSessionRead(), response);
   });
 }
 
@@ -70,7 +74,7 @@ describe('useAwaitingReplyLock', () => {
   // that releases nothing — otherwise the previous case's answered ids are still
   // the newest thing the hook can see.
   beforeEach(() => {
-    recordSessionObservation(awaitingRead());
+    recordSessionObservation(beginSessionRead(), awaitingRead());
   });
 
   it('starts unlocked', () => {
@@ -94,6 +98,27 @@ describe('useAwaitingReplyLock', () => {
     act(() => result.current.lock('turn-A'));
     expect(result.current.locked).toBe(true);
 
+    observe(idleRead());
+
+    expect(result.current.locked).toBe(false);
+  });
+
+  it('does NOT release from a read DISPATCHED before the lock, however late it lands', () => {
+    // THE ROUND-15 RACE. The request left before the lock existed, so the server
+    // snapshot inside it predates the turn the lock is about — but round 14 gave
+    // it its generation on ARRIVAL, which put it above the baseline and made a
+    // stale idle look like the news that frees the composer.
+    const inFlight = beginSessionRead(); // GET /session goes out...
+    const { result } = renderHook(() => useAwaitingReplyLock());
+
+    act(() => result.current.lock('turn-A')); // ...the receipt proves 'received'
+    act(() => {
+      recordSessionObservation(inFlight, idleRead()); // ...and only now does it land
+    });
+
+    expect(result.current.locked).toBe(true);
+
+    // A read dispatched AFTER the lock says the same thing, and that one is news.
     observe(idleRead());
 
     expect(result.current.locked).toBe(false);
@@ -213,55 +238,73 @@ describe('useAwaitingReplyLock', () => {
 });
 
 describe('releasesLock — the rule on its own', () => {
-  const at = (generation: number, over: Partial<SessionObservation> = {}): SessionObservation => ({
-    generation,
+  const EPOCH = 'epoch-1';
+  const at = (ticket: number, over: Partial<SessionObservation> = {}): SessionObservation => ({
+    ticket,
+    epoch: EPOCH,
     verdict: 'idle',
     answeredTurnIds: [],
     ...over,
   });
+  const heldAt = (baseline: number, clientTurnId: string | null = 'turn-A') => ({
+    clientTurnId,
+    baseline,
+    epoch: EPOCH,
+  });
 
-  it('requires an idle reading STRICTLY newer than the lock', () => {
-    const held = { clientTurnId: 'turn-A', baseline: 5 };
-    expect(releasesLock(held, at(6))).toBe(true);
-    expect(releasesLock(held, at(5))).toBe(false);
-    expect(releasesLock(held, at(4))).toBe(false);
+  it('requires an idle read DISPATCHED strictly after the lock', () => {
+    expect(releasesLock(heldAt(5), at(6))).toBe(true);
+    expect(releasesLock(heldAt(5), at(5))).toBe(false);
+    expect(releasesLock(heldAt(5), at(4))).toBe(false);
   });
 
   it('never releases on unknown or awaiting, however fresh', () => {
-    const held = { clientTurnId: 'turn-A', baseline: 1 };
-    expect(releasesLock(held, at(99, { verdict: 'unknown' }))).toBe(false);
-    expect(releasesLock(held, at(99, { verdict: 'awaiting' }))).toBe(false);
+    expect(releasesLock(heldAt(1), at(99, { verdict: 'unknown' }))).toBe(false);
+    expect(releasesLock(heldAt(1), at(99, { verdict: 'awaiting' }))).toBe(false);
   });
 
-  it('releases on the locked id being answered, at any generation', () => {
-    const held = { clientTurnId: 'turn-A', baseline: 5 };
+  it('releases on the locked id being answered, at any ticket', () => {
     expect(
-      releasesLock(held, at(1, { verdict: 'unknown', answeredTurnIds: ['turn-A'] })),
+      releasesLock(heldAt(5), at(1, { verdict: 'unknown', answeredTurnIds: ['turn-A'] })),
     ).toBe(true);
     expect(
-      releasesLock(held, at(1, { verdict: 'unknown', answeredTurnIds: ['turn-B'] })),
+      releasesLock(heldAt(5), at(1, { verdict: 'unknown', answeredTurnIds: ['turn-B'] })),
     ).toBe(false);
   });
 
   it('has no identity rule to apply when the lock carries no id', () => {
-    const held = { clientTurnId: null, baseline: 5 };
     expect(
-      releasesLock(held, at(1, { verdict: 'unknown', answeredTurnIds: ['turn-A'] })),
+      releasesLock(heldAt(5, null), at(1, { verdict: 'unknown', answeredTurnIds: ['turn-A'] })),
     ).toBe(false);
+  });
+
+  it('ignores a reading from ANOTHER auth epoch under BOTH rules', () => {
+    // Round 15, Important 2. The previous tenant's in-flight GET can still settle
+    // here; whatever it says is about their session, not this one.
+    const foreign = { epoch: 'epoch-2' };
+    expect(releasesLock(heldAt(5), at(6, foreign))).toBe(false);
+    expect(
+      releasesLock(
+        heldAt(5),
+        at(6, { ...foreign, verdict: 'unknown', answeredTurnIds: ['turn-A'] }),
+      ),
+    ).toBe(false);
+    // ...and a signed-out reading is not this lock's either.
+    expect(releasesLock(heldAt(5), at(6, { epoch: null }))).toBe(false);
   });
 });
 
 describe('the lock baseline', () => {
-  it('is the generation current when lock() is called', () => {
+  it('covers every read already DISPATCHED when lock() is called', () => {
     observe(idleRead());
-    const before = currentObservationGeneration();
+    const before = currentReadHighWaterMark();
     const { result } = renderHook(() => useAwaitingReplyLock());
 
     observe(idleRead());
-    // A reading that lands between the mount and the lock still predates the lock.
+    // A reading that lands between the mount and the lock still predates it.
     act(() => result.current.lock('turn-A'));
 
-    expect(currentObservationGeneration()).toBe(before + 1);
+    expect(currentReadHighWaterMark()).toBe(before + 1);
     expect(result.current.locked).toBe(true);
   });
 });

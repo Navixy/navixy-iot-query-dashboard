@@ -8,7 +8,10 @@ import { useAuth } from '@/contexts/AuthContext';
 import { getAuthSessionId, getAuthToken, getTabSessionToken } from '@/lib/authSession';
 import { apiService } from '@/services/api';
 import { countMatchingUserTurns, sessionIsAwaitingReply } from '@/components/ai-chat/turnDelivery';
-import { recordSessionObservation } from '@/components/ai-chat/sessionObservation';
+import {
+  beginSessionRead,
+  recordSessionObservation,
+} from '@/components/ai-chat/sessionObservation';
 import type {
   AgentChatRequest,
   AgentChatResponse,
@@ -85,15 +88,18 @@ export interface AgentChatMutationContext {
  *  it only ever moves on THIS tab's own auth transitions; a null anchor (torn
  *  down) fails closed inside api.ts rather than falling back to shared storage. */
 export async function fetchAgentSession(): Promise<AgentSessionResponse> {
+  // Draw the ticket BEFORE dispatch (review !62 round 14, Important 1; round 15,
+  // Important 1). Downstream nothing can tell a fresh read from a re-publish:
+  // structural sharing keeps the OLD object when a refetch is deep-equal, and
+  // setQueryData makes an old response look new. The composer lock's release turns
+  // on that distinction — and on this read being ordered by when it was ASKED,
+  // since a slow GET can return long after its answer stopped being current.
+  const ticket = beginSessionRead();
   const response = await apiService.getAgentSession(getTabSessionToken());
   if (response.error) {
     throw new Error(response.error.message);
   }
-  // Stamp the reading HERE — where it arrived (review !62 round 14, Important 1).
-  // Downstream nothing can tell a fresh read from a re-publish: structural sharing
-  // keeps the OLD object when a refetch is deep-equal, and setQueryData makes an
-  // old response look new. The composer lock's release turns on that distinction.
-  recordSessionObservation(response.data!);
+  recordSessionObservation(ticket, response.data!);
   return response.data!;
 }
 

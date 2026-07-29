@@ -21,6 +21,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { beginAuthSession, endAuthSession } from '@/lib/authSession';
+import { getSessionObservation } from '@/components/ai-chat/sessionObservation';
 import type { AgentSessionResponse, AgentTurn } from '@/types/agent';
 
 const authState = vi.hoisted(() => ({
@@ -56,6 +57,25 @@ const TAB_TOKEN = 'tab-token';
 /** The session payload the next GET /session will return. Mutated between
  *  phases so a test can say "and now the server answers differently". */
 let sessionPayload: AgentSessionResponse;
+
+/** Set while the NEXT GET /session is to be held open (review !62 round 15,
+ *  Important 1). The held call answers with the payload as it stood AT DISPATCH,
+ *  which is the whole point: a slow response carries an old snapshot of the
+ *  server, however new it looks when it finally lands. */
+let holdNextRead = false;
+let releaseHeldRead: (() => void) | null = null;
+
+function deferNextRead() {
+  holdNextRead = true;
+}
+
+/** Let a held GET /session finally answer. */
+function landHeldRead() {
+  if (!releaseHeldRead) throw new Error('no read is being held');
+  const release = releaseHeldRead;
+  releaseHeldRead = null;
+  release();
+}
 
 function session(overrides: Partial<AgentSessionResponse> = {}): AgentSessionResponse {
   return {
@@ -116,12 +136,13 @@ function send(text = 'build me a dashboard') {
   fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 }
 
-/** The client_turn_id the page minted for the (single) turn it sent. */
-function sentTurnId(): string {
-  const [request] = vi.mocked(apiService.agentChat).mock.calls[0] as [
-    { client_turn_id?: string | null },
-  ];
-  const id = request.client_turn_id;
+/** The client_turn_id the page minted for the nth turn it sent. */
+function sentTurnId(nth = 0): string {
+  const call = vi.mocked(apiService.agentChat).mock.calls[nth] as
+    | [{ client_turn_id?: string | null }]
+    | undefined;
+  if (!call) throw new Error(`the page sent no turn #${nth}`);
+  const id = call[0].client_turn_id;
   if (!id) throw new Error('the page sent no client_turn_id');
   return id;
 }
@@ -140,10 +161,19 @@ beforeEach(() => {
   };
 
   sessionPayload = session();
+  holdNextRead = false;
+  releaseHeldRead = null;
   vi.mocked(apiService.getAgentSession).mockReset();
-  vi.mocked(apiService.getAgentSession).mockImplementation(async () => ({
-    data: sessionPayload,
-  }));
+  vi.mocked(apiService.getAgentSession).mockImplementation(async () => {
+    if (!holdNextRead) return { data: sessionPayload };
+    holdNextRead = false;
+    // Snapshot the payload HERE, at dispatch — a delayed answer must not report
+    // whatever the server happens to say by the time it arrives.
+    const dispatched = sessionPayload;
+    return new Promise((resolve) => {
+      releaseHeldRead = () => resolve({ data: dispatched });
+    });
+  });
   vi.mocked(apiService.agentChat).mockReset();
   vi.mocked(apiService.getAgentTurnStatus).mockReset();
   // Default: a tenant with no durable receipts, where 'unknown' is uninformative
@@ -292,6 +322,84 @@ describe('AiChat — the composer lock, end to end', () => {
     await settle(3000);
 
     expect(composerIsUsable()).toBe(true);
+  });
+
+  it('ignores a read DISPATCHED before the lock, however late it lands', async () => {
+    // THE ROUND-15 RACE, end to end. A poll's GET leaves while the first turn is
+    // still locked and then stalls on the network. By the time it answers, that
+    // lock is gone, a SECOND turn has failed and taken its own lock — and the
+    // stalled response is a snapshot of a server that had never heard of it.
+    // Round 14 stamped readings on ARRIVAL, so this one landed above the new
+    // lock's baseline and opened the composer for a turn the agent was still
+    // working on.
+    sessionPayload = session({ awaiting_reply: false });
+    vi.mocked(apiService.agentChat).mockRejectedValue(new Error('network down'));
+
+    renderChat();
+    await settle();
+    send('first turn');
+    await settle();
+    await settle(3000);
+    expect(composerIsUsable()).toBe(false);
+
+    // The 5-second poll goes out and STALLS. Its view of the server is this one.
+    deferNextRead();
+    await settle(5000);
+    // The next poll overtakes it, and that one is genuinely newer than the lock.
+    await settle(5000);
+    expect(composerIsUsable()).toBe(true);
+
+    send('second turn');
+    await settle();
+    await settle(3000);
+    expect(vi.mocked(apiService.agentChat)).toHaveBeenCalledTimes(2);
+    expect(composerIsUsable()).toBe(false);
+
+    // ...and only NOW does the stalled read answer.
+    landHeldRead();
+    await settle();
+
+    expect(composerIsUsable()).toBe(false);
+
+    // Held, not stuck: a read dispatched after this lock still frees it.
+    await settle(5000);
+    expect(composerIsUsable()).toBe(true);
+  });
+
+  it('does not let a signed-out tenant read release the next tenant lock', async () => {
+    // queryClient.clear() drops the QUERY, not the request — there is no
+    // AbortSignal on it — so the previous tenant's GET really does settle inside
+    // the next tenant's page (round 15, Important 2).
+    deferNextRead();
+    renderChat();
+    await settle();
+
+    cleanup();
+    endAuthSession();
+    localStorage.setItem('auth_token', 'token-b');
+    const epochB = beginAuthSession('token-b');
+    authState.current = {
+      user: { id: 'u2', email: 'other@example.com', role: 'editor' },
+      loading: false,
+      authSessionId: epochB,
+    };
+
+    sessionPayload = session({ awaiting_reply: false });
+    vi.mocked(apiService.agentChat).mockRejectedValue(new Error('network down'));
+    renderChat();
+    await settle();
+    send();
+    await settle();
+    await settle(3000);
+    expect(composerIsUsable()).toBe(false);
+
+    const observedByB = getSessionObservation();
+    landHeldRead(); // the first tenant's GET finally answers: idle
+    await settle();
+
+    expect(composerIsUsable()).toBe(false);
+    // Not merely outranked — never admitted. It was never this tenant's answer.
+    expect(getSessionObservation()).toBe(observedByB);
   });
 
   it('stops polling once nothing is locked', async () => {
