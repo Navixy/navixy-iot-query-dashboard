@@ -65,8 +65,7 @@ import {
   Area,
 } from 'recharts';
 import { chartColors } from '@/lib/chartColors';
-import type { ChartSeries } from '@/lib/chartSeries';
-import { assignSeriesKeys, buildLineChartSeries, detectSeriesColumnIndex } from '@/lib/chartSeries';
+import { buildBarChartSeries, buildLineChartSeries } from '@/lib/chartSeries';
 import { formatChartAxisLabel } from '@/utils/datetime';
 import { TablePanel } from './TablePanel';
 import { TextPanel } from './visualizations/TextPanel';
@@ -1166,88 +1165,48 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     const showLegend = visualization?.showLegend !== false;
     const legendPosition = visualization?.legendPosition || 'bottom';
 
-    // Detect a long-format series column (col 3) via the shared helper so the
-    // same query groups identically in bar and line/time-series panels (DO-273).
-    // `seriesColumn` lets a dashboard override the detector when the shape is
-    // ambiguous (a numeric grouping key reads like a second metric column).
-    const seriesColumnIndex = detectSeriesColumnIndex(
-      data.columns,
+    // Pivot through the shared helper so the same query groups identically in
+    // bar and line/time-series panels (DO-273). `seriesColumn` lets a dashboard
+    // override the detector when the shape is ambiguous (a numeric grouping key
+    // reads like a second metric column).
+    //
+    // Values live under generated keys, never under the series label itself: a
+    // group named "__proto__" would otherwise be written onto Object.prototype
+    // instead of onto the row, and one named like the category key would
+    // overwrite the category. The label reaches the legend via each Bar's
+    // `name` — see assignSeriesKeys in @/lib/chartSeries.
+    const { categoryKey, series, isGrouped, chartData: pivoted } = buildBarChartSeries(
+      data.columns || [],
       data.rows,
       visualization?.seriesColumn,
     );
+    let chartData = pivoted;
 
-    const categoryColumnIndex = 0;
-    const valueColumnIndex = 1;
+    // One bar per category is a plain total; several bars sharing a category are
+    // what a legend names, what a stack stacks, and what sorting has to add up.
+    const isMultiSeries = isGrouped || series.length > 1;
 
-    // Process data
-    let chartData: Array<Record<string, number | string>> = [];
-    // Values are stored under generated keys, never under the series label
-    // itself: a group named "__proto__" would otherwise be written onto
-    // Object.prototype instead of onto the row, and one named "category" would
-    // overwrite the x value. The label reaches the legend via each Bar's
-    // `name` — see assignSeriesKeys.
-    let series: ChartSeries[] = [];
-
-    if (seriesColumnIndex !== null) {
-      series = assignSeriesKeys(
-        data.rows.map(row => String(row[seriesColumnIndex])),
-      );
-      const keyByLabel = new Map(series.map(({ key, label }) => [label, key]));
-
-      // Group data by category and series
-      const byCategory = new Map<string, Record<string, number>>();
-      data.rows.forEach((row) => {
-        const category = String(row[categoryColumnIndex]);
-        let group = byCategory.get(category);
-        if (!group) {
-          group = {};
-          byCategory.set(category, group);
-        }
-        group[keyByLabel.get(String(row[seriesColumnIndex]))!] =
-          Number(row[valueColumnIndex]) || 0;
-      });
-
-      // Convert to chart data format. Every series gets a slot in every
-      // category: a bar chart draws an absent pair as zero, not as a hole.
-      chartData = Array.from(byCategory.entries()).map(([category, group]) => {
-        const item: Record<string, number | string> = { category };
+    if (isMultiSeries && stacking === 'percent') {
+      chartData = chartData.map((item) => {
+        const total = series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
+        const normalized: Record<string, string | number> = { [categoryKey]: item[categoryKey]! };
         series.forEach(({ key }) => {
-          item[key] = group[key] || 0;
+          normalized[key] = total > 0 ? ((Number(item[key]) || 0) / total) * 100 : 0;
         });
-        return item;
-      });
-
-      // Normalize to percentages if percent stacking
-      if (stacking === 'percent') {
-        chartData = chartData.map(item => {
-          const total = series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
-          const normalized: Record<string, number | string> = { category: item.category };
-          series.forEach(({ key }) => {
-            normalized[key] = total > 0 ? ((Number(item[key]) || 0) / total) * 100 : 0;
-          });
-          return normalized;
-        });
-      }
-    } else {
-      // Simple category-value format
-      chartData = data.rows.map((row) => {
-        const category = String(row[categoryColumnIndex]);
-        const value = Number(row[valueColumnIndex]) || 0;
-        return { category, value };
+        return normalized;
       });
     }
 
     // Apply sorting
     if (sortOrder !== 'none') {
-      const hasMultipleSeries = seriesColumnIndex !== null;
-      // Grouped bars sort by the height of the whole group, summed over the
-      // series keys rather than over every own property — the row also carries
-      // its category, which is not a value.
-      const groupTotal = (item: Record<string, number | string>) =>
+      // Bars sort by the height of the whole group, summed over the series keys
+      // rather than over every own property — the row also carries its
+      // category, which is not a value.
+      const groupTotal = (item: Record<string, string | number>) =>
         series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
-      chartData.sort((a, b) => {
-        const aVal = hasMultipleSeries ? groupTotal(a) : a.value;
-        const bVal = hasMultipleSeries ? groupTotal(b) : b.value;
+      chartData = [...chartData].sort((a, b) => {
+        const aVal = groupTotal(a);
+        const bVal = groupTotal(b);
 
         if (sortOrder === 'asc') {
           return aVal > bVal ? 1 : -1;
@@ -1269,11 +1228,9 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
       if (stacking === 'percent') {
         valueAxisDomain = [0, 100];
       } else {
-        const values = seriesColumnIndex === null
-          ? chartData.map(d => Number(d.value) || 0)
-          : chartData.flatMap(d =>
-            series.map(({ key }) => Number(d[key]) || 0),
-          );
+        const values = chartData.flatMap(d =>
+          series.map(({ key }) => Number(d[key]) || 0),
+        );
         const maxVal = Math.max(...values);
         // Add 5% padding above max value - matching working test configuration
         const paddedMax = Math.ceil(maxVal * 1.05);
@@ -1305,7 +1262,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
         >
           <CartesianGrid strokeDasharray="3 3" stroke="#ffffff14" />
           <XAxis
-            dataKey="category"
+            dataKey={ categoryKey }
             angle={ -45 }
             textAnchor="end"
             height={ 80 }
@@ -1346,53 +1303,38 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
               return [value.toLocaleString(), name];
             } }
           />
-          { showLegend && seriesColumnIndex !== null && (
+          { showLegend && isMultiSeries && (
             <Legend
               wrapperStyle={ getLegendWrapperStyle() }
               verticalAlign={ legendPosition === 'top' || legendPosition === 'bottom' ? legendPosition : 'middle' }
               align={ legendPosition === 'left' || legendPosition === 'right' ? legendPosition : 'center' }
             />
           ) }
-          { seriesColumnIndex !== null ? (
-            // Multiple series - render multiple Bar components
-            series.map(({ key, label }, index) => (
-              <Bar
-                key={ key }
-                dataKey={ key }
-                name={ label }
-                stackId={ stacking !== 'none' ? 'stack' : undefined }
-                fill={ colors[index % colors.length] }
-              >
-                { showValues && (
-                  <LabelList
-                    position="top"
-                    formatter={ (value: number | string) => {
-                      if (stacking === 'percent') {
-                        return `${ Number(value).toFixed(1) }%`;
-                      }
-                      return value.toLocaleString();
-                    } }
-                    style={ { fill: 'var(--text-primary)', fontSize: 12 } }
-                  />
-                ) }
-              </Bar>
-            ))
-          ) : (
-            // Single series
+          { series.map(({ key, label }, index) => (
             <Bar
-              dataKey="value"
-              name={ panel.title }
-              fill={ colors[0] }
+              key={ key }
+              dataKey={ key }
+              // A lone bar is the panel's own measure, so it keeps the panel's
+              // name in the tooltip; among several, only the column name says
+              // which bar this is.
+              name={ isMultiSeries ? label : panel.title }
+              stackId={ stacking !== 'none' ? 'stack' : undefined }
+              fill={ colors[index % colors.length] }
             >
               { showValues && (
                 <LabelList
                   position="top"
-                  formatter={ (value: number | string) => value.toLocaleString() }
+                  formatter={ (value: number | string) => {
+                    if (isMultiSeries && stacking === 'percent') {
+                      return `${ Number(value).toFixed(1) }%`;
+                    }
+                    return value.toLocaleString();
+                  } }
                   style={ { fill: 'var(--text-primary)', fontSize: 12 } }
                 />
               ) }
             </Bar>
-          ) }
+          )) }
         </RechartsBarChart>
       </ResponsiveContainer>
     );

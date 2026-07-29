@@ -48,10 +48,17 @@ interface ColumnMeta {
  * Panel-level override for which column groups the result (DO-273).
  *
  * A column name or a column index (>= 2 — index 0 is the x axis and index 1 the
- * value), or the string `'none'` to plot the result as wide format. Anything
- * that does not resolve to a real column falls back to the heuristic, so a typo
- * in hand-edited dashboard JSON degrades to the old behaviour instead of
- * blanking the panel.
+ * value), or one of two reserved words: `'none'` to plot the result as wide
+ * format, `'auto'` to detect the shape from the data. Anything that does not
+ * resolve to a real column falls back to the heuristic, so a typo in
+ * hand-edited dashboard JSON degrades to the old behaviour instead of blanking
+ * the panel.
+ *
+ * A column actually named `auto` or `none` can only be selected by its index —
+ * the reserved words win. Both are written by the panel editor rather than
+ * being merely tolerated: `'auto'` has to be a value one can *store*, because
+ * the panel save merges the editor's config over the old one key by key, so an
+ * override cleared by removing the key would come straight back.
  */
 export type SeriesColumnSetting = string | number;
 
@@ -72,7 +79,9 @@ function resolveSeriesColumnSetting(
   if (typeof setting !== 'string') return 'auto';
   const trimmed = setting.trim();
   if (trimmed.length === 0) return 'auto';
-  if (trimmed.toLowerCase() === 'none') return 'none';
+  const reserved = trimmed.toLowerCase();
+  if (reserved === 'none') return 'none';
+  if (reserved === 'auto') return 'auto';
   const exact = columns.findIndex((column) => column?.name === trimmed);
   const index = exact === -1
     // Unquoted identifiers come back from Postgres lower-cased, so a config
@@ -192,10 +201,66 @@ export function assignSeriesKeys(labels: Iterable<string>): ChartSeries[] {
   return series;
 }
 
+/**
+ * Parse a cell into a bar's height. A bar has no way to draw "no value" — it is
+ * a height, and an unreadable one is no bar — so anything non-numeric is zero,
+ * where a line leaves a gap ({@link toPlottableNumber}).
+ */
+function toBarNumber(raw: unknown): number {
+  return Number(raw) || 0;
+}
+
 /** Parse a cell into a plottable number, or null when it is not one. */
 function toPlottableNumber(raw: unknown): number | null {
   const value = typeof raw === 'number' ? raw : parseFloat(String(raw));
   return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The label for each value column — every column but the first, which is the
+ * x axis / category. When the result carries no column metadata the width comes
+ * from the rows, the only thing left to read it from.
+ */
+function valueColumnLabels(
+  columns: ReadonlyArray<ColumnMeta>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): string[] {
+  const labels: string[] = [];
+  if (columns.length > 0) {
+    for (let i = 1; i < columns.length; i++) {
+      labels.push(columns[i]?.name || `series${ i }`);
+    }
+  } else {
+    const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    for (let i = 1; i < width; i++) {
+      labels.push(`value${ i }`);
+    }
+  }
+  return labels;
+}
+
+/**
+ * One series per value column, for a result that is not grouped by a series
+ * column.
+ *
+ * Keyed positionally rather than through {@link assignSeriesKeys}: here a
+ * series *is* a column, so two columns that share a name (`SELECT a.ts, b.ts`)
+ * are still two series, and de-duplicating the labels would shift every value
+ * after them into the wrong series.
+ *
+ * A wide result can have no value columns at all (a single-column query, or no
+ * rows to read a width from), which leaves nothing to plot; the grouped branch
+ * always yields >= 1 series for non-empty rows.
+ */
+function wideFormatSeries(
+  columns: ReadonlyArray<ColumnMeta>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+): ChartSeries[] {
+  if (rows.length === 0) return [];
+  return valueColumnLabels(columns, rows).map((label, index) => ({
+    key: seriesKeyAt(index),
+    label,
+  }));
 }
 
 /**
@@ -278,27 +343,7 @@ export function buildLineChartSeries(
     };
   }
 
-  // A wide result can have no value columns at all (a single-column query, or
-  // no rows to read a width from), which leaves nothing to plot; the long
-  // branch always yields >= 1 series for non-empty rows.
-  const labels: string[] = [];
-  if (columns.length > 0) {
-    for (let i = 1; i < columns.length; i++) {
-      labels.push(columns[i]?.name || `series${ i }`);
-    }
-  } else {
-    const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
-    for (let i = 1; i < width; i++) {
-      labels.push(`value${ i }`);
-    }
-  }
-  // Keyed positionally rather than through assignSeriesKeys: here a series *is*
-  // a column, so two columns that share a name (`SELECT a.ts, b.ts`) are still
-  // two series, and de-duplicating the labels would shift every value after
-  // them into the wrong series.
-  const series = rows.length > 0
-    ? labels.map((label, index) => ({ key: seriesKeyAt(index), label }))
-    : [];
+  const series = wideFormatSeries(columns, rows);
 
   const chartData = rows.map((row) => {
     const point: Record<string, unknown> = { [X_KEY]: row[0] };
@@ -314,4 +359,78 @@ export function buildLineChartSeries(
     series,
     isLongFormat: false,
   };
+}
+
+/** A bar panel's plot-ready data. */
+export interface BarChartSeries {
+  /** The key holding the category in every {@link chartData} entry. */
+  categoryKey: string;
+  /** One entry per bar group, carrying every series' value in that group. */
+  chartData: Array<Record<string, string | number>>;
+  /** The series to plot, in the order that also assigns their colours. */
+  series: ChartSeries[];
+  /**
+   * True when the series came from a grouping column rather than from separate
+   * value columns. It says how the bars were built, not how many there are: a
+   * grouped result with a single group is still grouped, and keeps the legend a
+   * one-group query has always had.
+   */
+  isGrouped: boolean;
+}
+
+/**
+ * A bar chart's counterpart to {@link buildLineChartSeries}: the same two
+ * shapes, pivoted the same way, so one query groups identically in both panels.
+ *
+ * Grouped ([category, value, series]) merges rows into one entry per category,
+ * with a slot for every series — a bar chart draws an absent pair as zero
+ * rather than as a hole, unlike a line, which leaves a gap.
+ *
+ * Wide ([category, value1, value2, ...]) draws one bar per value column. Bars
+ * used to read only column 2 here, so `[category, metric_a, metric_b]` silently
+ * plotted `metric_a` alone — and `seriesColumn: 'none'`, whose whole purpose is
+ * to ask for exactly this shape, lost every column it was meant to reveal.
+ */
+export function buildBarChartSeries(
+  columns: ReadonlyArray<ColumnMeta>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  seriesColumn?: SeriesColumnSetting,
+): BarChartSeries {
+  const seriesColumnIndex = detectSeriesColumnIndex(columns, rows, seriesColumn);
+
+  if (seriesColumnIndex !== null) {
+    const series = assignSeriesKeys(
+      rows.map((row) => String(row[seriesColumnIndex])),
+    );
+    const keyByLabel = new Map(series.map(({ key, label }) => [label, key]));
+    const byCategory = new Map<string, Record<string, string | number>>();
+    for (const row of rows) {
+      const category = String(row[0]);
+      let group = byCategory.get(category);
+      if (!group) {
+        group = { [X_KEY]: category };
+        byCategory.set(category, group);
+      }
+      group[keyByLabel.get(String(row[seriesColumnIndex]))!] = toBarNumber(row[1]);
+    }
+    const chartData = Array.from(byCategory.values()).map((group) => {
+      const item: Record<string, string | number> = { [X_KEY]: group[X_KEY]! };
+      for (const { key } of series) {
+        item[key] = group[key] ?? 0;
+      }
+      return item;
+    });
+    return { categoryKey: X_KEY, chartData, series, isGrouped: true };
+  }
+
+  const series = wideFormatSeries(columns, rows);
+  const chartData = rows.map((row) => {
+    const item: Record<string, string | number> = { [X_KEY]: String(row[0]) };
+    series.forEach(({ key }, index) => {
+      item[key] = toBarNumber(row[index + 1]);
+    });
+    return item;
+  });
+
+  return { categoryKey: X_KEY, chartData, series, isGrouped: false };
 }

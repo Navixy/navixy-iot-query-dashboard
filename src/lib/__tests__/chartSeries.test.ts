@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   assignSeriesKeys,
+  buildBarChartSeries,
   buildLineChartSeries,
   detectSeriesColumnIndex,
   SERIES_COLUMN_INDEX,
+  type BarChartSeries,
+  type ChartSeries,
   type LineChartSeries,
 } from '../chartSeries';
 
@@ -19,9 +22,13 @@ const TIME_COLUMNS = [
  * label mapping is asserted directly in "keys are generated, never taken from
  * the data" and read back through here everywhere else.
  */
-function byLabel({ xKey, chartData, series }: LineChartSeries) {
+function pointsByLabel(
+  axisKey: string,
+  chartData: ReadonlyArray<Record<string, unknown>>,
+  series: ReadonlyArray<ChartSeries>,
+) {
   return chartData.map((point) => {
-    const readable: Record<string, unknown> = { x: point[xKey] };
+    const readable: Record<string, unknown> = { x: point[axisKey] };
     for (const { key, label } of series) {
       if (key in point) readable[label] = point[key];
     }
@@ -29,7 +36,13 @@ function byLabel({ xKey, chartData, series }: LineChartSeries) {
   });
 }
 
-const labelsOf = (result: LineChartSeries) => result.series.map(s => s.label);
+const byLabel = ({ xKey, chartData, series }: LineChartSeries) =>
+  pointsByLabel(xKey, chartData, series);
+
+const barsByLabel = ({ categoryKey, chartData, series }: BarChartSeries) =>
+  pointsByLabel(categoryKey, chartData, series);
+
+const labelsOf = (result: LineChartSeries | BarChartSeries) => result.series.map(s => s.label);
 
 describe('detectSeriesColumnIndex', () => {
   it('treats a repeating text 3rd column as the series key', () => {
@@ -133,6 +146,23 @@ describe('detectSeriesColumnIndex — explicit seriesColumn', () => {
     expect(detectSeriesColumnIndex(TIME_COLUMNS, grouped, 'none')).toBeNull();
     expect(labelsOf(buildLineChartSeries(TIME_COLUMNS, grouped, 'none')))
       .toEqual(['value', 'series']);
+  });
+
+  it('detects when set to "auto", the word the editor stores', () => {
+    // Not the same as an absent setting by accident: the panel editor has to be
+    // able to *store* "detect", because saving a panel merges its config over
+    // the stored one key by key — an override cleared by removing the key would
+    // come back from the old config on the very next save.
+    const grouped = [
+      ['2026-07-01T10:00:00Z', 1, 'Sensor A'],
+      ['2026-07-01T10:01:00Z', 2, 'Sensor B'],
+      ['2026-07-01T10:02:00Z', 3, 'Sensor A'],
+      ['2026-07-01T10:03:00Z', 4, 'Sensor B'],
+    ];
+    expect(detectSeriesColumnIndex(TIME_COLUMNS, grouped, 'auto')).toBe(SERIES_COLUMN_INDEX);
+    expect(detectSeriesColumnIndex(TIME_COLUMNS, grouped, 'Auto')).toBe(SERIES_COLUMN_INDEX);
+    // And on data detection reads as wide, "auto" leaves it wide.
+    expect(detectSeriesColumnIndex(columns, rows, 'auto')).toBeNull();
   });
 
   it('falls back to detection when the setting names no usable column', () => {
@@ -354,6 +384,134 @@ describe('buildLineChartSeries — wide format', () => {
     const result = buildLineChartSeries(columns, []);
     expect(result.chartData).toEqual([]);
     expect(result.series).toEqual([]);
+  });
+});
+
+describe('buildBarChartSeries', () => {
+  const METRIC_COLUMNS = [
+    { name: 'region', type: 'text' },
+    { name: 'metric_a', type: 'numeric' },
+    { name: 'metric_b', type: 'numeric' },
+  ];
+  const METRIC_ROWS = [
+    ['North', 10, 1],
+    ['South', 20, 2],
+  ];
+
+  it('plots every value column when set to "none"', () => {
+    // The contract seriesColumn: 'none' states — one series per value column.
+    // Bars used to read column 2 alone, so metric_b vanished from the chart
+    // that had explicitly asked for it.
+    const result = buildBarChartSeries(METRIC_COLUMNS, METRIC_ROWS, 'none');
+
+    expect(labelsOf(result)).toEqual(['metric_a', 'metric_b']);
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', metric_a: 10, metric_b: 1 },
+      { x: 'South', metric_a: 20, metric_b: 2 },
+    ]);
+    expect(result.isGrouped).toBe(false);
+  });
+
+  it('plots every value column the detector reads as wide, with no override', () => {
+    // The same loss without anyone asking for it: [category, avg, count] is
+    // wide by detection, and the count column was dropped on the floor.
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'avg_speed', type: 'numeric' },
+        { name: 'sample_count', type: 'integer' },
+      ],
+      [['North', 42, 7], ['South', 51, 9]],
+    );
+
+    expect(labelsOf(result)).toEqual(['avg_speed', 'sample_count']);
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', avg_speed: 42, sample_count: 7 },
+      { x: 'South', avg_speed: 51, sample_count: 9 },
+    ]);
+  });
+
+  it('keeps a two-column result a single unnamed-in-legend series', () => {
+    const result = buildBarChartSeries(
+      [{ name: 'region', type: 'text' }, { name: 'total', type: 'integer' }],
+      [['North', 10], ['South', 20]],
+    );
+
+    expect(result.series).toHaveLength(1);
+    // Not grouped and alone: what the panel reads to keep the plain-total look
+    // (no legend, the panel's own title in the tooltip).
+    expect(result.isGrouped).toBe(false);
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', total: 10 },
+      { x: 'South', total: 20 },
+    ]);
+  });
+
+  it('merges rows of a grouped result into one entry per category', () => {
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'total', type: 'integer' },
+        { name: 'vehicle', type: 'text' },
+      ],
+      [
+        ['North', 10, 'Truck'],
+        ['North', 4, 'Van'],
+        ['South', 20, 'Truck'],
+      ],
+    );
+
+    expect(result.isGrouped).toBe(true);
+    // South has no Van row: a bar chart draws that as a zero-height bar, not as
+    // a hole, so every series has a slot in every category.
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', Truck: 10, Van: 4 },
+      { x: 'South', Truck: 20, Van: 0 },
+    ]);
+  });
+
+  it('keeps a group labelled "__proto__" as ordinary data', () => {
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'total', type: 'integer' },
+        { name: 'vehicle', type: 'text' },
+      ],
+      [
+        ['North', 10, '__proto__'],
+        ['North', 4, 'Van'],
+        ['South', 20, '__proto__'],
+        ['South', 6, 'Van'],
+      ],
+    );
+
+    // Asserted key by key rather than through barsByLabel: `__proto__` in an
+    // object literal is prototype syntax, so an expectation written that way
+    // would compare two objects that both silently dropped it.
+    expect(labelsOf(result)).toEqual(['__proto__', 'Van']);
+    const protoKey = result.series[0].key;
+    expect(result.chartData.map(item => [
+      item[result.categoryKey],
+      Object.prototype.hasOwnProperty.call(item, protoKey),
+      item[protoKey],
+    ])).toEqual([
+      ['North', true, 10],
+      ['South', true, 20],
+    ]);
+  });
+
+  it('reads a non-numeric bar height as zero', () => {
+    // A bar is a height; there is no gap to leave, unlike a line.
+    const result = buildBarChartSeries(
+      [{ name: 'region', type: 'text' }, { name: 'total', type: 'integer' }],
+      [['North', null], ['South', 'n/a'], ['East', '20']],
+    );
+
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', total: 0 },
+      { x: 'South', total: 0 },
+      { x: 'East', total: 20 },
+    ]);
   });
 });
 
