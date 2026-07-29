@@ -31,6 +31,7 @@ import {
   reconcileOutcome,
   reconcileReceiptOutcome,
   sessionIsAwaitingReply,
+  sessionPollDelayMs,
   shouldPollSession,
   type ReconcileOutcome,
   type TurnDelivery,
@@ -187,8 +188,8 @@ const AiChat = () => {
 
   // While the server shows an unanswered turn, POLL until its reply lands (finding
   // 4: "retain/poll the received turn until its matching assistant row exists").
-  // Bounded past the 190 s transport ceiling; stops the moment the reply arrives
-  // (serverAwaitingReply flips false) or the page unmounts.
+  // Stops the moment the reply arrives (serverAwaitingReply flips false) or the
+  // page unmounts.
   //
   // ALSO WHILE A MOUNT-LOCAL LOCK IS HELD (review !62 round 14, Important 1). That
   // lock is released only by a reading DISPATCHED after the lock — so a page
@@ -196,19 +197,53 @@ const AiChat = () => {
   // reconciler takes such a lock precisely when the server's own verdict is NOT
   // 'awaiting' (an 'uncertain' turn, or a receipt that outran the transcript),
   // which is exactly when the condition above would have stopped polling.
+  //
+  // AND IT NEVER GIVES UP WHILE STILL LOCKED (round 15, Important 3). A retiring
+  // poll was survivable only if every probe that ran had proved something; failed
+  // probes record no observation and move no dependency here, so an outage longer
+  // than the fast phase used to retire the poll permanently. It slows down instead
+  // (sessionPollDelayMs), pauses while the tab is hidden so an abandoned page costs
+  // nothing, and reads IMMEDIATELY when the tab returns or the network comes back —
+  // those are precisely the moments the answer is likely to have changed.
   const refetchSession = sessionQuery.refetch;
   useEffect(() => {
     if (!shouldPollSession(serverAwaitingReply, awaitingServerReply)) return;
     let attempts = 0;
-    const timer = setInterval(() => {
-      attempts += 1;
-      if (attempts > 48) {
-        clearInterval(timer);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const stop = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const schedule = () => {
+      stop();
+      // Hidden: park until the wake handler brings it back. A background tab
+      // renders nothing, and its timers are throttled by the browser anyway.
+      if (document.visibilityState === 'hidden') return;
+      timer = setTimeout(() => {
+        attempts += 1;
+        void refetchSession();
+        schedule();
+      }, sessionPollDelayMs(attempts));
+    };
+    const wake = () => {
+      if (document.visibilityState === 'hidden') {
+        stop();
         return;
       }
+      attempts += 1;
       void refetchSession();
-    }, 5000);
-    return () => clearInterval(timer);
+      schedule();
+    };
+
+    schedule();
+    window.addEventListener('online', wake);
+    document.addEventListener('visibilitychange', wake);
+    return () => {
+      stop();
+      window.removeEventListener('online', wake);
+      document.removeEventListener('visibilitychange', wake);
+    };
   }, [serverAwaitingReply, awaitingServerReply, refetchSession]);
 
   // D13: the SERVER is authoritative. Seeded from the session query, then

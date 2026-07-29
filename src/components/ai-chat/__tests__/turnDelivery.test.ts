@@ -11,7 +11,9 @@ import {
   resolveAwaitingReply,
   sessionAwaitsReply,
   sessionIsAwaitingReply,
+  sessionPollDelayMs,
   shouldPollSession,
+  FAST_SESSION_POLLS,
   UNCERTAIN_DELIVERY_NOTICE,
 } from '../turnDelivery';
 import type { AgentTurn, ChatBubble } from '@/types/agent';
@@ -487,5 +489,24 @@ describe('shouldPollSession — the page must keep reading while it is locked (r
   it('stops only when neither holds', () => {
     expect(shouldPollSession(false, false)).toBe(false);
     expect(shouldPollSession(true, true)).toBe(true);
+  });
+});
+
+describe('sessionPollDelayMs — the poll slows down but never retires (review !62 round 15)', () => {
+  it('keeps the fast cadence through the whole first phase', () => {
+    expect(sessionPollDelayMs(0)).toBe(5_000);
+    expect(sessionPollDelayMs(FAST_SESSION_POLLS - 1)).toBe(5_000);
+  });
+
+  it('slows down once the fast phase is spent', () => {
+    // Where the old poll cleared its interval and left the lock permanent.
+    expect(sessionPollDelayMs(FAST_SESSION_POLLS)).toBe(30_000);
+  });
+
+  it('never stops, however long the outage runs', () => {
+    // Any ceiling here is the same bug at a longer horizon: a failed probe proves
+    // nothing, so the dependency that would restart the poll never moves.
+    expect(sessionPollDelayMs(10_000)).toBe(30_000);
+    expect(Number.isFinite(sessionPollDelayMs(10_000))).toBe(true);
   });
 });
