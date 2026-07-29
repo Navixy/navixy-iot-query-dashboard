@@ -62,9 +62,15 @@ interface ColumnMeta {
  */
 export type SeriesColumnSetting = string | number;
 
-type ResolvedSetting = number | 'none' | 'auto';
+export type ResolvedSetting = number | 'none' | 'auto';
 
-function resolveSeriesColumnSetting(
+/**
+ * Read a stored {@link SeriesColumnSetting} as the column index it selects, or
+ * one of the two reserved answers. Exported so the panel editor's picker
+ * resolves a saved setting exactly the way the panels do, instead of keeping a
+ * second copy of these rules to drift from.
+ */
+export function resolveSeriesColumnSetting(
   columns: ReadonlyArray<ColumnMeta>,
   setting: SeriesColumnSetting | undefined,
 ): ResolvedSetting {

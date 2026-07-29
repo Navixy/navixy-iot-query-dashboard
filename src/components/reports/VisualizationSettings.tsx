@@ -2,6 +2,8 @@ import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { resolveSeriesColumnSetting, SERIES_COLUMN_INDEX } from '@/lib/chartSeries';
+import type { SeriesColumnSetting } from '@/lib/chartSeries';
 import type { PanelType, VisualizationConfig } from '@/types/dashboard-types';
 
 interface VisualizationSettingsProps {
@@ -20,10 +22,16 @@ interface VisualizationSettingsProps {
  */
 const AUTO_SERIES_COLUMN = 'auto';
 
+const NONE_SERIES_COLUMN = 'none';
+/** Option value prefix for a real column, followed by its index in the result. */
+const COLUMN_OPTION = '#';
+/** Option value for a saved setting this query cannot resolve. */
+const UNRESOLVED_OPTION = '?';
+
 interface SeriesColumnFieldProps {
-  value: string | number | undefined;
+  value: SeriesColumnSetting | undefined;
   columns: string[];
-  onChange: (value: string) => void;
+  onChange: (value: SeriesColumnSetting) => void;
 }
 
 /**
@@ -34,38 +42,79 @@ interface SeriesColumnFieldProps {
  * columns of numbers, and only the author knows which third column is a
  * grouping key. Without this control the override existed only in dashboard
  * JSON, i.e. only for people willing to hand-edit an export.
+ *
+ * Options are keyed by the column's index rather than its name, because a name
+ * does not always identify a column: `SELECT a.value, b.value` repeats one, and
+ * `auto`/`none` are reserved words the config reads before it looks at any
+ * column. Those are exactly the columns the setting's numeric form exists for,
+ * so the picker stores an index for them and a name — which survives the query
+ * being edited — for everything else.
  */
 function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps) {
   // Columns 1 and 2 are the axis and the value, so only a third or later column
-  // can group the result. Names repeat in a result set; the picker offers each
-  // once, matching how a name resolves to the first column that carries it.
-  const groupable = columns.slice(2).filter((name, i, all) => all.indexOf(name) === i);
-  const current = value === undefined || value === null ? AUTO_SERIES_COLUMN : String(value);
-  // A saved setting this query no longer offers — an edited SELECT, a column
-  // index, a hand-written name — stays selectable, so opening the editor and
-  // saving cannot silently drop it.
-  const orphaned =
-    current !== AUTO_SERIES_COLUMN && current !== 'none' && !groupable.includes(current);
+  // can group the result.
+  const groupable = columns
+    .map((name, index) => ({ name, index }))
+    .filter(({ index }) => index >= SERIES_COLUMN_INDEX);
+
+  // Resolved by the panels' own rules, so the picker shows the column the chart
+  // actually groups by rather than a second opinion about the same setting.
+  const resolved = resolveSeriesColumnSetting(columns.map((name) => ({ name })), value);
+  const raw = value === undefined || value === null ? '' : String(value).trim();
+  // A saved setting this query cannot resolve — an edited SELECT, a stale name,
+  // an out-of-range index — stays visible and selected, so opening the editor
+  // and saving cannot silently drop it.
+  const unresolved =
+    resolved === 'auto' && raw !== '' && raw.toLowerCase() !== AUTO_SERIES_COLUMN;
+
+  const current = unresolved
+    ? UNRESOLVED_OPTION
+    : resolved === 'auto' || resolved === 'none'
+      ? resolved
+      : `${ COLUMN_OPTION }${ resolved }`;
+
+  /** How often `name` appears among the result's columns. */
+  const occurrences = (name: string) => columns.filter((other) => other === name).length;
+
+  const labelFor = ({ name, index }: { name: string; index: number }) =>
+    name && occurrences(name) === 1 ? name : `${ name || 'column' } (index ${ index })`;
+
+  const pick = (option: string) => {
+    if (option === AUTO_SERIES_COLUMN || option === NONE_SERIES_COLUMN) {
+      onChange(option);
+      return;
+    }
+    // The unresolved entry is already the value; selecting it changes nothing.
+    if (option === UNRESOLVED_OPTION) return;
+    const index = Number(option.slice(COLUMN_OPTION.length));
+    const name = columns[index] ?? '';
+    const reserved = name.trim().toLowerCase() === AUTO_SERIES_COLUMN
+      || name.trim().toLowerCase() === NONE_SERIES_COLUMN;
+    onChange(!name || reserved || occurrences(name) > 1 ? index : name);
+  };
 
   return (
     <div>
       <Label htmlFor="seriesColumn" className="text-sm font-medium">
         Series Column
       </Label>
-      <Select value={current} onValueChange={onChange}>
+      <Select value={current} onValueChange={pick}>
         <SelectTrigger className="mt-1" id="seriesColumn">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={AUTO_SERIES_COLUMN}>Auto (detect from data)</SelectItem>
-          <SelectItem value="none">None — one series per value column</SelectItem>
-          {orphaned && (
-            <SelectItem value={current}>
-              {current}{columns.length > 0 ? ' (not in this query)' : ''}
+          <SelectItem value={NONE_SERIES_COLUMN}>None — one series per value column</SelectItem>
+          {unresolved && (
+            <SelectItem value={UNRESOLVED_OPTION}>
+              {/^\d+$/.test(raw) ? `column index ${ raw }` : raw}
+              {columns.length > 0 ? ' (not in this query)' : ''}
             </SelectItem>
           )}
-          {groupable.map((name) => (
-            <SelectItem key={name} value={name}>{name}</SelectItem>
+          {groupable.map((column) => (
+            <SelectItem key={column.index} value={`${ COLUMN_OPTION }${ column.index }`}>
+              {labelFor(column)}
+            </SelectItem>
           ))}
         </SelectContent>
       </Select>
@@ -77,9 +126,17 @@ function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps)
       {groupable.length === 0 && (
         <>
           <Input
-            value={orphaned ? current : ''}
-            onChange={(e) => onChange(e.target.value === '' ? AUTO_SERIES_COLUMN : e.target.value)}
-            placeholder="e.g. device_id"
+            value={unresolved ? raw : ''}
+            onChange={(e) => {
+              const typed = e.target.value.trim();
+              if (typed === '') return onChange(AUTO_SERIES_COLUMN);
+              // Digits are the setting's index form, which is what a column
+              // named `auto`/`none` or repeated in the SELECT needs — and the
+              // form this field shows back when the columns are unknown.
+              // Anything else is kept verbatim, so a name can contain spaces.
+              return onChange(/^\d+$/.test(typed) ? Number(typed) : e.target.value);
+            }}
+            placeholder="e.g. device_id, or a column index"
             className="mt-2 h-9 font-mono"
           />
           <p className="text-xs text-[var(--text-secondary)] mt-1">
@@ -105,7 +162,7 @@ export function VisualizationSettings({ panelType, visualization, onChange, colu
     });
   };
 
-  const updateSeriesColumn = (value: string) => updateSetting('seriesColumn', value);
+  const updateSeriesColumn = (value: SeriesColumnSetting) => updateSetting('seriesColumn', value);
 
   // Table-specific settings
   if (panelType === 'table') {
