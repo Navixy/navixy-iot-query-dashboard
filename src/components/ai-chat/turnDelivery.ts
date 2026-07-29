@@ -194,6 +194,32 @@ export function shouldPollSession(
   return serverAwaitingReply || locallyLocked;
 }
 
+/** Probes at the fast cadence before it slows down — 48 x 5 s covers the 190 s
+ *  transport ceiling with margin, so a healthy turn resolves inside this phase. */
+export const FAST_SESSION_POLLS = 48;
+const FAST_POLL_MS = 5_000;
+const SLOW_POLL_MS = 30_000;
+
+/**
+ * How long to wait before the next session poll (review !62 round 15, Important 3).
+ *
+ * The fast phase used to be the WHOLE poll: after 48 attempts the interval was
+ * cleared and nothing re-armed it. That is fine when a probe SUCCEEDS and proves
+ * something — but a probe that fails proves nothing, records no observation and
+ * moves no effect dependency, so 48 failures during a backend outage retired the
+ * poll while the lock it was meant to release was still held. With
+ * refetchOnWindowFocus off, that composer never recovered without a reload.
+ *
+ * So the phase after it is slower, not absent: the lock has no other way out, and
+ * a page that has waited four minutes can afford to ask every thirty seconds.
+ * Unbounded on purpose — every bound here is the same bug at a longer horizon —
+ * and paid for by pausing entirely while the tab is hidden (see AiChat), so an
+ * abandoned tab costs nothing and a returning one is read immediately.
+ */
+export function sessionPollDelayMs(attemptsSoFar: number): number {
+  return attemptsSoFar < FAST_SESSION_POLLS ? FAST_POLL_MS : SLOW_POLL_MS;
+}
+
 /**
  * Fold a DURABLE-RECEIPT lookup into a poll's delivery verdict (review !62 round
  * 7, finding 5b). Only a 'lost' verdict is reconsidered — a positive delivery

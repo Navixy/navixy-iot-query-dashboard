@@ -22,6 +22,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { beginAuthSession, endAuthSession } from '@/lib/authSession';
 import { getSessionObservation } from '@/components/ai-chat/sessionObservation';
+import { FAST_SESSION_POLLS } from '@/components/ai-chat/turnDelivery';
 import type { AgentSessionResponse, AgentTurn } from '@/types/agent';
 
 const authState = vi.hoisted(() => ({
@@ -147,6 +148,12 @@ function sentTurnId(nth = 0): string {
   return id;
 }
 
+/** Drive the tab's visibility the way a browser does. */
+function setVisibility(state: 'visible' | 'hidden') {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
 const getSessionCalls = () => vi.mocked(apiService.getAgentSession).mock.calls.length;
 
 beforeEach(() => {
@@ -186,6 +193,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   endAuthSession();
+  setVisibility('visible');
   vi.useRealTimers();
 });
 
@@ -400,6 +408,67 @@ describe('AiChat — the composer lock, end to end', () => {
     expect(composerIsUsable()).toBe(false);
     // Not merely outranked — never admitted. It was never this tenant's answer.
     expect(getSessionObservation()).toBe(observedByB);
+  });
+
+  it('frees the composer after an outage longer than the fast poll phase', async () => {
+    // Round 15, Important 3. The poll used to stop after 48 attempts. A probe
+    // that FAILS proves nothing, records no observation and moves no dependency
+    // of the poll effect — so an outage spanning the fast phase retired the poll
+    // for good, and with refetchOnWindowFocus off the composer never came back
+    // without a reload.
+    sessionPayload = session({ awaiting_reply: false });
+    vi.mocked(apiService.agentChat).mockRejectedValue(new Error('network down'));
+
+    renderChat();
+    await settle();
+    send();
+    await settle();
+    await settle(3000);
+    expect(composerIsUsable()).toBe(false);
+
+    const beforeOutage = getSessionCalls();
+    vi.mocked(apiService.getAgentSession).mockRejectedValue(new Error('backend down'));
+    await settle(240_000); // the whole fast phase, every probe failing
+
+    expect(getSessionCalls()).toBeGreaterThanOrEqual(beforeOutage + FAST_SESSION_POLLS);
+    expect(composerIsUsable()).toBe(false);
+
+    // The backend comes back.
+    vi.mocked(apiService.getAgentSession).mockImplementation(async () => ({
+      data: sessionPayload,
+    }));
+    await settle(30_000);
+
+    expect(composerIsUsable()).toBe(true);
+  });
+
+  it('parks the poll while the tab is hidden and reads the moment it returns', async () => {
+    // What pays for the poll never giving up: a hidden tab costs nothing, and a
+    // returning one does not wait out a delay to find out it is free.
+    sessionPayload = session({ awaiting_reply: false });
+    vi.mocked(apiService.agentChat).mockRejectedValue(new Error('network down'));
+
+    renderChat();
+    await settle();
+    send();
+    // Hidden BEFORE reconciliation finishes, so the lock — and the poll it
+    // starts — are both taken while the tab is in the background.
+    await act(async () => setVisibility('hidden'));
+    await settle();
+    await settle(3000);
+    expect(composerIsUsable()).toBe(false);
+
+    const whileHidden = getSessionCalls();
+    await settle(60_000);
+
+    expect(getSessionCalls()).toBe(whileHidden);
+    expect(composerIsUsable()).toBe(false);
+
+    await act(async () => setVisibility('visible'));
+    await settle();
+
+    expect(getSessionCalls()).toBeGreaterThan(whileHidden);
+    expect(composerIsUsable()).toBe(true);
   });
 
   it('stops polling once nothing is locked', async () => {
