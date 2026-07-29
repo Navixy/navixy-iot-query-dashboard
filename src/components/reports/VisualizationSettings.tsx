@@ -8,9 +8,91 @@ interface VisualizationSettingsProps {
   panelType: PanelType;
   visualization: VisualizationConfig | undefined;
   onChange: (visualization: VisualizationConfig) => void;
+  /** Result column names from the last query run, in SELECT order. */
+  columns?: string[];
 }
 
-export function VisualizationSettings({ panelType, visualization, onChange }: VisualizationSettingsProps) {
+/**
+ * "Detect the shape from the data" — the same word the config reserves, so the
+ * picker stores a value rather than removing the key. Removing it would not
+ * stick: saving a panel merges the editor's config over the stored one key by
+ * key, and an absent key leaves the old one in place.
+ */
+const AUTO_SERIES_COLUMN = 'auto';
+
+interface SeriesColumnFieldProps {
+  value: string | number | undefined;
+  columns: string[];
+  onChange: (value: string) => void;
+}
+
+/**
+ * Picker for which column splits a chart into series (DO-273).
+ *
+ * The shape is detected from the data by default, which cannot always be right:
+ * `[ts, value, device_id]` and `[ts, avg, sample_count]` are the same three
+ * columns of numbers, and only the author knows which third column is a
+ * grouping key. Without this control the override existed only in dashboard
+ * JSON, i.e. only for people willing to hand-edit an export.
+ */
+function SeriesColumnField({ value, columns, onChange }: SeriesColumnFieldProps) {
+  // Columns 1 and 2 are the axis and the value, so only a third or later column
+  // can group the result. Names repeat in a result set; the picker offers each
+  // once, matching how a name resolves to the first column that carries it.
+  const groupable = columns.slice(2).filter((name, i, all) => all.indexOf(name) === i);
+  const current = value === undefined || value === null ? AUTO_SERIES_COLUMN : String(value);
+  // A saved setting this query no longer offers — an edited SELECT, a column
+  // index, a hand-written name — stays selectable, so opening the editor and
+  // saving cannot silently drop it.
+  const orphaned =
+    current !== AUTO_SERIES_COLUMN && current !== 'none' && !groupable.includes(current);
+
+  return (
+    <div>
+      <Label htmlFor="seriesColumn" className="text-sm font-medium">
+        Series Column
+      </Label>
+      <Select value={current} onValueChange={onChange}>
+        <SelectTrigger className="mt-1" id="seriesColumn">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={AUTO_SERIES_COLUMN}>Auto (detect from data)</SelectItem>
+          <SelectItem value="none">None — one series per value column</SelectItem>
+          {orphaned && (
+            <SelectItem value={current}>
+              {current}{columns.length > 0 ? ' (not in this query)' : ''}
+            </SelectItem>
+          )}
+          {groupable.map((name) => (
+            <SelectItem key={name} value={name}>{name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-[var(--text-secondary)] mt-1">
+        Which column splits the result into series. Set it when a numeric grouping
+        key (a device id) is read as a second metric, or vice versa.
+      </p>
+      {/* No result columns to list yet: name one, the way the filter tab does. */}
+      {groupable.length === 0 && (
+        <>
+          <Input
+            value={orphaned ? current : ''}
+            onChange={(e) => onChange(e.target.value === '' ? AUTO_SERIES_COLUMN : e.target.value)}
+            placeholder="e.g. device_id"
+            className="mt-2 h-9 font-mono"
+          />
+          <p className="text-xs text-[var(--text-secondary)] mt-1">
+            Run <span className="font-medium">Test Query</span> on the SQL tab to pick
+            from this query's columns instead.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+export function VisualizationSettings({ panelType, visualization, onChange, columns = [] }: VisualizationSettingsProps) {
   const settings = visualization || {};
 
   const updateSetting = <K extends keyof VisualizationConfig>(
@@ -22,6 +104,8 @@ export function VisualizationSettings({ panelType, visualization, onChange }: Vi
       [key]: value,
     });
   };
+
+  const updateSeriesColumn = (value: string) => updateSetting('seriesColumn', value);
 
   // Table-specific settings
   if (panelType === 'table') {
@@ -213,6 +297,12 @@ export function VisualizationSettings({ panelType, visualization, onChange }: Vi
             </p>
           </div>
 
+          <SeriesColumnField
+            value={settings.seriesColumn}
+            columns={columns}
+            onChange={updateSeriesColumn}
+          />
+
           <div>
             <Label htmlFor="stacking" className="text-sm font-medium">
               Stacking Mode
@@ -370,7 +460,13 @@ export function VisualizationSettings({ panelType, visualization, onChange }: Vi
       <div className="space-y-6">
         <div className="space-y-4">
           <h3 className="text-sm font-semibold text-[var(--text-primary)]">Line Chart Display Options</h3>
-          
+
+          <SeriesColumnField
+            value={settings.seriesColumn}
+            columns={columns}
+            onChange={updateSeriesColumn}
+          />
+
           <div>
             <Label htmlFor="lineStyle" className="text-sm font-medium">
               Line Style
