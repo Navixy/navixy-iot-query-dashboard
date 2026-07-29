@@ -213,12 +213,29 @@ export function assignSeriesKeys(labels: Iterable<string>): ChartSeries[] {
  * where a line leaves a gap ({@link toPlottableNumber}).
  */
 function toBarNumber(raw: unknown): number {
-  return Number(raw) || 0;
+  return toPlottableNumber(raw) ?? 0;
 }
 
-/** Parse a cell into a plottable number, or null when it is not one. */
+/**
+ * Parse a cell into a plottable number, or null when it is not one.
+ *
+ * The *whole* cell has to be the number. A prefix parser reads `'3 days'` as 3,
+ * `'42 km/h'` as 42 and a firmware `'2.1.0'` as 2.1: an ordinary description
+ * passes for a measurement, and the truncated first token of it gets plotted.
+ * Numeric strings still parse, because that is how pg hands back `numeric` and
+ * `bigint` and anything through `round()`/`to_char()`. A blank cell does not,
+ * even though `Number('')` and `Number('   ')` are both 0 — nothing is not a
+ * reading of zero.
+ *
+ * One answer serves both the question "is this a value column?"
+ * ({@link isValueColumn}) and the value each chart draws, so the two cannot
+ * disagree about a cell. They once did: a lenient check admitted `'3 days'`,
+ * and the same column then plotted as a line at 3 and as a bar at 0.
+ */
 function toPlottableNumber(raw: unknown): number | null {
-  const value = typeof raw === 'number' ? raw : parseFloat(String(raw));
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return null;
+  const value = Number(raw);
   return Number.isFinite(value) ? value : null;
 }
 
@@ -231,7 +248,9 @@ function toPlottableNumber(raw: unknown): number | null {
  * series is still that series. Otherwise the data decides: a `text` column
  * carrying numbers plots (pg hands several numeric types back as strings, and
  * `to_char`/`round` results are text by the time they arrive), and one carrying
- * words does not.
+ * words does not — including the words a number starts, such as `'3 days'`.
+ * That is {@link toPlottableNumber}'s rule, and the charts read the cells with
+ * the same one.
  */
 function isValueColumn(
   meta: ColumnMeta | undefined,

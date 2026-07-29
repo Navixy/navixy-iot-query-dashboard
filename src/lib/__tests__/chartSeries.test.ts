@@ -394,6 +394,30 @@ describe('buildLineChartSeries — wide format', () => {
     ]);
   });
 
+  it('skips descriptions a number starts, and reads the value column after them', () => {
+    // Read cell-first, `'3 days'` is a measurement of 3 and a firmware
+    // `'2.1.0'` one of 2.1 — the line invented values no query returned. The
+    // real measure here is the text column that *is* a number whole, and it
+    // sits two columns past where its series does.
+    const annotated = [
+      { name: 'ts', type: 'timestamptz' },
+      { name: 'uptime', type: 'text' },
+      { name: 'firmware', type: 'text' },
+      { name: 'temp', type: 'text' },
+    ];
+    const result = buildLineChartSeries(annotated, [
+      ['2026-07-01T10:00:00Z', '3 days', '2.1.0', '21.5'],
+      ['2026-07-01T10:01:00Z', '5 days', '2.2.0', '22.5'],
+    ]);
+
+    expect(result.isLongFormat).toBe(false);
+    expect(labelsOf(result)).toEqual(['temp']);
+    expect(byLabel(result)).toEqual([
+      { x: '2026-07-01T10:00:00Z', temp: 21.5 },
+      { x: '2026-07-01T10:01:00Z', temp: 22.5 },
+    ]);
+  });
+
   it('keeps two same-named columns as two series', () => {
     // `SELECT a.ts, a.value, b.value` — the second column would otherwise
     // overwrite the first and lose a line.
@@ -519,6 +543,48 @@ describe('buildBarChartSeries', () => {
       { x: 'North', total: 10, share: 2.5 },
       { x: 'South', total: 20, share: 3.5 },
     ]);
+  });
+
+  it('skips a description a number starts, where the line read it as a value', () => {
+    // The same cells the two charts used to disagree about: admitted by a
+    // prefix parser, `'3 days'` drew a line at 3 and a bar at 0 — a flat series
+    // with a legend entry and a stack slot, which under percent stacking
+    // rescaled the one real total to 100%.
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'uptime', type: 'text' },
+        { name: 'total', type: 'text' },
+      ],
+      [['North', '3 days', '10'], ['South', '5 days', '20']],
+    );
+
+    expect(labelsOf(result)).toEqual(['total']);
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', total: 10 },
+      { x: 'South', total: 20 },
+    ]);
+    expect(hasMultipleBarSeries(result)).toBe(false);
+    expect(barsByLabel(toPercentOfCategory(result))).toEqual([
+      { x: 'North', total: 10 },
+      { x: 'South', total: 20 },
+    ]);
+  });
+
+  it('does not read a blank cell as a zero reading', () => {
+    // `Number('')` and `Number('   ')` are both 0, so a whole-cell parser has
+    // to rule an empty cell out before asking: an empty text column would
+    // otherwise become a flat zero series with every consequence above.
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'total', type: 'integer' },
+        { name: 'note', type: 'text' },
+      ],
+      [['North', 10, ''], ['South', 20, '   ']],
+    );
+
+    expect(labelsOf(result)).toEqual(['total']);
   });
 
   it('keeps a numeric column that is empty in this result', () => {
