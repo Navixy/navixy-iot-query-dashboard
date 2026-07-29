@@ -1,7 +1,34 @@
+import ExcelJS from 'exceljs';
+import { PassThrough } from 'stream';
 import { ExportService } from '../export.js';
 // Type-only: the ESM runner links named imports for real, and an interface has
 // no runtime export.
-import type { ExportColumn } from '../export.js';
+import type { ExcelExportOptions, ExportColumn } from '../export.js';
+
+/**
+ * Run the streaming Excel export into memory and read the real workbook back.
+ *
+ * Number formats are presentation, so they only exist in the generated file —
+ * asserting on the values handed to ExcelJS cannot see them.
+ */
+async function dataSheetOf(options: ExcelExportOptions): Promise<ExcelJS.Worksheet> {
+  const chunks: Buffer[] = [];
+  const sink = new PassThrough();
+  sink.on('data', (chunk: Buffer) => chunks.push(chunk));
+  const flushed = new Promise<void>((resolve, reject) => {
+    sink.on('end', resolve);
+    sink.on('error', reject);
+  });
+
+  await ExportService.getInstance().streamExcel(options, sink);
+  await flushed;
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(Buffer.concat(chunks));
+  const sheet = workbook.getWorksheet('Data');
+  if (!sheet) throw new Error('no Data sheet in the generated workbook');
+  return sheet;
+}
 
 /**
  * Chart generation is effectively pure (rows -> Chart.js script text), so it is
@@ -289,14 +316,44 @@ describe('ExportService calendar days', () => {
     type CellCoercion = {
       coerceCellValue(
         value: unknown, isDateType: boolean, isNumeric: boolean, timeZone: string | undefined,
-      ): { value: unknown; isDate: boolean };
+      ): { value: unknown; isDate: boolean; isDay?: boolean };
     };
     const coerce = ExportService.getInstance() as unknown as CellCoercion;
 
     const cell = coerce.coerceCellValue('2026-05-12', true, false, 'America/New_York');
 
     expect(cell.isDate).toBe(true);
+    expect(cell.isDay).toBe(true);
     expect((cell.value as Date).toISOString()).toBe('2026-05-12T00:00:00.000Z');
+  });
+
+  it('prints no time of day in the generated workbook', async () => {
+    // Read the real .xlsx back rather than the value handed to ExcelJS: what a
+    // day cell *shows* is its number format, and a correct serial under a
+    // date+time format still prints "12:00 AM" — hours a SQL date never had.
+    const sheet = await dataSheetOf({
+      title: 'daily',
+      columns: [
+        { name: 'day', type: 'date' },
+        { name: 'at', type: 'timestamptz' },
+        { name: 'total', type: 'integer' },
+      ],
+      rows: [['2026-05-12', '2026-05-12T03:00:00.000Z', 7]],
+      executedAt: new Date('2026-05-12T10:00:00Z'),
+      timeZone: 'America/New_York',
+      dateFormat: 'mm-dd-yyyy',
+      timeFormat: 'h12',
+    });
+
+    const dayCell = sheet.getRow(2).getCell(1);
+    expect(dayCell.numFmt).toBe('mm-dd-yyyy');
+    expect((dayCell.value as Date).toISOString()).toBe('2026-05-12T00:00:00.000Z');
+
+    // The neighbouring cell: a real instant still carries the time it happened
+    // at, in the export's zone, so the day rule cannot flatten timestamps.
+    const instantCell = sheet.getRow(2).getCell(2);
+    expect(instantCell.numFmt).toBe('mm-dd-yyyy hh:mm AM/PM');
+    expect((instantCell.value as Date).toISOString()).toBe('2026-05-11T23:00:00.000Z');
   });
 
   it('labels an exported chart x axis with the day', () => {

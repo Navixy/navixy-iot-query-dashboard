@@ -346,6 +346,11 @@ export class ExportService {
   async streamExcel(options: ExcelExportOptions, out: Writable): Promise<void> {
     const { title, description, columns, rows, executedAt, excelHeader, timeZone, dateFormat, timeFormat } = options;
     const cellNumFmt = buildExcelNumFmt(dateFormat, timeFormat);
+    // A calendar day has no time of day to show. Excel renders a cell through
+    // its number format, so a day carrying the shared date+time format would
+    // print the "00:00" its serial happens to sit at — hours a SQL `date` never
+    // had, and hours CSV/HTML/the table do not print for the same cell (DO-273).
+    const dayNumFmt = excelDatePart(dateFormat);
 
     const headerActive = !!(excelHeader?.enabled && (excelHeader.title || excelHeader.description));
     const rowOffset = headerActive ? 2 : 0;
@@ -490,15 +495,21 @@ export class ExportService {
     for (const row of rows) {
       const values = new Array<ExcelJS.CellValue>(visibleColumns.length);
       const dateCellCols: number[] = [];
+      const dayCellCols: number[] = [];
       for (let i = 0; i < visibleColumns.length; i++) {
         const kind = visKinds[i]!;
-        const { value, isDate } = this.coerceCellValue(row[visibleIdx[i]!], kind.isDateType, kind.isNumeric, timeZone);
+        const { value, isDate, isDay } = this.coerceCellValue(row[visibleIdx[i]!], kind.isDateType, kind.isNumeric, timeZone);
         values[i] = value;
-        if (isDate) dateCellCols.push(i);
+        // Per cell, not per column: a column can hold days and instants both
+        // (a `text` column of mixed values reaches the same branch).
+        if (isDate) (isDay ? dayCellCols : dateCellCols).push(i);
       }
       const dataRow = dataSheet.addRow(values);
       for (const i of dateCellCols) {
         dataRow.getCell(i + 1).numFmt = cellNumFmt;
+      }
+      for (const i of dayCellCols) {
+        dataRow.getCell(i + 1).numFmt = dayNumFmt;
       }
       dataRow.commit();
     }
@@ -575,13 +586,17 @@ export class ExportService {
    * `isDateType`/`isNumeric` are the column's classification, precomputed once
    * per column by the caller — re-deriving them from `col.type` here would scan
    * the type string for every cell (millions of times on a large export).
+   *
+   * `isDay` marks a date cell that is a calendar day rather than an instant, so
+   * the caller can give it a date-only number format: the stored value alone
+   * cannot say which it is, since both are Dates by the time they leave here.
    */
   private coerceCellValue(
     value: unknown,
     isDateType: boolean,
     isNumeric: boolean,
     timeZone: string | undefined,
-  ): { value: ExcelJS.CellValue; isDate: boolean } {
+  ): { value: ExcelJS.CellValue; isDate: boolean; isDay?: boolean } {
     if (value === null || value === undefined) {
       return { value: '', isDate: false };
     }
@@ -591,7 +606,7 @@ export class ExportService {
       // are exactly the fields the cell should carry (DO-273).
       const day = parseCalendarDay(value);
       if (day) {
-        return { value: calendarDayToUtcDate(day), isDate: true };
+        return { value: calendarDayToUtcDate(day), isDate: true, isDay: true };
       }
       const dateValue = value instanceof Date ? value : parseTimestampValue(String(value));
       if (!dateValue) {
