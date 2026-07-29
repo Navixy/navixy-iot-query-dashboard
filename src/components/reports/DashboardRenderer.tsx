@@ -65,7 +65,12 @@ import {
   Area,
 } from 'recharts';
 import { chartColors } from '@/lib/chartColors';
-import { buildBarChartSeries, buildLineChartSeries } from '@/lib/chartSeries';
+import {
+  buildBarChartSeries,
+  buildLineChartSeries,
+  hasMultipleBarSeries,
+  toPercentOfCategory,
+} from '@/lib/chartSeries';
 import { formatChartAxisLabel } from '@/utils/datetime';
 import { TablePanel } from './TablePanel';
 import { TextPanel } from './visualizations/TextPanel';
@@ -1175,26 +1180,29 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // instead of onto the row, and one named like the category key would
     // overwrite the category. The label reaches the legend via each Bar's
     // `name` — see assignSeriesKeys in @/lib/chartSeries.
-    const { categoryKey, series, isGrouped, chartData: pivoted } = buildBarChartSeries(
+    const pivoted = buildBarChartSeries(
       data.columns || [],
       data.rows,
       visualization?.seriesColumn,
     );
-    let chartData = pivoted;
+    // Percent stacking is a transform on the pivot, so it lives with it — and
+    // with the rule that a lone bar per category is a plain total rather than a
+    // stack of one, which is the same rule the legend below follows.
+    const { categoryKey, series } = pivoted;
+    const isMultiSeries = hasMultipleBarSeries(pivoted);
+    // Asking for percent stacking does not make a lone bar per category a share
+    // of anything, so the axis, the ticks and the labels only speak percentages
+    // when the values actually are some — the same condition the transform
+    // applies itself.
+    const isPercentStacked = isMultiSeries && stacking === 'percent';
+    let chartData = stacking === 'percent'
+      ? toPercentOfCategory(pivoted).chartData
+      : pivoted.chartData;
 
-    // One bar per category is a plain total; several bars sharing a category are
-    // what a legend names, what a stack stacks, and what sorting has to add up.
-    const isMultiSeries = isGrouped || series.length > 1;
-
-    if (isMultiSeries && stacking === 'percent') {
-      chartData = chartData.map((item) => {
-        const total = series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
-        const normalized: Record<string, string | number> = { [categoryKey]: item[categoryKey]! };
-        series.forEach(({ key }) => {
-          normalized[key] = total > 0 ? ((Number(item[key]) || 0) / total) * 100 : 0;
-        });
-        return normalized;
-      });
+    if (series.length === 0) {
+      // Nothing numeric to plot: a one-column result, or one whose value
+      // columns are all text. Say so rather than drawing empty axes.
+      return <div className="text-gray-500">No data series found</div>;
     }
 
     // Apply sorting
@@ -1225,7 +1233,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // Calculate explicit domain for Y-axis (vertical bars)
     let valueAxisDomain: [number, number] = [0, 100];
     if (chartData.length > 0) {
-      if (stacking === 'percent') {
+      if (isPercentStacked) {
         valueAxisDomain = [0, 100];
       } else {
         const values = chartData.flatMap(d =>
@@ -1283,7 +1291,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
             tick={ { fill: 'var(--text-secondary)', fontSize: 12 } }
             axisLine={ { stroke: '#ffffff22' } }
             tickFormatter={ (value) => {
-              if (stacking === 'percent') {
+              if (isPercentStacked) {
                 return `${ Math.round(value) }%`;
               }
               return value.toLocaleString();
@@ -1297,7 +1305,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
               color: 'var(--text-primary)',
             } }
             formatter={ (value: number | string, name: string) => {
-              if (stacking === 'percent') {
+              if (isPercentStacked) {
                 return [`${ Number(value).toFixed(1) }%`, name];
               }
               return [value.toLocaleString(), name];
@@ -1325,7 +1333,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                 <LabelList
                   position="top"
                   formatter={ (value: number | string) => {
-                    if (isMultiSeries && stacking === 'percent') {
+                    if (isPercentStacked) {
                       return `${ Number(value).toFixed(1) }%`;
                     }
                     return value.toLocaleString();

@@ -217,49 +217,96 @@ function toPlottableNumber(raw: unknown): number | null {
 }
 
 /**
- * The label for each value column — every column but the first, which is the
- * x axis / category. When the result carries no column metadata the width comes
- * from the rows, the only thing left to read it from.
+ * Whether column `index` holds measurements, i.e. something a chart can give a
+ * height or a y position to.
+ *
+ * A declared numeric type settles it, including for a column that is all NULL
+ * in this particular result — the query says it is a measure, and an empty
+ * series is still that series. Otherwise the data decides: a `text` column
+ * carrying numbers plots (pg hands several numeric types back as strings, and
+ * `to_char`/`round` results are text by the time they arrive), and one carrying
+ * words does not.
  */
-function valueColumnLabels(
+function isValueColumn(
+  meta: ColumnMeta | undefined,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  index: number,
+): boolean {
+  if (NUMERIC_COLUMN_TYPES.has(String(meta?.type || '').toLowerCase())) return true;
+  return rows.some((row) => toPlottableNumber(row[index]) !== null);
+}
+
+/** A column plotted as its own series, and where to read it from each row. */
+interface ValueColumn {
+  label: string;
+  /** Position in the *source* row, which filtering makes distinct from the
+   *  series' own position. */
+  index: number;
+}
+
+/**
+ * The value columns of a wide result: every column after the x axis / category
+ * that actually carries values.
+ *
+ * Non-numeric columns are skipped rather than plotted as zeros. A result
+ * frequently carries a descriptive column alongside its measure —
+ * `[region, total, comment]` — and reading `comment` as a measurement invents a
+ * flat series with a legend entry, a stack slot and value labels, which under
+ * percent stacking also rescales the real one to 100%. "One series per value
+ * column" was always the contract; this is what makes the word *value* true.
+ *
+ * When the result carries no column metadata the width comes from the rows, the
+ * only thing left to read it from.
+ */
+function valueColumns(
   columns: ReadonlyArray<ColumnMeta>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
-): string[] {
-  const labels: string[] = [];
-  if (columns.length > 0) {
-    for (let i = 1; i < columns.length; i++) {
-      labels.push(columns[i]?.name || `series${ i }`);
-    }
-  } else {
-    const width = rows.reduce((max, row) => Math.max(max, row.length), 0);
-    for (let i = 1; i < width; i++) {
-      labels.push(`value${ i }`);
-    }
+): ValueColumn[] {
+  const named = columns.length > 0;
+  const width = named
+    ? columns.length
+    : rows.reduce((max, row) => Math.max(max, row.length), 0);
+
+  const value: ValueColumn[] = [];
+  for (let i = 1; i < width; i++) {
+    if (!isValueColumn(columns[i], rows, i)) continue;
+    value.push({
+      label: named ? columns[i]?.name || `series${ i }` : `value${ i }`,
+      index: i,
+    });
   }
-  return labels;
+  return value;
+}
+
+/** A wide-format series, plus the column it reads. */
+interface WideSeries extends ChartSeries {
+  sourceIndex: number;
 }
 
 /**
  * One series per value column, for a result that is not grouped by a series
  * column.
  *
- * Keyed positionally rather than through {@link assignSeriesKeys}: here a
- * series *is* a column, so two columns that share a name (`SELECT a.ts, b.ts`)
- * are still two series, and de-duplicating the labels would shift every value
- * after them into the wrong series.
+ * Keyed by position among the *plotted* series rather than through
+ * {@link assignSeriesKeys}: here a series *is* a column, so two columns that
+ * share a name (`SELECT a.ts, b.ts`) are still two series, and de-duplicating
+ * the labels would shift every value after them into the wrong series. Which
+ * column each one reads travels as `sourceIndex`, because skipping a
+ * non-numeric column makes the two positions diverge.
  *
- * A wide result can have no value columns at all (a single-column query, or no
- * rows to read a width from), which leaves nothing to plot; the grouped branch
- * always yields >= 1 series for non-empty rows.
+ * A wide result can have no value columns at all (a single-column query, no
+ * rows to read a width from, or nothing numeric to plot), which leaves nothing
+ * to draw; the grouped branch always yields >= 1 series for non-empty rows.
  */
 function wideFormatSeries(
   columns: ReadonlyArray<ColumnMeta>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
-): ChartSeries[] {
+): WideSeries[] {
   if (rows.length === 0) return [];
-  return valueColumnLabels(columns, rows).map((label, index) => ({
-    key: seriesKeyAt(index),
+  return valueColumns(columns, rows).map(({ label, index }, position) => ({
+    key: seriesKeyAt(position),
     label,
+    sourceIndex: index,
   }));
 }
 
@@ -343,20 +390,20 @@ export function buildLineChartSeries(
     };
   }
 
-  const series = wideFormatSeries(columns, rows);
+  const wide = wideFormatSeries(columns, rows);
 
   const chartData = rows.map((row) => {
     const point: Record<string, unknown> = { [X_KEY]: row[0] };
-    series.forEach(({ key }, index) => {
-      point[key] = toPlottableNumber(row[index + 1]);
-    });
+    for (const { key, sourceIndex } of wide) {
+      point[key] = toPlottableNumber(row[sourceIndex]);
+    }
     return point;
   });
 
   return {
     xKey: X_KEY,
     chartData: sortByX(chartData),
-    series,
+    series: wide.map(({ key, label }) => ({ key, label })),
     isLongFormat: false,
   };
 }
@@ -423,14 +470,55 @@ export function buildBarChartSeries(
     return { categoryKey: X_KEY, chartData, series, isGrouped: true };
   }
 
-  const series = wideFormatSeries(columns, rows);
+  const wide = wideFormatSeries(columns, rows);
   const chartData = rows.map((row) => {
     const item: Record<string, string | number> = { [X_KEY]: String(row[0]) };
-    series.forEach(({ key }, index) => {
-      item[key] = toBarNumber(row[index + 1]);
-    });
+    for (const { key, sourceIndex } of wide) {
+      item[key] = toBarNumber(row[sourceIndex]);
+    }
     return item;
   });
 
-  return { categoryKey: X_KEY, chartData, series, isGrouped: false };
+  return {
+    categoryKey: X_KEY,
+    chartData,
+    series: wide.map(({ key, label }) => ({ key, label })),
+    isGrouped: false,
+  };
+}
+
+/**
+ * Whether several bars share a category — what a legend names, what a stack
+ * stacks, and what sorting has to add up. A grouped result counts even with a
+ * single group: that is one series of many the query happened to return, and it
+ * has always carried a legend.
+ */
+export function hasMultipleBarSeries({ series, isGrouped }: BarChartSeries): boolean {
+  return isGrouped || series.length > 1;
+}
+
+/**
+ * Re-express every value as a percentage of its category's total, for percent
+ * stacking.
+ *
+ * A result the panel draws as one bar per category comes back untouched: a
+ * plain total is not a stack, and normalising it would replace every real
+ * number with 100. That guard is why the transform lives here rather than in
+ * the renderer — it is the same question {@link hasMultipleBarSeries} answers
+ * for the legend, and the two must not drift.
+ */
+export function toPercentOfCategory(result: BarChartSeries): BarChartSeries {
+  if (!hasMultipleBarSeries(result)) return result;
+  const { categoryKey, chartData, series } = result;
+  return {
+    ...result,
+    chartData: chartData.map((item) => {
+      const total = series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
+      const scaled: Record<string, string | number> = { [categoryKey]: item[categoryKey]! };
+      for (const { key } of series) {
+        scaled[key] = total > 0 ? ((Number(item[key]) || 0) / total) * 100 : 0;
+      }
+      return scaled;
+    }),
+  };
 }

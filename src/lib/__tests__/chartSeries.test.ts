@@ -4,7 +4,9 @@ import {
   buildBarChartSeries,
   buildLineChartSeries,
   detectSeriesColumnIndex,
+  hasMultipleBarSeries,
   SERIES_COLUMN_INDEX,
+  toPercentOfCategory,
   type BarChartSeries,
   type ChartSeries,
   type LineChartSeries,
@@ -139,13 +141,31 @@ describe('detectSeriesColumnIndex — explicit seriesColumn', () => {
   it('plots every value column when set to "none"', () => {
     const grouped = [
       ['2026-07-01T10:00:00Z', 1, 'Sensor A'],
-      ['2026-07-01T10:01:00Z', 2, 'Sensor B'],
       ['2026-07-01T10:02:00Z', 3, 'Sensor A'],
-      ['2026-07-01T10:03:00Z', 4, 'Sensor B'],
+      ['2026-07-01T10:04:00Z', 5, 'Sensor B'],
     ];
     expect(detectSeriesColumnIndex(TIME_COLUMNS, grouped, 'none')).toBeNull();
+    // Only `value`: 'none' turns grouping off, and the label column is then a
+    // column of words, which is nothing to plot. It used to become a series of
+    // nulls — an invisible line holding a legend entry.
     expect(labelsOf(buildLineChartSeries(TIME_COLUMNS, grouped, 'none')))
-      .toEqual(['value', 'series']);
+      .toEqual(['value']);
+  });
+
+  it('plots a second numeric column when set to "none"', () => {
+    // The shape 'none' exists for: two measures the detector reads as a
+    // grouping key, plotted as the two series they are.
+    const columns2 = [
+      { name: 'ts', type: 'timestamptz' },
+      { name: 'in', type: 'integer' },
+      { name: 'out', type: 'integer' },
+    ];
+    const rows2 = [
+      ['2026-07-01T10:00:00Z', 1, 7],
+      ['2026-07-01T10:01:00Z', 2, 7],
+      ['2026-07-01T10:02:00Z', 3, 8],
+    ];
+    expect(labelsOf(buildLineChartSeries(columns2, rows2, 'none'))).toEqual(['in', 'out']);
   });
 
   it('detects when set to "auto", the word the editor stores', () => {
@@ -353,6 +373,27 @@ describe('buildLineChartSeries — wide format', () => {
     ]);
   });
 
+  it('skips a text column, and still reads the columns after it', () => {
+    // A line through words is nothing to draw. The series that follow keep
+    // their own column: their position among the plotted series no longer
+    // matches their position in the row once one is skipped.
+    const annotated = [
+      { name: 'ts', type: 'timestamptz' },
+      { name: 'status', type: 'text' },
+      { name: 'temp', type: 'numeric' },
+    ];
+    const result = buildLineChartSeries(annotated, [
+      ['2026-07-01T10:00:00Z', 'ok', 21],
+      ['2026-07-01T10:01:00Z', 'ok', 22],
+    ]);
+
+    expect(labelsOf(result)).toEqual(['temp']);
+    expect(byLabel(result)).toEqual([
+      { x: '2026-07-01T10:00:00Z', temp: 21 },
+      { x: '2026-07-01T10:01:00Z', temp: 22 },
+    ]);
+  });
+
   it('keeps two same-named columns as two series', () => {
     // `SELECT a.ts, a.value, b.value` — the second column would otherwise
     // overwrite the first and lose a line.
@@ -410,6 +451,99 @@ describe('buildBarChartSeries', () => {
       { x: 'South', metric_a: 20, metric_b: 2 },
     ]);
     expect(result.isGrouped).toBe(false);
+  });
+
+  const ANNOTATED_COLUMNS = [
+    { name: 'region', type: 'text' },
+    { name: 'total', type: 'integer' },
+    { name: 'comment', type: 'text' },
+  ];
+  const ANNOTATED_ROWS = [['North', 10, 'good'], ['South', 20, 'bad']];
+
+  it('leaves a trailing text column out of the series', () => {
+    // A descriptive column is not a measurement: read as one it becomes a
+    // zero-height series with a legend entry and a stack slot, and the panel
+    // that used to plot `total` alone now plots a second bar made of nothing.
+    const result = buildBarChartSeries(ANNOTATED_COLUMNS, ANNOTATED_ROWS);
+
+    expect(labelsOf(result)).toEqual(['total']);
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', total: 10 },
+      { x: 'South', total: 20 },
+    ]);
+  });
+
+  it('keeps the real totals under percent stacking', () => {
+    // The same shape through the percent path: with the annotation gone there
+    // is one bar per category, and a plain total is not a stack — normalising
+    // it would replace 10 and 20 with 100 and 100.
+    const result = buildBarChartSeries(ANNOTATED_COLUMNS, ANNOTATED_ROWS);
+
+    expect(hasMultipleBarSeries(result)).toBe(false);
+    expect(barsByLabel(toPercentOfCategory(result))).toEqual([
+      { x: 'North', total: 10 },
+      { x: 'South', total: 20 },
+    ]);
+  });
+
+  it('scales real series to their share of the category', () => {
+    const result = buildBarChartSeries(
+      METRIC_COLUMNS,
+      [['North', 30, 10], ['South', 0, 0]],
+    );
+
+    expect(hasMultipleBarSeries(result)).toBe(true);
+    expect(barsByLabel(toPercentOfCategory(result))).toEqual([
+      { x: 'North', metric_a: 75, metric_b: 25 },
+      // An all-zero category has no share to take; every slot stays zero
+      // rather than dividing by nothing.
+      { x: 'South', metric_a: 0, metric_b: 0 },
+    ]);
+  });
+
+  it('reads a value column the query typed as text but filled with numbers', () => {
+    // round()/to_char() results arrive as text, and pg hands numeric and bigint
+    // back as strings — a column of numbers is a value column whatever it is
+    // labelled, so the type check alone would drop real data.
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'total', type: 'integer' },
+        { name: 'share', type: 'text' },
+      ],
+      [['North', 10, '2.5'], ['South', 20, '3.5']],
+    );
+
+    expect(labelsOf(result)).toEqual(['total', 'share']);
+    expect(barsByLabel(result)).toEqual([
+      { x: 'North', total: 10, share: 2.5 },
+      { x: 'South', total: 20, share: 3.5 },
+    ]);
+  });
+
+  it('keeps a numeric column that is empty in this result', () => {
+    // The query says it is a measure; an empty series is still that series, and
+    // dropping it would make a legend come and go with the data.
+    const result = buildBarChartSeries(
+      [
+        { name: 'region', type: 'text' },
+        { name: 'total', type: 'integer' },
+        { name: 'faults', type: 'integer' },
+      ],
+      [['North', 10, null], ['South', 20, null]],
+    );
+
+    expect(labelsOf(result)).toEqual(['total', 'faults']);
+  });
+
+  it('yields no series when nothing in the result is plottable', () => {
+    // [category, text] — the panel says so rather than drawing empty axes.
+    const result = buildBarChartSeries(
+      [{ name: 'region', type: 'text' }, { name: 'comment', type: 'text' }],
+      [['North', 'good'], ['South', 'bad']],
+    );
+
+    expect(result.series).toEqual([]);
   });
 
   it('plots every value column the detector reads as wide, with no override', () => {
