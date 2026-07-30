@@ -371,7 +371,9 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
 
 
   // Columns detected from the last "Test Query" run, used to populate the
-  // filter column picker. Date/time columns are surfaced first.
+  // filter column picker and the chart series-column picker. Date/time columns
+  // are surfaced first (in sortedColumns, which only the filter picker uses —
+  // the series picker keeps SELECT order, since position decides what can group).
   const detectedColumns = testResults?.columns ?? [];
   const columnTypeOf = (c: string) => testResults?.columnTypes?.[c] || '';
   const isDateishType = (t: string) => /date|time/i.test(t);
@@ -712,6 +714,7 @@ export function PanelEditor({ open, onClose, panel, onSave, localFilters = [], d
                 panelType={panelType}
                 visualization={visualization}
                 onChange={setVisualization}
+                columns={detectedColumns}
               />
             </div>
           </TabsContent>

@@ -65,7 +65,13 @@ import {
   Area,
 } from 'recharts';
 import { chartColors } from '@/lib/chartColors';
-import { detectSeriesColumnIndex, seriesDataKey } from '@/lib/chartSeries';
+import {
+  buildBarChartSeries,
+  buildLineChartSeries,
+  hasMultipleBarSeries,
+  toPercentOfCategory,
+} from '@/lib/chartSeries';
+import { formatChartAxisLabel } from '@/utils/datetime';
 import { TablePanel } from './TablePanel';
 import { TextPanel } from './visualizations/TextPanel';
 import { MapPanel, GPSPoint } from './visualizations/MapPanel';
@@ -1164,77 +1170,51 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     const showLegend = visualization?.showLegend !== false;
     const legendPosition = visualization?.legendPosition || 'bottom';
 
-    // Detect a long-format series column (col 3) via the shared helper so the
-    // same query groups identically in bar and line/time-series panels (DO-273).
-    const seriesColumnIndex = detectSeriesColumnIndex(data.columns, data.rows);
+    // Pivot through the shared helper so the same query groups identically in
+    // bar and line/time-series panels (DO-273). `seriesColumn` lets a dashboard
+    // override the detector when the shape is ambiguous (a numeric grouping key
+    // reads like a second metric column).
+    //
+    // Values live under generated keys, never under the series label itself: a
+    // group named "__proto__" would otherwise be written onto Object.prototype
+    // instead of onto the row, and one named like the category key would
+    // overwrite the category. The label reaches the legend via each Bar's
+    // `name` — see assignSeriesKeys in @/lib/chartSeries.
+    const pivoted = buildBarChartSeries(
+      data.columns || [],
+      data.rows,
+      visualization?.seriesColumn,
+    );
+    // Percent stacking is a transform on the pivot, so it lives with it — and
+    // with the rule that a lone bar per category is a plain total rather than a
+    // stack of one, which is the same rule the legend below follows.
+    const { categoryKey, series } = pivoted;
+    const isMultiSeries = hasMultipleBarSeries(pivoted);
+    // Asking for percent stacking does not make a lone bar per category a share
+    // of anything, so the axis, the ticks and the labels only speak percentages
+    // when the values actually are some — the same condition the transform
+    // applies itself.
+    const isPercentStacked = isMultiSeries && stacking === 'percent';
+    let chartData = stacking === 'percent'
+      ? toPercentOfCategory(pivoted).chartData
+      : pivoted.chartData;
 
-    const categoryColumnIndex = 0;
-    const valueColumnIndex = 1;
-
-    // Process data
-    let chartData: Array<Record<string, number | string>> = [];
-    let seriesNames: string[] = [];
-
-    if (seriesColumnIndex !== null) {
-      // Group data by category and series
-      const groupedData: Record<string, Record<string, number>> = {};
-
-      data.rows.forEach((row) => {
-        const category = String(row[categoryColumnIndex]);
-        const series = String(row[seriesColumnIndex]);
-        const value = Number(row[valueColumnIndex]) || 0;
-
-        if (!groupedData[category]) {
-          groupedData[category] = {};
-        }
-        groupedData[category][series] = value;
-      });
-
-      // Get all unique series names
-      seriesNames = Array.from(new Set(
-        data.rows.map(row => String(row[seriesColumnIndex])),
-      ));
-
-      // Convert to chart data format
-      chartData = Object.keys(groupedData).map(category => {
-        const item: Record<string, number | string> = { category };
-        seriesNames.forEach(series => {
-          item[series] = groupedData[category][series] || 0;
-        });
-        return item;
-      });
-
-      // Normalize to percentages if percent stacking
-      if (stacking === 'percent') {
-        chartData = chartData.map(item => {
-          const total = seriesNames.reduce((sum, series) => sum + (Number(item[series]) || 0), 0);
-          const normalized: Record<string, number | string> = { category: item.category };
-          seriesNames.forEach(series => {
-            normalized[series] = total > 0 ? ((Number(item[series]) || 0) / total) * 100 : 0;
-          });
-          return normalized;
-        });
-      }
-    } else {
-      // Simple category-value format
-      chartData = data.rows.map((row) => {
-        const category = String(row[categoryColumnIndex]);
-        const value = Number(row[valueColumnIndex]) || 0;
-        return { category, value };
-      });
-      seriesNames = ['value'];
+    if (series.length === 0) {
+      // Nothing numeric to plot: a one-column result, or one whose value
+      // columns are all text. Say so rather than drawing empty axes.
+      return <div className="text-gray-500">No data series found</div>;
     }
 
     // Apply sorting
     if (sortOrder !== 'none') {
-      const hasMultipleSeries = seriesColumnIndex !== null;
-      chartData.sort((a, b) => {
-        const aVal = hasMultipleSeries
-          ? Object.values(a).filter((v, i) => i > 0).reduce((sum: number, v) => sum + (Number(v) || 0), 0)
-          : a.value;
-        const bVal = hasMultipleSeries
-          ? Object.values(b).filter((v, i) => i > 0).reduce((sum: number, v) => sum + (Number(v) || 0), 0)
-          : b.value;
+      // Bars sort by the height of the whole group, summed over the series keys
+      // rather than over every own property — the row also carries its
+      // category, which is not a value.
+      const groupTotal = (item: Record<string, string | number>) =>
+        series.reduce((sum, { key }) => sum + (Number(item[key]) || 0), 0);
+      chartData = [...chartData].sort((a, b) => {
+        const aVal = groupTotal(a);
+        const bVal = groupTotal(b);
 
         if (sortOrder === 'asc') {
           return aVal > bVal ? 1 : -1;
@@ -1253,14 +1233,12 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // Calculate explicit domain for Y-axis (vertical bars)
     let valueAxisDomain: [number, number] = [0, 100];
     if (chartData.length > 0) {
-      if (stacking === 'percent') {
+      if (isPercentStacked) {
         valueAxisDomain = [0, 100];
       } else {
-        const values = seriesColumnIndex === null
-          ? chartData.map(d => Number(d.value) || 0)
-          : chartData.flatMap(d =>
-            seriesNames.map(series => Number(d[series]) || 0),
-          );
+        const values = chartData.flatMap(d =>
+          series.map(({ key }) => Number(d[key]) || 0),
+        );
         const maxVal = Math.max(...values);
         // Add 5% padding above max value - matching working test configuration
         const paddedMax = Math.ceil(maxVal * 1.05);
@@ -1292,7 +1270,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
         >
           <CartesianGrid strokeDasharray="3 3" stroke="#ffffff14" />
           <XAxis
-            dataKey="category"
+            dataKey={ categoryKey }
             angle={ -45 }
             textAnchor="end"
             height={ 80 }
@@ -1313,7 +1291,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
             tick={ { fill: 'var(--text-secondary)', fontSize: 12 } }
             axisLine={ { stroke: '#ffffff22' } }
             tickFormatter={ (value) => {
-              if (stacking === 'percent') {
+              if (isPercentStacked) {
                 return `${ Math.round(value) }%`;
               }
               return value.toLocaleString();
@@ -1327,59 +1305,44 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
               color: 'var(--text-primary)',
             } }
             formatter={ (value: number | string, name: string) => {
-              if (stacking === 'percent') {
+              if (isPercentStacked) {
                 return [`${ Number(value).toFixed(1) }%`, name];
               }
               return [value.toLocaleString(), name];
             } }
           />
-          { showLegend && seriesColumnIndex !== null && (
+          { showLegend && isMultiSeries && (
             <Legend
               wrapperStyle={ getLegendWrapperStyle() }
               verticalAlign={ legendPosition === 'top' || legendPosition === 'bottom' ? legendPosition : 'middle' }
               align={ legendPosition === 'left' || legendPosition === 'right' ? legendPosition : 'center' }
             />
           ) }
-          { seriesColumnIndex !== null ? (
-            // Multiple series - render multiple Bar components
-            seriesNames.map((seriesName, index) => (
-              <Bar
-                key={ seriesName }
-                dataKey={ seriesDataKey(seriesName) }
-                name={ seriesName }
-                stackId={ stacking !== 'none' ? 'stack' : undefined }
-                fill={ colors[index % colors.length] }
-              >
-                { showValues && (
-                  <LabelList
-                    position="top"
-                    formatter={ (value: number | string) => {
-                      if (stacking === 'percent') {
-                        return `${ Number(value).toFixed(1) }%`;
-                      }
-                      return value.toLocaleString();
-                    } }
-                    style={ { fill: 'var(--text-primary)', fontSize: 12 } }
-                  />
-                ) }
-              </Bar>
-            ))
-          ) : (
-            // Single series
+          { series.map(({ key, label }, index) => (
             <Bar
-              dataKey="value"
-              name={ panel.title }
-              fill={ colors[0] }
+              key={ key }
+              dataKey={ key }
+              // A lone bar is the panel's own measure, so it keeps the panel's
+              // name in the tooltip; among several, only the column name says
+              // which bar this is.
+              name={ isMultiSeries ? label : panel.title }
+              stackId={ stacking !== 'none' ? 'stack' : undefined }
+              fill={ colors[index % colors.length] }
             >
               { showValues && (
                 <LabelList
                   position="top"
-                  formatter={ (value: number | string) => value.toLocaleString() }
+                  formatter={ (value: number | string) => {
+                    if (isPercentStacked) {
+                      return `${ Number(value).toFixed(1) }%`;
+                    }
+                    return value.toLocaleString();
+                  } }
                   style={ { fill: 'var(--text-primary)', fontSize: 12 } }
                 />
               ) }
             </Bar>
-          ) }
+          )) }
         </RechartsBarChart>
       </ResponsiveContainer>
     );
@@ -1421,75 +1384,20 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // Two supported shapes (matching renderBarChartPanel + DatasetRequirements):
     //   • Long format  [x, value, series]       -> one line per distinct series value
     //   • Wide format  [x, value1, value2, ...]  -> one line per value column
-    const columns = data.columns || [];
-    const xKey = columns[0]?.name || 'x';
+    // Shared with the bar panel's detector so the same query groups identically
+    // in both (DO-273).
+    // `seriesColumn` (visualization config) overrides the detector for the
+    // shapes it cannot call: a numeric grouping key whose series never share an
+    // x looks exactly like a second metric column (DO-273).
+    const { xKey, chartData, series, isLongFormat } = buildLineChartSeries(
+      data.columns || [],
+      data.rows,
+      visualization?.seriesColumn,
+    );
 
-    // Missing/unparseable values become null so Recharts draws a gap instead of
-    // a fake zero point — the right contract for a line (bar charts use 0).
-    const toNumber = (raw: unknown): number | null => {
-      const value = typeof raw === 'number' ? raw : parseFloat(String(raw));
-      return isNaN(value) || !isFinite(value) ? null : value;
-    };
-
-    // Shared detector so the same query groups identically in bar and line (DO-273).
-    const seriesColumnIndex = detectSeriesColumnIndex(columns, data.rows);
-
-    let chartData: Array<Record<string, unknown>> = [];
-    let seriesNames: string[] = [];
-
-    if (seriesColumnIndex !== null) {
-      // Long format: pivot rows into one line per distinct series value.
-      // x = col 1, value = col 2, series label = col 3.
-      seriesNames = Array.from(
-        new Set(data.rows.map((row) => String(row[seriesColumnIndex]))),
-      );
-      const byX = new Map<string, Record<string, unknown>>();
-      data.rows.forEach((row) => {
-        const xId = String(row[0]);
-        if (!byX.has(xId)) byX.set(xId, { [xKey]: row[0] });
-        // A series missing at some x stays absent -> Recharts renders a gap.
-        byX.get(xId)[String(row[seriesColumnIndex])] = toNumber(row[1]);
-      });
-      chartData = Array.from(byX.values());
-    } else {
-      // Wide format: first column is x, each remaining column is its own series.
-      chartData = data.rows.map((row) => {
-        const dataPoint: Record<string, unknown> = { [xKey]: row[0] };
-        if (columns.length > 0) {
-          for (let i = 1; i < row.length && i < columns.length; i++) {
-            const colName = columns[i]?.name || `series${ i }`;
-            dataPoint[colName] = toNumber(row[i]);
-          }
-        } else {
-          for (let i = 1; i < row.length; i++) {
-            dataPoint[`value${ i }`] = toNumber(row[i]);
-          }
-        }
-        return dataPoint;
-      });
-      seriesNames = chartData.length > 0
-        ? Object.keys(chartData[0] || {}).filter((key) => key !== xKey)
-        : [];
-
-      // A wide result can have no value columns (e.g. a single-column query). The
-      // long-format branch always yields >=1 series for non-empty rows, so this
-      // guard is only meaningful here.
-      if (seriesNames.length === 0) {
-        return <div className="text-gray-500">No data series found</div>;
-      }
+    if (series.length === 0) {
+      return <div className="text-gray-500">No data series found</div>;
     }
-
-    // Sort data by x value (assuming it's a date/timestamp)
-    chartData.sort((a, b) => {
-      const aVal = a[xKey] as string | number;
-      const bVal = b[xKey] as string | number;
-      const aDate = new Date(aVal);
-      const bDate = new Date(bVal);
-      if (!isNaN(aDate.getTime()) && !isNaN(bDate.getTime())) {
-        return aDate.getTime() - bDate.getTime();
-      }
-      return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
-    });
 
     // Map line style to strokeDasharray
     const getStrokeDasharray = () => {
@@ -1520,22 +1428,13 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // Determine if points should be shown
     const shouldShowPoints = showPoints === 'always' || (showPoints === 'auto' && chartData.length <= 50);
 
-    // Format x-axis labels (try to format as dates)
-    const formatXAxisLabel = (value: string | number) => {
-      const parsedDate = parse(String(value), 'yyyy-MM-dd', new Date());
-
-      if (isValid(parsedDate) && format(parsedDate, 'yyyy-MM-dd') === String(value)) {
-        const hasTime = String(value).includes(':') || String(value).includes('T');
-
-        if (hasTime) {
-          return format(parsedDate, 'MMM d, HH:mm');
-        }
-
-        return format(parsedDate, 'MMM d');
-      }
-
-      return String(value);
-    };
+    // Axis and tooltip labels go through the user's date/time preferences, the
+    // same as table cells and exports. The previous formatter only recognised
+    // bare "yyyy-MM-dd" days, so a time axis printed raw server timestamps
+    // ("2026-07-27T09:36:54.000Z") — 24 characters per tick, in UTC rather than
+    // the viewer's zone (DO-273).
+    const formatXAxisLabel = (value: string | number) =>
+      formatChartAxisLabel(value, datetimePrefs);
 
     const ChartComponent = fillArea !== 'none' ? ComposedChart : LineChart;
 
@@ -1553,12 +1452,19 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                 opacity={ 0.3 }
               />
             ) }
+            {/* Thin the ticks instead of forcing one per x. `interval={0}`
+                kept every label: a day of 10-second samples printed hundreds of
+                rotated labels over the plot area and over the legend — the only
+                place the series names appear (DO-273). "preserveStartEnd" keeps
+                the range ends and drops what would overlap, so short axes still
+                label every point. */}
             <XAxis
               dataKey={ xKey }
               angle={ -45 }
               textAnchor="end"
               height={ 80 }
-              interval={ 0 }
+              interval="preserveStartEnd"
+              minTickGap={ 20 }
               tick={ { fill: 'var(--text-secondary)', fontSize: 12 } }
               axisLine={ { stroke: 'var(--border)' } }
               tickFormatter={ formatXAxisLabel }
@@ -1591,19 +1497,29 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
 
             {/* One element per series: a stroked Area when fill is enabled (the
                 area's top edge is the line), otherwise a plain Line. A single
-                element per series avoids duplicate legend/tooltip entries. */ }
-            { seriesNames.map((seriesName, index) => {
+                element per series avoids duplicate legend/tooltip entries.
+
+                Grouped (long-format) series connect across the x values where
+                another series sampled — those are not gaps in this series, and
+                left as gaps a series whose sample times rarely coincide with
+                the others draws as isolated points, i.e. nothing at all. The
+                pivot cannot separate that from an explicit NULL reading, so an
+                outage inside a grouped series is drawn through as well; see
+                buildLineChartSeries. Wide format keeps gap semantics: there a
+                missing value is a real one, and joining across it would invent
+                data. Matches how the composite report plots its grouped
+                series. */ }
+            { series.map(({ key, label }, index) => {
               const color = colors[index % colors.length];
-              const dataKey = seriesDataKey(seriesName);
               const dot = shouldShowPoints
                 ? { r: pointSize, fill: color, strokeWidth: 2, stroke: 'var(--surface-1)' }
                 : false;
               return fillArea !== 'none' ? (
                 <Area
-                  key={ `series-${ seriesName }` }
+                  key={ key }
                   type={ getCurveType() }
-                  dataKey={ dataKey }
-                  name={ seriesName }
+                  dataKey={ key }
+                  name={ label }
                   stroke={ color }
                   strokeWidth={ lineWidth }
                   strokeDasharray={ getStrokeDasharray() }
@@ -1611,21 +1527,23 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                   fillOpacity={ 0.1 }
                   dot={ dot }
                   activeDot={ { r: pointSize + 2 } }
+                  connectNulls={ isLongFormat }
                   isAnimationActive={ true }
                   animationDuration={ 300 }
                   animationEasing="ease-out"
                 />
               ) : (
                 <Line
-                  key={ `series-${ seriesName }` }
+                  key={ key }
                   type={ getCurveType() }
-                  dataKey={ dataKey }
-                  name={ seriesName }
+                  dataKey={ key }
+                  name={ label }
                   stroke={ color }
                   strokeWidth={ lineWidth }
                   strokeDasharray={ getStrokeDasharray() }
                   dot={ dot }
                   activeDot={ { r: pointSize + 2 } }
+                  connectNulls={ isLongFormat }
                   isAnimationActive={ true }
                   animationDuration={ 300 }
                   animationEasing="ease-out"

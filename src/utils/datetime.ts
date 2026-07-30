@@ -348,12 +348,23 @@ export function isTimestampLike(value: unknown): value is string {
   return typeof value === 'string' && TIMESTAMP_LIKE_RE.test(value.trim());
 }
 
+/** A calendar day with no clock — the shape a daily rollup buckets to. */
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
 /**
  * Format a timestamp for display using the user's preferences.
  *
  * Accepts either a Date or a server string (which will be parsed via
  * {@link parseServerTimestamp}). Returns an empty string for invalid input
  * so callers can use it inside JSX without extra guards.
+ *
+ * A bare day ("2026-05-12" — a `date` column, or a `::date` / `to_char`
+ * rollup) is *not* an instant and must not become one: parsed it would be UTC
+ * midnight, so a viewer behind UTC would see it move to the previous day and
+ * grow a clock the query never returned. It is also already local — the SQL
+ * session runs in the viewer's zone (DO-352) — so converting it would subtract
+ * that offset a second time. Its own year/month/day therefore go straight into
+ * the date pattern, and `includeTime` has nothing to add (DO-273).
  *
  * Both `prefs.dateFormat` and `prefs.timeFormat` are explicit patterns
  * (no more `'default'`); the result is rendered the same way regardless
@@ -366,14 +377,26 @@ export function formatTimestamp(
   options: { includeTime?: boolean } = {},
 ): string {
   if (value == null) return '';
+
+  // Legacy prefs may not have either format set; seed from sensible defaults
+  // so users who never opened Settings still get a stable rendering.
+  const dateFmt: DateFormat = prefs.dateFormat ?? 'dd/mm/yyyy';
+
+  if (typeof value === 'string') {
+    const day = DATE_ONLY_RE.exec(value.trim());
+    if (day) {
+      return renderDatePattern(
+        { year: Number(day[1]), month: Number(day[2]), day: Number(day[3]) },
+        dateFmt,
+      );
+    }
+  }
+
   const date = value instanceof Date ? value : parseServerTimestamp(value);
   if (!date || Number.isNaN(date.getTime())) return '';
 
   const includeTime = options.includeTime ?? true;
   const timeZone = prefs.timeZone === 'auto' ? undefined : prefs.timeZone;
-  // Legacy prefs may not have either format set; seed from sensible defaults
-  // so users who never opened Settings still get a stable rendering.
-  const dateFmt: DateFormat = prefs.dateFormat ?? 'dd/mm/yyyy';
   const timeFmt: TimeFormat =
     prefs.timeFormat ?? (prefs.hourCycle === 'h12' ? 'h12' : 'h24');
 
@@ -381,6 +404,26 @@ export function formatTimestamp(
   if (!includeTime) return datePart;
   const timePart = formatTimeWithPattern(date, timeFmt, prefs, timeZone);
   return `${datePart} ${timePart}`;
+}
+
+/**
+ * Format a value for a chart axis tick or tooltip label.
+ *
+ * Timestamps and calendar days render through {@link formatTimestamp}, so an
+ * axis reads in the user's zone and date/time format — the same rendering
+ * table cells and exports use — instead of the raw server string. Anything
+ * else (category labels, numbers) is stringified untouched.
+ */
+export function formatChartAxisLabel(
+  value: unknown,
+  prefs: DatetimePrefs,
+): string {
+  if (value == null) return '';
+  if (isTimestampLike(value)) {
+    const formatted = formatTimestamp(value, prefs);
+    if (formatted) return formatted;
+  }
+  return String(value);
 }
 
 interface ZoneComponents {
@@ -570,6 +613,19 @@ function formatDateWithPattern(
 ): string {
   const c = getZoneComponents(date, timeZone);
   if (!c) return date.toISOString();
+  return renderDatePattern(c, fmt);
+}
+
+/**
+ * Render calendar fields in the user's date pattern. Split out from
+ * {@link formatDateWithPattern} so a value that is already a calendar day —
+ * with no instant behind it — can be rendered without inventing one; see
+ * {@link formatChartAxisLabel}.
+ */
+function renderDatePattern(
+  c: { year: number; month: number; day: number },
+  fmt: DateFormat,
+): string {
   const dd = pad2(c.day);
   const mm = pad2(c.month);
   const yyyy = String(c.year);

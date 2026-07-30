@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   __resetObservedHostZoneForTests,
   detectDefaultPrefs,
+  formatChartAxisLabel,
   formatLocalInputInZone,
   formatTimestamp,
   isDateLikeParam,
@@ -208,6 +209,77 @@ describe('formatTimestamp', () => {
     expect(formatTimestamp(utcInstant, prefsBerlin, { includeTime: false })).toBe(
       '12.05.2026',
     );
+  });
+
+  // DO-273: a `date` column reaches the frontend as a bare day (the backend
+  // keeps Postgres' calendar string instead of letting pg turn it into a
+  // server-local instant). Every display path — table cells, parameter chips,
+  // chart ticks — formats it through here, so the day has to survive the
+  // rendering rather than be parsed as UTC midnight and shifted back a day for
+  // viewers behind UTC.
+  it('renders a bare day as that day, in every viewer zone', () => {
+    expect(formatTimestamp('2026-05-12', prefsBerlin)).toBe('12.05.2026');
+    expect(formatTimestamp('2026-05-12', prefsNY)).toBe('05-12-2026');
+    expect(formatTimestamp('2026-05-12', prefsNY, { includeTime: false })).toBe(
+      '05-12-2026',
+    );
+  });
+
+  it('still treats midnight-with-a-clock as the instant it is', () => {
+    // Unlike a bare day, "00:00:00" is a real timestamp: UTC midnight reads as
+    // the previous evening in New York.
+    expect(formatTimestamp('2026-05-12 00:00:00', prefsNY)).toMatch(
+      /05-11-2026.*08:00\s?PM/,
+    );
+  });
+});
+
+describe('formatChartAxisLabel', () => {
+  // DO-273: a time axis used to print the raw server string — 24 characters
+  // per tick, in UTC rather than the viewer's zone.
+  it('renders a timestamp tick in the viewer zone and format', () => {
+    expect(formatChartAxisLabel('2026-05-12T03:00:00.000Z', prefsBerlin)).toBe(
+      '12.05.2026 05:00',
+    );
+    expect(formatChartAxisLabel('2026-05-12T03:00:00.000Z', prefsNY)).toMatch(
+      /05-11-2026.*11:00\s?PM/,
+    );
+  });
+
+  it('drops the clock for a date-only tick', () => {
+    expect(formatChartAxisLabel('2026-05-12', prefsBerlin)).toBe('12.05.2026');
+  });
+
+  // A bare day is a calendar day, not an instant. Routed through Date it would
+  // parse as UTC midnight, and every viewer behind UTC would see the label move
+  // to the previous day — the shape daily rollups (::date, date_trunc, to_char)
+  // produce. Berlin is ahead of UTC, so only a zone behind it catches this.
+  it('keeps a date-only tick on its own day west of UTC', () => {
+    expect(formatChartAxisLabel('2026-05-12', prefsNY)).toBe('05-12-2026');
+  });
+
+  it('still renders midnight-with-a-clock as the instant it is', () => {
+    // Unlike a bare day, "00:00:00" is a real timestamp: it is UTC midnight and
+    // reads as the previous evening in New York.
+    expect(formatChartAxisLabel('2026-05-12 00:00:00', prefsNY)).toMatch(
+      /05-11-2026.*08:00\s?PM/,
+    );
+  });
+
+  it('accepts a naive timestamp (treated as UTC, like every other cell)', () => {
+    expect(formatChartAxisLabel('2026-05-12 03:00:00', prefsBerlin)).toBe(
+      '12.05.2026 05:00',
+    );
+  });
+
+  it('leaves category labels and numbers alone', () => {
+    expect(formatChartAxisLabel('Sensor A', prefsBerlin)).toBe('Sensor A');
+    expect(formatChartAxisLabel(42, prefsBerlin)).toBe('42');
+  });
+
+  it('renders nullish input as an empty label', () => {
+    expect(formatChartAxisLabel(null, prefsBerlin)).toBe('');
+    expect(formatChartAxisLabel(undefined, prefsBerlin)).toBe('');
   });
 });
 
