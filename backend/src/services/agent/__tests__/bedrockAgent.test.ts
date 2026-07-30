@@ -265,6 +265,34 @@ describe('toDashboardResult', () => {
     // The route owns session_id; the service cannot see or set it (§3.1).
     expect(out).not.toHaveProperty('session_id');
   });
+
+  it('strips the artifact URL out of the chat bubble but keeps it fetchable upstream', () => {
+    // Placeholder bucket: the whole point is not to publish the real one. Full
+    // stripping behaviour is covered in stripArtifactUrl.test.ts.
+    const schema = { title: 'Fleet Overview', panels: [], uid: 'u1' };
+    const out = toDashboardResult(
+      [
+        'Built it! 🎉',
+        '',
+        '| **Download URL** | `s3://example-bucket-0000/jobs/11111111-2222-4333-8444-555555555555/report_schema.json` |',
+      ].join('\n'),
+      schema,
+    );
+    expect(out.message).toBe('Built it! 🎉');
+    expect(out.message).not.toContain('s3://');
+    // The dashboard itself is unaffected — it is already fetched by this point.
+    expect(out.result).toEqual({ title: 'Fleet Overview', report_schema: schema });
+  });
+
+  it('never renders a blank bubble when the reply was nothing but the URL', () => {
+    const schema = { title: 'Fleet Overview', panels: [], uid: 'u1' };
+    const out = toDashboardResult(
+      '`s3://example-bucket-0000/jobs/11111111-2222-4333-8444-555555555555/report_schema.json`',
+      schema,
+    );
+    expect(out.message).toBe('Your dashboard is ready.');
+    expect(out.type).toBe('result');
+  });
 });
 
 describe('describeError', () => {

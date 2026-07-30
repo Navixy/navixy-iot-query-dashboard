@@ -32,6 +32,7 @@ import {
   type DashboardSchema,
   type S3Location,
 } from './artifactStore.js';
+import { stripArtifactUrls } from './stripArtifactUrl.js';
 import type { AgentContext, AgentService, AgentTurnInput, AgentTurnResult } from './types.js';
 
 const DEFAULT_REGION = 'eu-central-1';
@@ -237,12 +238,24 @@ export async function collectCompletion(
 }
 
 export function toDashboardResult(prose: string, schema: DashboardSchema): AgentTurnResult {
+  // The agent's own prose IS the chat bubble — minus the artifact's s3:// URL and
+  // the "Download URL" / `aws s3 cp` scaffolding around it. That bucket name is
+  // internal infrastructure, and the copy command is useless to a browser user:
+  // the dashboard is already in `result`. See stripArtifactUrl.ts.
+  const stripped = stripArtifactUrls(prose);
   return {
     type: 'result',
-    message: prose, // the agent's own prose IS the chat bubble
+    // Stripping consumes everything only when the agent said nothing BUT the
+    // URL. That is a successful build, so it must not render as a blank bubble
+    // beside a preview — the same reasoning that rejects an empty completion
+    // outright (drainCompletion). One synthesized sentence, and only here.
+    message: stripped === '' ? RESULT_FALLBACK_MESSAGE : stripped,
     result: { title: schema.title, report_schema: schema },
   };
 }
+
+/** Only for a reply that was nothing but the artifact URL — see toDashboardResult. */
+const RESULT_FALLBACK_MESSAGE = 'Your dashboard is ready.';
 
 const CONFIG_MESSAGE = 'The assistant is unavailable due to a configuration problem.';
 const BUSY_MESSAGE = 'The assistant is busy right now. Please try again in a moment.';
