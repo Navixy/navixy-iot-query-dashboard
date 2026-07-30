@@ -395,7 +395,7 @@ describe('buildLineChartSeries — wide format', () => {
   });
 
   it('skips descriptions a number starts, and reads the value column after them', () => {
-    // Read cell-first, `'3 days'` is a measurement of 3 and a firmware
+    // Read prefix-first, `'3 days'` is a measurement of 3 and a firmware
     // `'2.1.0'` one of 2.1 — the line invented values no query returned. The
     // real measure here is the text column that *is* a number whole, and it
     // sits two columns past where its series does.
