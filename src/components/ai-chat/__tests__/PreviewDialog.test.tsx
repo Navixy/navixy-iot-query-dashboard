@@ -190,6 +190,25 @@ describe('PreviewDialog — the panel banner', () => {
     expect(banner().className).not.toContain('text-destructive');
   });
 
+  it('states one panel population, never two that disagree', async () => {
+    // Every agent dashboard ships a text panel, so the raw schema count and the count
+    // of panels that run SQL always differ. The header used to print both, two lines
+    // apart: "3 panels, previewed against your data." above "All 2 panels loaded."
+    rendererProps.status = { total: 2, loaded: 2, failed: 0, pending: 0 };
+    mount({
+      result: {
+        title: 'T',
+        report_schema: {
+          panels: [{ id: 1, type: 'text' }, { id: 2, type: 'table' }, { id: 3, type: 'table' }],
+        },
+      },
+    });
+    await waitFor(() => expect(banner().textContent).toBe('All 2 panels loaded.'));
+
+    const subtitle = screen.getByText(/previewed against your data/i);
+    expect(subtitle.textContent).not.toMatch(/\d/);
+  });
+
   it('counts down while panels are still executing', async () => {
     rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3 };
     mount();

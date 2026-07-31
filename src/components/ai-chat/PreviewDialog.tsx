@@ -121,9 +121,6 @@ function PreviewBody({ result, nonce, applyAction }: {
   useEffect(() => () => useEditorStore.getState().reset(), []);
 
   const banner = describePanelStatus(status);
-  const panelCount = Array.isArray(result.report_schema['panels'])
-    ? (result.report_schema['panels'] as unknown[]).length
-    : 0;
 
   return (
     <>
@@ -131,8 +128,15 @@ function PreviewBody({ result, nonce, applyAction }: {
           (right-4 top-4), which p-0 on the content pulls right up against the text. */}
       <DialogHeader className="shrink-0 p-4 pb-2 pr-12">
         <DialogTitle className="text-left">{result.title}</DialogTitle>
+        {/* NO panel count here. The banner below counts the panels that RUN SQL; a
+            count taken from the raw schema counts the disclaimer text panel too, and
+            every agent dashboard ships one — so the two numbers disagreed on every
+            real preview, two lines apart ("3 panels, previewed against your data."
+            above "All 2 panels loaded."). Both were true of different populations,
+            which is not something a header can convey. The card the user came from
+            already states the schema count. (!64 review round 4, finding 2) */}
         <DialogDescription className="text-left">
-          {panelCount === 1 ? '1 panel' : `${panelCount} panels`}, previewed against your data.
+          Previewed against your data. Nothing is saved until you apply.
         </DialogDescription>
         {/* The banner lives in the HEADER, which is shrink-0 and therefore visible
             however far the grid below is scrolled. A failure the user does not notice
