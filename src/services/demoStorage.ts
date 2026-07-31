@@ -3,6 +3,7 @@
  * This provides a local database for demo mode that persists across browser sessions
  */
 import Dexie, { type Table } from 'dexie';
+import { getDemoOwnership } from '@/lib/authSession';
 import type { RawReportSchema } from '@/types/dashboard-types';
 
 /** Coerce an unknown backend date value (ISO string / epoch / Date) to a Date. */
@@ -67,6 +68,12 @@ class DemoDatabase extends Dexie {
   globalVariables!: Table<DemoGlobalVariable, string>;
   metadata!: Table<DemoMetadata, string>;
   chartCatalog!: Table<{ id: string; schemaVersion: string; groups: unknown[] }, string>;
+  // Singleton owner token (review !62 round 7, finding 1): the ORIGIN-WIDE holder
+  // of this per-origin singleton DB. Every tab shares this IndexedDB, so a sign-in
+  // in another tab writes a new token here that THIS tab's destructive
+  // transactions can see — which the tab-local React ref round 6 used could not.
+  // Deliberately NOT cleared by clearAllData, so it survives across clears/seeds.
+  owner!: Table<{ id: string; token: string }, string>;
 
   constructor() {
     super('NavixyDemoDatabase');
@@ -86,7 +93,76 @@ class DemoDatabase extends Dexie {
       metadata: 'id, key',
       chartCatalog: 'id'
     });
+
+    // v3: origin-wide demo-ownership token (review !62 round 7, finding 1). Adding
+    // a store is a pure Dexie upgrade — the store starts empty; no data migrates.
+    this.version(3).stores({
+      sections: 'id, name, sortOrder, userId, isDeleted',
+      reports: 'id, title, sectionId, sortOrder, userId, isDeleted',
+      globalVariables: 'id, label',
+      metadata: 'id, key',
+      chartCatalog: 'id',
+      owner: 'id'
+    });
   }
+}
+
+const OWNER_KEY = 'current';
+/** Dexie store name for the owner table — used by name so the guarded-write
+ *  helper can widen a transaction scope without importing Table generics. */
+const OWNER_STORE = 'owner';
+
+/** Thrown by every guarded demo operation when this tab's claim has been
+ *  superseded. demoApi wraps thrown errors into a DEMO_ERROR response, so the
+ *  caller sees a normal failure instead of a silent cross-identity write. */
+const OWNERSHIP_MOVED_MESSAGE = 'Demo data now belongs to a newer sign-in';
+
+/**
+ * May THIS TAB touch the origin's demo store right now? (review !62 round 9
+ * finding 2; corrected in round 10, Critical 1.)
+ *
+ * IndexedDB here is a per-origin SINGLETON shared by every tab, while a tab's
+ * identity is tab-local. Rounds 7-8 guarded only clear/seed, leaving ordinary
+ * CRUD — the bulk of demo traffic — free to read and write on behalf of a tab
+ * whose identity a newer sign-in had already replaced. The cross-tab
+ * storage-event ender cannot close that: it is asynchronous and cannot be
+ * ordered against work already in flight.
+ *
+ * Round 9 modelled the anchor as `string | null` and read null as PERMISSION —
+ * "no claim to compare, so nothing to supersede". That was wrong in the one case
+ * that matters: the teardown CLEARS the anchor, so a superseded tab's in-flight
+ * operation arrived here holding null and was allowed through, into the
+ * successor's freshly-seeded store. The states are now distinguished
+ * (authSession.ts) and only two of them may act:
+ *
+ * - 'owned'     — DENY UNLESS the claimed token is still the origin's owner. An
+ *                 owner row that has vanished is also a denial: this tab holds a
+ *                 claim on a store that no longer exists in the form it claimed.
+ * - 'revoked'   — ALWAYS DENY. This tab held a claim and lost it.
+ * - 'unclaimed' — allowed only while the store has NO owner at all: a legacy
+ *                 store predating the owner row, where there is nobody to harm.
+ *                 An owned store is somebody else's, so a tab with no claim of
+ *                 its own does not get to read or write it.
+ *
+ * Bootstrap is not a hole in that last rule: AuthContext adopts the origin's
+ * owner BEFORE it publishes `user`, and every demo-backed query is gated on
+ * `user`, so no CRUD runs in the 'unclaimed' state for a real demo session.
+ */
+async function ownershipDenied(database: DemoDatabase): Promise<boolean> {
+  const ownership = getDemoOwnership();
+  if (ownership.status === 'revoked') return true;
+  const current = (await database.owner.get(OWNER_KEY))?.token;
+  if (ownership.status === 'unclaimed') return current !== undefined;
+  return current !== ownership.token;
+}
+
+/** Mint an origin-wide ownership token. randomUUID needs a secure context
+ *  (localhost + the https iframe host qualify); the fallback only needs
+ *  uniqueness per claim on this origin. */
+function mintOwnerToken(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 // Singleton instance
@@ -116,11 +192,91 @@ export class DemoStorageService {
   }
 
   // ==========================================
+  // Origin-wide demo ownership (review !62 round 7, finding 1)
+  // ==========================================
+
+  /**
+   * Claim ownership of the singleton demo DB for a NEW sign-in and return the
+   * minted token. Every destructive call made on behalf of this sign-in passes
+   * the token back as `expectedOwner`; a later sign-in — in THIS tab or ANY other
+   * tab on the origin — claims a new token, so those calls abort in-transaction
+   * instead of clobbering the successor's data. Origin-wide because the token
+   * lives in IndexedDB, not a per-tab React ref.
+   */
+  async claimDemoOwnership(): Promise<string> {
+    const token = mintOwnerToken();
+    await getDb().owner.put({ id: OWNER_KEY, token });
+    return token;
+  }
+
+  /** The current origin-wide owner token, or undefined if none has been claimed.
+   *  A restoring tab adopts this as its anchor (review !62 round 9, finding 2);
+   *  clear/reseed assert the anchor they already hold, never this. */
+  async readDemoOwner(): Promise<string | undefined> {
+    return (await getDb().owner.get(OWNER_KEY))?.token;
+  }
+
+  /**
+   * Run a demo WRITE only while this tab still holds the origin's ownership
+   * (review !62 round 9, finding 2).
+   *
+   * The check runs INSIDE the same read-write transaction as the write, over a
+   * scope that includes the owner store: IndexedDB serializes transactions on
+   * overlapping stores, so a competing claimDemoOwnership() cannot land between
+   * the check and the write. Throwing aborts the transaction, so a superseded
+   * write leaves nothing half-applied.
+   */
+  private async guardedWrite<T>(stores: string[], body: () => Promise<T>): Promise<T> {
+    const database = getDb();
+    return database.transaction('rw', [OWNER_STORE, ...stores], async () => {
+      if (await ownershipDenied(database)) {
+        throw new Error(OWNERSHIP_MOVED_MESSAGE);
+      }
+      return body();
+    });
+  }
+
+  /**
+   * Run a demo READ only while this tab may see the store, in ONE readonly
+   * transaction spanning the owner row and the data (review !62 round 9 finding
+   * 2; made transactional in round 10, Critical 1).
+   *
+   * Round 9 checked ownership and then read, as two separate IndexedDB
+   * operations — a claim could land in between, so the check said "yours" about a
+   * store that was somebody else's by the time it was read. Holding both in one
+   * transaction closes that: IndexedDB serializes transactions over overlapping
+   * stores, and the owner store is in scope here for exactly that reason.
+   *
+   * A denied read returns its EMPTY value rather than throwing: the tab is on its
+   * way to /login via the storage-event ender, and showing nothing is the safe
+   * failure — showing the SUCCESSOR's sections, reports or dashboards is a
+   * cross-identity leak.
+   */
+  private async guardedRead<T>(stores: string[], empty: T, body: () => Promise<T>): Promise<T> {
+    const database = getDb();
+    return database.transaction('r', [OWNER_STORE, ...stores], async () => {
+      if (await ownershipDenied(database)) return empty;
+      return body();
+    });
+  }
+
+  // ==========================================
   // Initialization & Data Seeding
   // ==========================================
 
   /**
-   * Seed the demo database with data from the backend
+   * Seed the demo database with data from the backend.
+   *
+   * `expectedOwner` (review !62 round 7, finding 1) is the ORIGIN-WIDE ownership
+   * token this caller holds; it is re-read from IndexedDB INSIDE each destructive
+   * transaction — the internal clear and the bulk write — and the operation aborts
+   * if ownership has moved to a newer sign-in in this or any other tab. IndexedDB
+   * is a per-origin SINGLETON and serializes read/write transactions on
+   * overlapping stores, so the in-transaction check cannot be overtaken. Omit
+   * expectedOwner for an unconditional seed (legacy callers).
+   *
+   * Returns true if seeded, false if it ABORTED because ownership moved on — the
+   * caller must propagate that so its continuation (a page reload) does not run.
    */
   async seedFromBackend(data: {
     sections: Record<string, unknown>[];
@@ -128,7 +284,7 @@ export class DemoStorageService {
     globalVariables: Record<string, unknown>[];
     chartCatalog?: { schemaVersion?: string; groups?: unknown[] } | null;
     userId: string;
-  }): Promise<void> {
+  }, expectedOwner?: string): Promise<boolean> {
     console.log('[DemoStorage] seedFromBackend called with:', {
       sectionsCount: data.sections?.length ?? 0,
       reportsCount: data.reports?.length ?? 0,
@@ -162,10 +318,15 @@ export class DemoStorageService {
     }
 
     const database = getDb();
-    
-    // Clear existing data first (should already be cleared, but double-check)
+
+    // Clear existing data first (should already be cleared, but double-check).
+    // Pass the ownership token through so this internal clear is guarded too; if it
+    // aborts, ownership has moved on and we must not seed either.
     console.log('[DemoStorage] Clearing existing data before seeding...');
-    await this.clearAllData();
+    if (!(await this.clearAllData(expectedOwner))) {
+      console.log('[DemoStorage] Seed aborted: ownership moved on before the clear');
+      return false;
+    }
 
     // Seed sections
     const sections = data.sections.map(s => ({
@@ -244,8 +405,19 @@ export class DemoStorageService {
 
     // Bulk insert all data
     console.log('[DemoStorage] Starting bulk insert to IndexedDB...');
+    let aborted = false;
     try {
-      await database.transaction('rw', [database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+      await database.transaction('rw', [database.owner, database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+        // Ownership guard INSIDE the write transaction (review !62 round 7, finding
+        // 1): if a newer sign-in (any tab) claimed ownership while this run
+        // fetched, do not overwrite the successor's freshly-seeded store.
+        if (expectedOwner !== undefined) {
+          const current = await database.owner.get(OWNER_KEY);
+          if (current?.token !== expectedOwner) {
+            aborted = true;
+            return;
+          }
+        }
         if (sections.length > 0) {
           console.log('[DemoStorage] Inserting', sections.length, 'sections...');
           await database.sections.bulkAdd(sections);
@@ -276,6 +448,13 @@ export class DemoStorageService {
       throw error;
     }
 
+    // The write was skipped because a newer identity took over — leave its data
+    // untouched and do not run the mismatch verification against it.
+    if (aborted) {
+      console.log('[DemoStorage] Seed superseded before write; left current identity data intact');
+      return false;
+    }
+
     // Verify data was inserted correctly
     const insertedReports = await database.reports.count();
     const insertedSections = await database.sections.count();
@@ -293,6 +472,7 @@ export class DemoStorageService {
     if (insertedReports !== reports.length) {
       console.error('[DemoStorage] MISMATCH: Expected', reports.length, 'reports but found', insertedReports, 'in IndexedDB');
     }
+    return true;
   }
 
   /**
@@ -305,30 +485,53 @@ export class DemoStorageService {
   }
 
   /**
-   * Clear all demo data
+   * Clear all demo data.
+   *
+   * `expectedOwner` (review !62 round 7, finding 1) is the ORIGIN-WIDE ownership
+   * token this caller holds. It is re-read from IndexedDB as the FIRST statement
+   * inside the destructive transaction and compared there — not via a tab-local
+   * ref — so a sign-in in ANOTHER tab that claimed a new token aborts this clear
+   * instead of wiping the successor's data. IndexedDB serializes overlapping-store
+   * transactions, so the in-transaction check cannot be overtaken. Omit
+   * expectedOwner for an unconditional clear (legacy callers).
+   *
+   * Returns true if the data was cleared, false if the transaction ABORTED because
+   * ownership had moved on — the caller must propagate that so its continuation
+   * (a sign-out, a page reload) does not run on the successor's behalf.
    */
-  async clearAllData(): Promise<void> {
+  async clearAllData(expectedOwner?: string): Promise<boolean> {
     const database = getDb();
-    
+
     // Log what we're about to delete
     const existingReports = await database.reports.count();
     const existingSections = await database.sections.count();
     const existingGlobalVars = await database.globalVariables.count();
-    
+
     console.log('[DemoStorage] Clearing all data. Current counts:', {
       reports: existingReports,
       sections: existingSections,
       globalVariables: existingGlobalVars
     });
 
-    await database.transaction('rw', [database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+    let aborted = false;
+    await database.transaction('rw', [database.owner, database.sections, database.reports, database.globalVariables, database.metadata, database.chartCatalog], async () => {
+      if (expectedOwner !== undefined) {
+        const current = await database.owner.get(OWNER_KEY);
+        if (current?.token !== expectedOwner) {
+          console.log('[DemoStorage] Clear superseded: ownership moved to another sign-in; aborting');
+          aborted = true;
+          return;
+        }
+      }
       await database.sections.clear();
       await database.reports.clear();
       await database.globalVariables.clear();
       await database.metadata.clear();
       await database.chartCatalog.clear();
+      // owner is intentionally NOT cleared — it identifies the current holder.
     });
-    
+    if (aborted) return false;
+
     // Verify everything is cleared
     const afterReports = await database.reports.count();
     const afterSections = await database.sections.count();
@@ -336,6 +539,7 @@ export class DemoStorageService {
       reportsAfterClear: afterReports,
       sectionsAfterClear: afterSections
     });
+    return true;
   }
 
   // ==========================================
@@ -344,9 +548,11 @@ export class DemoStorageService {
 
   async getChartCatalog(): Promise<{ schemaVersion: string; groups: unknown[] } | null> {
     const database = getDb();
-    const row = await database.chartCatalog.get('catalog');
-    if (!row) return null;
-    return { schemaVersion: row.schemaVersion, groups: Array.isArray(row.groups) ? row.groups : [] };
+    return this.guardedRead(['chartCatalog'], null, async () => {
+      const row = await database.chartCatalog.get('catalog');
+      if (!row) return null;
+      return { schemaVersion: row.schemaVersion, groups: Array.isArray(row.groups) ? row.groups : [] };
+    });
   }
 
   // ==========================================
@@ -355,17 +561,17 @@ export class DemoStorageService {
 
   async getSections(userId?: string): Promise<DemoSection[]> {
     const database = getDb();
-    const query = database.sections.where('isDeleted').equals(0); // IndexedDB stores booleans as 0/1
-    
-    // Dexie doesn't support compound where on different fields well, so filter in memory
-    let sections = await database.sections.toArray();
-    sections = sections.filter(s => !s.isDeleted);
-    
-    if (userId) {
-      sections = sections.filter(s => s.userId === userId);
-    }
-    
-    return sections.sort((a, b) => a.sortOrder - b.sortOrder);
+    return this.guardedRead(['sections'], [] as DemoSection[], async () => {
+      // Dexie doesn't support compound where on different fields well, so filter in memory
+      let sections = await database.sections.toArray();
+      sections = sections.filter(s => !s.isDeleted);
+
+      if (userId) {
+        sections = sections.filter(s => s.userId === userId);
+      }
+
+      return sections.sort((a, b) => a.sortOrder - b.sortOrder);
+    });
   }
 
   async createSection(data: {
@@ -374,7 +580,7 @@ export class DemoStorageService {
     userId: string;
   }): Promise<DemoSection> {
     const database = getDb();
-    
+
     const section: DemoSection = {
       id: crypto.randomUUID(),
       name: data.name,
@@ -388,7 +594,7 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await database.sections.add(section);
+    await this.guardedWrite(['sections'], () => database.sections.add(section));
     return section;
   }
 
@@ -399,46 +605,55 @@ export class DemoStorageService {
     version: number;
   }): Promise<DemoSection> {
     const database = getDb();
-    
-    const existing = await database.sections.get(id);
-    if (!existing) {
-      throw new Error('Section not found');
-    }
-    
-    if (existing.version !== data.version) {
-      throw new Error('Version conflict');
-    }
 
-    const updated: Partial<DemoSection> = {
-      updatedAt: new Date(),
-      updatedBy: data.userId,
-      version: existing.version + 1
-    };
+    // The lookup, the version check and the write are ONE transaction (review !62
+    // round 11, Important 3). Split, two tabs holding the same owner could both
+    // read version 1 and both write version 2 — the optimistic-locking check would
+    // pass for both and one edit would be silently lost. A revoked tab also got to
+    // read the successor's row before the guard refused it.
+    return this.guardedWrite(['sections'], async () => {
+      const existing = await database.sections.get(id);
+      if (!existing) {
+        throw new Error('Section not found');
+      }
 
-    if (data.name !== undefined) updated.name = data.name;
-    if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
+      if (existing.version !== data.version) {
+        throw new Error('Version conflict');
+      }
 
-    await database.sections.update(id, updated);
-    
-    return { ...existing, ...updated } as DemoSection;
+      const updated: Partial<DemoSection> = {
+        updatedAt: new Date(),
+        updatedBy: data.userId,
+        version: existing.version + 1
+      };
+
+      if (data.name !== undefined) updated.name = data.name;
+      if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
+
+      await database.sections.update(id, updated);
+
+      return { ...existing, ...updated } as DemoSection;
+    });
   }
 
   async deleteSection(id: string, strategy: 'move_children_to_root' | 'delete_children', userId: string): Promise<{ affectedReports: number }> {
     const database = getDb();
-    
-    const section = await database.sections.get(id);
-    if (!section || section.isDeleted) {
-      throw new Error('Section not found');
-    }
 
-    // Get child reports
-    const childReports = await database.reports
-      .filter(r => r.sectionId === id && !r.isDeleted)
-      .toArray();
+    // Lookup, the dependent child read and every write in ONE transaction (round
+    // 11, Important 3): the child set a concurrent write could have changed under
+    // us is exactly what decides which reports are moved or deleted.
+    return this.guardedWrite(['sections', 'reports'], async () => {
+      const section = await database.sections.get(id);
+      if (!section || section.isDeleted) {
+        throw new Error('Section not found');
+      }
 
-    const affectedReports = childReports.length;
+      const childReports = await database.reports
+        .filter(r => r.sectionId === id && !r.isDeleted)
+        .toArray();
 
-    await database.transaction('rw', [database.sections, database.reports], async () => {
+      const affectedReports = childReports.length;
+
       if (strategy === 'move_children_to_root') {
         // Move reports to root
         for (const report of childReports) {
@@ -465,23 +680,25 @@ export class DemoStorageService {
         updatedAt: new Date(),
         updatedBy: userId
       });
-    });
 
-    return { affectedReports };
+      return { affectedReports };
+    });
   }
 
   async restoreSection(id: string, userId: string): Promise<void> {
     const database = getDb();
     
-    const section = await database.sections.get(id);
-    if (!section || !section.isDeleted) {
-      throw new Error('Deleted section not found');
-    }
+    await this.guardedWrite(['sections'], async () => {
+      const section = await database.sections.get(id);
+      if (!section || !section.isDeleted) {
+        throw new Error('Deleted section not found');
+      }
 
-    await database.sections.update(id, {
-      isDeleted: false,
-      updatedAt: new Date(),
-      updatedBy: userId
+      await database.sections.update(id, {
+        isDeleted: false,
+        updatedAt: new Date(),
+        updatedBy: userId
+      });
     });
   }
 
@@ -491,8 +708,9 @@ export class DemoStorageService {
 
   async getReports(userId?: string): Promise<DemoReport[]> {
     const database = getDb();
-    
-    let reports = await database.reports.toArray();
+
+    let reports = await this.guardedRead(['reports'], [] as DemoReport[], () =>
+      database.reports.toArray());
     console.log('[DemoStorage] getReports - Total reports in IndexedDB:', reports.length);
     
     const beforeFilter = reports.length;
@@ -526,12 +744,13 @@ export class DemoStorageService {
 
   async getReportById(id: string, userId?: string): Promise<DemoReport | null> {
     const database = getDb();
-    
-    const report = await database.reports.get(id);
-    if (!report || report.isDeleted) return null;
-    if (userId && report.userId !== userId) return null;
-    
-    return report;
+    return this.guardedRead(['reports'], null as DemoReport | null, async () => {
+      const report = await database.reports.get(id);
+      if (!report || report.isDeleted) return null;
+      if (userId && report.userId !== userId) return null;
+
+      return report;
+    });
   }
 
   async createReport(data: {
@@ -560,7 +779,7 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await database.reports.add(report);
+    await this.guardedWrite(['reports'], () => database.reports.add(report));
     return report;
   }
 
@@ -574,60 +793,69 @@ export class DemoStorageService {
     version?: number;
   }): Promise<DemoReport> {
     const database = getDb();
-    
-    const existing = await database.reports.get(id);
-    if (!existing || existing.isDeleted) {
-      throw new Error('Report not found');
-    }
 
-    // Check version if provided
-    if (data.version !== undefined && existing.version !== data.version) {
-      throw new Error('Version conflict');
-    }
+    // Lookup, version check and write in ONE transaction (round 11, Important 3):
+    // split, two tabs could both read version 1, both pass the check and both
+    // write version 2, losing one edit.
+    return this.guardedWrite(['reports'], async () => {
+      const existing = await database.reports.get(id);
+      if (!existing || existing.isDeleted) {
+        throw new Error('Report not found');
+      }
 
-    const updated: Partial<DemoReport> = {
-      updatedAt: new Date(),
-      updatedBy: data.userId,
-      version: existing.version + 1
-    };
+      // Check version if provided
+      if (data.version !== undefined && existing.version !== data.version) {
+        throw new Error('Version conflict');
+      }
 
-    if (data.title !== undefined) updated.title = data.title;
-    if (data.sectionId !== undefined) updated.sectionId = data.sectionId;
-    if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
-    if (data.reportSchema !== undefined) updated.reportSchema = data.reportSchema as RawReportSchema;
+      const updated: Partial<DemoReport> = {
+        updatedAt: new Date(),
+        updatedBy: data.userId,
+        version: existing.version + 1
+      };
 
-    await database.reports.update(id, updated);
-    
-    return { ...existing, ...updated } as DemoReport;
+      if (data.title !== undefined) updated.title = data.title;
+      if (data.sectionId !== undefined) updated.sectionId = data.sectionId;
+      if (data.sortOrder !== undefined) updated.sortOrder = data.sortOrder;
+      if (data.reportSchema !== undefined) updated.reportSchema = data.reportSchema as RawReportSchema;
+
+      await database.reports.update(id, updated);
+
+      return { ...existing, ...updated } as DemoReport;
+    });
   }
 
   async deleteReport(id: string, userId: string): Promise<void> {
     const database = getDb();
     
-    const report = await database.reports.get(id);
-    if (!report || report.isDeleted) {
-      throw new Error('Report not found');
-    }
+    await this.guardedWrite(['reports'], async () => {
+      const report = await database.reports.get(id);
+      if (!report || report.isDeleted) {
+        throw new Error('Report not found');
+      }
 
-    await database.reports.update(id, {
-      isDeleted: true,
-      updatedAt: new Date(),
-      updatedBy: userId
+      await database.reports.update(id, {
+        isDeleted: true,
+        updatedAt: new Date(),
+        updatedBy: userId
+      });
     });
   }
 
   async restoreReport(id: string, userId: string): Promise<void> {
     const database = getDb();
     
-    const report = await database.reports.get(id);
-    if (!report || !report.isDeleted) {
-      throw new Error('Deleted report not found');
-    }
+    await this.guardedWrite(['reports'], async () => {
+      const report = await database.reports.get(id);
+      if (!report || !report.isDeleted) {
+        throw new Error('Deleted report not found');
+      }
 
-    await database.reports.update(id, {
-      isDeleted: false,
-      updatedAt: new Date(),
-      updatedBy: userId
+      await database.reports.update(id, {
+        isDeleted: false,
+        updatedAt: new Date(),
+        updatedBy: userId
+      });
     });
   }
 
@@ -641,9 +869,17 @@ export class DemoStorageService {
     sectionReports: Record<string, Array<{ id: string; name: string; sortOrder: number; version: number; parentSectionId: string }>>;
   }> {
     const database = getDb();
-    
-    let sections = await database.sections.toArray();
-    let reports = await database.reports.toArray();
+
+    const snapshot = await this.guardedRead(
+      ['sections', 'reports'],
+      { sections: [] as DemoSection[], reports: [] as DemoReport[] },
+      async () => ({
+        sections: await database.sections.toArray(),
+        reports: await database.reports.toArray(),
+      }),
+    );
+    let sections = snapshot.sections;
+    let reports = snapshot.reports;
 
     // Filter by user and deleted status
     sections = sections.filter(s => 
@@ -704,7 +940,7 @@ export class DemoStorageService {
     const database = getDb();
     const newVersions: Record<string, number> = {};
 
-    await database.transaction('rw', [database.sections, database.reports], async () => {
+    await this.guardedWrite(['sections', 'reports'], async () => {
       // Update sections
       for (const section of payload.sections) {
         const existing = await database.sections.get(section.id);
@@ -748,13 +984,16 @@ export class DemoStorageService {
 
   async getGlobalVariables(): Promise<DemoGlobalVariable[]> {
     const database = getDb();
-    const variables = await database.globalVariables.toArray();
-    return variables.sort((a, b) => a.label.localeCompare(b.label));
+    return this.guardedRead(['globalVariables'], [] as DemoGlobalVariable[], async () => {
+      const variables = await database.globalVariables.toArray();
+      return variables.sort((a, b) => a.label.localeCompare(b.label));
+    });
   }
 
   async getGlobalVariableById(id: string): Promise<DemoGlobalVariable | null> {
     const database = getDb();
-    return await database.globalVariables.get(id) ?? null;
+    return this.guardedRead(['globalVariables'], null as DemoGlobalVariable | null, async () =>
+      await database.globalVariables.get(id) ?? null);
   }
 
   async createGlobalVariable(data: {
@@ -763,12 +1002,6 @@ export class DemoStorageService {
     value?: string;
   }): Promise<DemoGlobalVariable> {
     const database = getDb();
-    
-    // Check for duplicate label
-    const existing = await database.globalVariables.where('label').equals(data.label).first();
-    if (existing) {
-      throw new Error('A variable with this label already exists');
-    }
 
     const variable: DemoGlobalVariable = {
       id: crypto.randomUUID(),
@@ -779,8 +1012,17 @@ export class DemoStorageService {
       updatedAt: new Date()
     };
 
-    await database.globalVariables.add(variable);
-    return variable;
+    // The duplicate-label check belongs INSIDE the transaction (round 11,
+    // Important 3): checked outside, two concurrent creates both see no match and
+    // both insert the same label.
+    return this.guardedWrite(['globalVariables'], async () => {
+      const existing = await database.globalVariables.where('label').equals(data.label).first();
+      if (existing) {
+        throw new Error('A variable with this label already exists');
+      }
+      await database.globalVariables.add(variable);
+      return variable;
+    });
   }
 
   async updateGlobalVariable(id: string, data: {
@@ -789,42 +1031,49 @@ export class DemoStorageService {
     value?: string;
   }): Promise<DemoGlobalVariable> {
     const database = getDb();
-    
-    const existing = await database.globalVariables.get(id);
-    if (!existing) {
-      throw new Error('Global variable not found');
-    }
 
-    // Check for duplicate label if changing label
-    if (data.label && data.label !== existing.label) {
-      const duplicate = await database.globalVariables.where('label').equals(data.label).first();
-      if (duplicate) {
-        throw new Error('A variable with this label already exists');
+    // Lookup, duplicate-label check and write in ONE transaction (round 11,
+    // Important 3) — the check is worthless if another write can land between it
+    // and the update.
+    return this.guardedWrite(['globalVariables'], async () => {
+      const existing = await database.globalVariables.get(id);
+      if (!existing) {
+        throw new Error('Global variable not found');
       }
-    }
 
-    const updated: Partial<DemoGlobalVariable> = {
-      updatedAt: new Date()
-    };
+      // Check for duplicate label if changing label
+      if (data.label && data.label !== existing.label) {
+        const duplicate = await database.globalVariables.where('label').equals(data.label).first();
+        if (duplicate) {
+          throw new Error('A variable with this label already exists');
+        }
+      }
 
-    if (data.label !== undefined) updated.label = data.label;
-    if (data.description !== undefined) updated.description = data.description;
-    if (data.value !== undefined) updated.value = data.value;
+      const updated: Partial<DemoGlobalVariable> = {
+        updatedAt: new Date()
+      };
 
-    await database.globalVariables.update(id, updated);
-    
-    return { ...existing, ...updated } as DemoGlobalVariable;
+      if (data.label !== undefined) updated.label = data.label;
+      if (data.description !== undefined) updated.description = data.description;
+      if (data.value !== undefined) updated.value = data.value;
+
+      await database.globalVariables.update(id, updated);
+
+      return { ...existing, ...updated } as DemoGlobalVariable;
+    });
   }
 
   async deleteGlobalVariable(id: string): Promise<void> {
     const database = getDb();
     
-    const existing = await database.globalVariables.get(id);
-    if (!existing) {
-      throw new Error('Global variable not found');
-    }
+    await this.guardedWrite(['globalVariables'], async () => {
+      const existing = await database.globalVariables.get(id);
+      if (!existing) {
+        throw new Error('Global variable not found');
+      }
 
-    await database.globalVariables.delete(id);
+      await database.globalVariables.delete(id);
+    });
   }
 }
 

@@ -1,0 +1,512 @@
+import { describe, it, expect } from 'vitest';
+import {
+  answeredTurnIds,
+  appendUncertainNotice,
+  applyReceiptToDelivery,
+  classifyTurnDelivery,
+  countMatchingUserTurns,
+  locksComposerAwaitingReply,
+  reconcileOutcome,
+  reconcileReceiptOutcome,
+  resolveAwaitingReply,
+  sessionAwaitsReply,
+  sessionIsAwaitingReply,
+  sessionPollDelayMs,
+  shouldPollSession,
+  FAST_SESSION_POLLS,
+  UNCERTAIN_DELIVERY_NOTICE,
+} from '../turnDelivery';
+import type { AgentTurn, ChatBubble } from '@/types/agent';
+
+const seqId = () => {
+  let n = 0;
+  return () => `id-${n++}`;
+};
+
+const user = (content: string): AgentTurn => ({ role: 'user', content });
+const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+  role: 'user', content, client_turn_id,
+});
+const assistant = (content: string): AgentTurn => ({
+  role: 'assistant', type: 'question', content, result: null,
+});
+const assistantWithId = (content: string, client_turn_id: string): AgentTurn => ({
+  role: 'assistant', type: 'question', content, result: null, client_turn_id,
+});
+const assistantError = (content: string): AgentTurn => ({
+  role: 'assistant', type: 'error', content, result: null,
+});
+
+// The content fallback: supportsTurnIds is FALSE (older 002), so classifyTurnDelivery
+// uses content + occurrence baseline regardless of any id.
+describe('classifyTurnDelivery — content fallback when the server does not support ids (review !62 rounds 3–4)', () => {
+  it('completed: the sent message sits in the transcript with an assistant turn after it', () => {
+    const history = [user('old'), assistant('old reply'), user('probe'), assistant('built it')];
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('completed');
+  });
+
+  it('received: the sent message is the last turn — server got it, no reply yet', () => {
+    const history = [user('old'), assistant('old reply'), user('probe')];
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('received');
+  });
+
+  it('lost: the sent message never reached the transcript', () => {
+    const history = [user('old'), assistant('old reply')];
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('lost');
+  });
+
+  it('lost on an empty transcript', () => {
+    expect(classifyTurnDelivery([], 'probe', null, false)).toBe('lost');
+  });
+
+  it('a persisted in-band error turn counts as the answer — completed, not received', () => {
+    const history = [user('probe'), assistantError('validation failed')];
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('completed');
+  });
+
+  it('an assistant-only tail does not match a user message (role matters)', () => {
+    const history = [user('old'), assistant('probe')];
+    expect(classifyTurnDelivery(history, 'probe', null, false)).toBe('lost');
+  });
+
+  describe('send-time occurrence baseline (review !62 round 4, Important 2)', () => {
+    it('a repeated prompt whose SECOND send is lost is classified lost, not absorbed by the first', () => {
+      const history = [user('refresh'), assistant('done'), user('other'), assistant('ok')];
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 1)).toBe('lost');
+    });
+
+    it('the same repeated prompt is completed when the server DID record the new occurrence', () => {
+      const history = [
+        user('refresh'), assistant('done'),
+        user('refresh'), assistant('done again'),
+      ];
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 1)).toBe('completed');
+    });
+
+    it('received: the new repeated occurrence landed but has no reply yet', () => {
+      const history = [user('refresh'), assistant('done'), user('refresh')];
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 1)).toBe('received');
+    });
+
+    it('a baseline larger than the matches present is still lost (window may have slid)', () => {
+      const history = [user('refresh'), assistant('done')];
+      expect(classifyTurnDelivery(history, 'refresh', null, false, 2)).toBe('lost');
+    });
+  });
+});
+
+// The PRIMARY path (review !62 round 7): supports_turn_ids is TRUE, so matching is
+// deterministic by the exact user↔reply pair — content and baseline are ignored.
+describe('classifyTurnDelivery — exact-pair id match (review !62 round 7, findings 3/5a)', () => {
+  it('completed: an ASSISTANT turn carries our id', () => {
+    const history = [userWithId('build', 'tid-1'), assistantWithId('built it', 'tid-1')];
+    expect(classifyTurnDelivery(history, 'build', 'tid-1', true)).toBe('completed');
+  });
+
+  it('received: our user id is present but no assistant carries it yet', () => {
+    const history = [userWithId('build', 'tid-1')];
+    expect(classifyTurnDelivery(history, 'build', 'tid-1', true)).toBe('received');
+  });
+
+  it('lost: the server supports ids but neither a user nor an assistant carries ours', () => {
+    const history = [userWithId('earlier', 'tid-0'), assistantWithId('done', 'tid-0')];
+    expect(classifyTurnDelivery(history, 'build', 'tid-missing', true)).toBe('lost');
+  });
+
+  it('finding 3: a concurrent turn\'s reply landing FIRST does not complete ours', () => {
+    // [user A, user B, reply B] — the old "any assistant after our user" rule
+    // returned completed for A while A was still running. Matching the exact PAIR,
+    // A has no reply carrying tid-A yet → received.
+    const history = [
+      userWithId('build A', 'tid-A'),
+      userWithId('build B', 'tid-B'), assistantWithId('reply B', 'tid-B'),
+    ];
+    expect(classifyTurnDelivery(history, 'build A', 'tid-A', true)).toBe('received');
+  });
+
+  it('our reply is matched even interleaved among concurrent turns', () => {
+    const history = [
+      userWithId('refresh', 'tid-mine'),
+      userWithId('refresh', 'tid-other'), assistantWithId('other reply', 'tid-other'),
+      assistantWithId('our reply', 'tid-mine'),
+    ];
+    expect(classifyTurnDelivery(history, 'refresh', 'tid-mine', true)).toBe('completed');
+  });
+
+  it('finding 5a: capability comes from the FLAG, not a visible id — no id support → content fallback', () => {
+    // We sent an id, but supports_turn_ids is false (older 002). Trust content
+    // instead of calling a delivered turn lost.
+    const history = [user('build'), assistant('built it')];
+    expect(classifyTurnDelivery(history, 'build', 'tid-1', false)).toBe('completed');
+  });
+});
+
+describe('locksComposerAwaitingReply (review !62 round 6, Important 4)', () => {
+  it('locks while a delivered turn has no reply yet (received)', () => {
+    expect(locksComposerAwaitingReply('delivered', 'received')).toBe(true);
+  });
+
+  it('locks while delivery is uncertain, regardless of the delivery value', () => {
+    expect(locksComposerAwaitingReply('uncertain', 'lost')).toBe(true);
+    expect(locksComposerAwaitingReply('uncertain', 'received')).toBe(true);
+  });
+
+  it('does NOT lock once the reply is present (completed)', () => {
+    expect(locksComposerAwaitingReply('delivered', 'completed')).toBe(false);
+  });
+
+  it('does NOT lock when the turn provably never arrived (confirmed-lost)', () => {
+    expect(locksComposerAwaitingReply('confirmed-lost', 'lost')).toBe(false);
+  });
+});
+
+describe('applyReceiptToDelivery — durable receipt reconfirmation (review !62 round 7, finding 5b)', () => {
+  it('upgrades a lost verdict to completed when the receipt says answered', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'answered', supported: true })).toBe('completed');
+  });
+
+  it('upgrades a lost verdict to received when the receipt says received', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'received', supported: true })).toBe('received');
+  });
+
+  it('keeps lost when a SUPPORTED receipt is unknown — genuinely never delivered', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'unknown', supported: true })).toBe('lost');
+  });
+
+  it('leaves the transcript verdict untouched when receipts are unsupported', () => {
+    expect(applyReceiptToDelivery('lost', { status: 'unknown', supported: false })).toBe('lost');
+    expect(applyReceiptToDelivery('lost', null)).toBe('lost');
+  });
+
+  it('never reconsiders a positive verdict (a receipt cannot un-happen a delivery)', () => {
+    expect(applyReceiptToDelivery('completed', { status: 'unknown', supported: true })).toBe('completed');
+    expect(applyReceiptToDelivery('received', { status: 'unknown', supported: true })).toBe('received');
+  });
+});
+
+describe('reconcileReceiptOutcome — an unavailable receipt is NOT proof of loss (review !62 round 8, finding 3)', () => {
+  it('confirms loss ONLY on a supported+unknown receipt within the retention window', () => {
+    expect(reconcileReceiptOutcome({ status: 'unknown', supported: true }, true)).toBe('confirmed-lost');
+  });
+
+  it('is uncertain — not confirmed-lost — when the receipt lookup was UNAVAILABLE', () => {
+    // The exact round-8 bug: getAgentTurnStatus failed (null) → old code folded to
+    // 'lost' → confirmed-lost → restored a resendable draft for a turn that may
+    // have been delivered+answered.
+    expect(reconcileReceiptOutcome(null, true)).toBe('uncertain');
+  });
+
+  it('is uncertain when receipts are UNSUPPORTED (older schema / demo)', () => {
+    expect(reconcileReceiptOutcome({ status: 'unknown', supported: false }, true)).toBe('uncertain');
+  });
+
+  it('is uncertain when the receipt may have EXPIRED (outside the retention window)', () => {
+    // A supported 'unknown' past the retention window could just mean the row was
+    // pruned (7-day server prune vs gcTime: Infinity mutation), not a lost turn.
+    expect(reconcileReceiptOutcome({ status: 'unknown', supported: true }, false)).toBe('uncertain');
+  });
+
+  it('is delivered when the receipt positively confirms the turn (answered / received)', () => {
+    expect(reconcileReceiptOutcome({ status: 'answered', supported: true }, true)).toBe('delivered');
+    expect(reconcileReceiptOutcome({ status: 'received', supported: true }, true)).toBe('delivered');
+    // A positive receipt is trustworthy regardless of the retention window.
+    expect(reconcileReceiptOutcome({ status: 'answered', supported: true }, false)).toBe('delivered');
+  });
+});
+
+describe('sessionAwaitsReply — server-derived lock (review !62 round 7 finding 4; round 8 finding 4)', () => {
+  it('true when the newest turn is a user turn (a turn is still in flight)', () => {
+    expect(sessionAwaitsReply([user('a'), assistant('b'), user('c')])).toBe(true);
+  });
+
+  it('false when the newest turn is an assistant reply', () => {
+    expect(sessionAwaitsReply([user('a'), assistant('b')])).toBe(false);
+  });
+
+  it('false on an empty transcript', () => {
+    expect(sessionAwaitsReply([])).toBe(false);
+  });
+
+  describe('interleaved concurrency by id (review !62 round 8, finding 4)', () => {
+    it('true for [user A, user B, assistant B] — A is unanswered though the newest turn is an assistant', () => {
+      const messages = [
+        userWithId('a', 'id-A'),
+        userWithId('b', 'id-B'),
+        assistantWithId('b reply', 'id-B'),
+      ];
+      // The round-7 newest-turn test alone returned false here (the bug).
+      expect(sessionAwaitsReply(messages, false)).toBe(false);
+      expect(sessionAwaitsReply(messages, true)).toBe(true);
+    });
+
+    it('false when every user id has a matching assistant reply', () => {
+      const messages = [
+        userWithId('a', 'id-A'),
+        assistantWithId('a reply', 'id-A'),
+        userWithId('b', 'id-B'),
+        assistantWithId('b reply', 'id-B'),
+      ];
+      expect(sessionAwaitsReply(messages, true)).toBe(false);
+    });
+
+    it('still true via the newest-turn test when the tail is an unanswered user turn', () => {
+      expect(sessionAwaitsReply([userWithId('a', 'id-A')], true)).toBe(true);
+    });
+
+    it('id-less legacy rows fall back to the newest-turn test (no false positives)', () => {
+      // A supported transcript can still carry legacy id-less rows; an answered
+      // id-less pair must not read as awaiting.
+      expect(sessionAwaitsReply([user('a'), assistant('b')], true)).toBe(false);
+    });
+  });
+});
+
+describe('reconcileOutcome — trusting a poll verdict (review !62 round 5, Important 3)', () => {
+  it('delivered: a positive verdict is trusted whenever any GET saw it', () => {
+    expect(reconcileOutcome(true, 'completed', true)).toBe('delivered');
+    expect(reconcileOutcome(true, 'received', true)).toBe('delivered');
+    // Even if the very last probe then failed, a turn seen delivered cannot un-happen.
+    expect(reconcileOutcome(true, 'completed', false)).toBe('delivered');
+  });
+
+  it('confirmed-lost: the MOST RECENT probe succeeded and still showed the turn absent', () => {
+    expect(reconcileOutcome(true, 'lost', true)).toBe('confirmed-lost');
+  });
+
+  it('uncertain: an early "lost" that later FAILED probes never re-confirmed (the overtake race)', () => {
+    // First GET overtook the backend appendTurns and read the turn absent; the
+    // two later polls failed, so the absence was never re-confirmed after the
+    // overtake window. Restoring the draft here could double-feed the agent.
+    expect(reconcileOutcome(true, 'lost', false)).toBe('uncertain');
+  });
+
+  it('uncertain: no GET ever succeeded', () => {
+    expect(reconcileOutcome(false, 'lost', false)).toBe('uncertain');
+  });
+});
+
+describe('appendUncertainNotice — preserve the prompt across remount (review !62 round 5, Critical 1)', () => {
+  it('re-materializes the message on a REMOUNT (empty transcript), then the notice', () => {
+    const out = appendUncertainNotice([], 'my careful prompt', seqId());
+    expect(out.map((b) => [b.role, b.text])).toEqual([
+      ['user', 'my careful prompt'],
+      ['assistant', UNCERTAIN_DELIVERY_NOTICE],
+    ]);
+    expect(out[1].isError).toBe(true);
+  });
+
+  it('does NOT duplicate the message on the ORIGINAL mount (optimistic bubble already last)', () => {
+    const prev: ChatBubble[] = [{ id: 'a', role: 'user', text: 'my careful prompt' }];
+    const out = appendUncertainNotice(prev, 'my careful prompt', seqId());
+    expect(out.filter((b) => b.role === 'user')).toHaveLength(1);
+    expect(out.map((b) => b.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('re-adds when the last user bubble is a DIFFERENT message', () => {
+    const prev: ChatBubble[] = [
+      { id: 'a', role: 'user', text: 'older prompt' },
+      { id: 'b', role: 'assistant', text: 'reply' },
+    ];
+    const out = appendUncertainNotice(prev, 'my careful prompt', seqId());
+    expect(out.filter((b) => b.role === 'user').map((b) => b.text)).toEqual([
+      'older prompt',
+      'my careful prompt',
+    ]);
+  });
+});
+
+describe('countMatchingUserTurns', () => {
+  it('counts only user turns of the exact content', () => {
+    const history = [
+      user('refresh'), assistant('refresh'), user('refresh'), user('other'),
+    ];
+    expect(countMatchingUserTurns(history, 'refresh')).toBe(2);
+    expect(countMatchingUserTurns(history, 'other')).toBe(1);
+    expect(countMatchingUserTurns(history, 'missing')).toBe(0);
+    expect(countMatchingUserTurns([], 'refresh')).toBe(0);
+  });
+});
+
+/**
+ * review !62 round 12, Important 4. The server applies the guard's TTL, so an
+ * ABANDONED turn — one whose process died between the user append and the
+ * assistant append — stops counting as active there. The transcript-derived
+ * answer has no notion of age, so it said "awaiting" forever: polling gave up
+ * after 48 attempts and a reload re-read the same unmatched row, leaving the
+ * composer locked with nothing the user could do about it.
+ */
+describe('sessionIsAwaitingReply — the server is the authority', () => {
+  const session = (over: Record<string, unknown>) => ({
+    session_id: 's', persisted: true, messages: [], ...over,
+  });
+
+  it('takes the server\'s FALSE even when the transcript still looks unanswered', () => {
+    // THE FIX: an expired abandoned turn. The row is still there and still
+    // unmatched, but the server no longer counts it — so neither may the client.
+    expect(sessionIsAwaitingReply(session({
+      awaiting_reply: false,
+      supports_turn_ids: true,
+      messages: [userWithId('abandoned', 't1')],
+    }))).toBe(false);
+  });
+
+  it('takes the server\'s TRUE even when the transcript looks settled', () => {
+    expect(sessionIsAwaitingReply(session({
+      awaiting_reply: true,
+      messages: [user('hi'), assistant('done')],
+    }))).toBe(true);
+  });
+
+  it('falls back to the transcript when the server does not say (legacy response)', () => {
+    expect(sessionIsAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('running', 't1')],
+    }))).toBe(true);
+    expect(sessionIsAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('done', 't1'), assistantWithId('reply', 't1')],
+    }))).toBe(false);
+  });
+
+  it('is false with no session at all', () => {
+    expect(sessionIsAwaitingReply(null)).toBe(false);
+    expect(sessionIsAwaitingReply(undefined)).toBe(false);
+  });
+});
+
+/**
+ * review !62 round 13, Important 1 & 2. `sessionIsAwaitingReply` collapsed three
+ * situations into two answers, and the missing one is load-bearing:
+ *
+ * - the server PROVED the session idle          -> may release a local lock
+ * - the server could not tell (field omitted)   -> must NOT release anything
+ * - the transcript shows no unmatched turn      -> also not proof: that transcript
+ *   may be a degraded, empty buffer from a failed read
+ *
+ * Only the first of those can unlock a composer that reconciliation locked.
+ */
+describe('resolveAwaitingReply — idle and unknown are not the same answer', () => {
+  const session = (over: Record<string, unknown>) => ({
+    session_id: 's', persisted: true, messages: [], ...over,
+  });
+
+  it('is IDLE only when the server sent an explicit false', () => {
+    expect(resolveAwaitingReply(session({
+      awaiting_reply: false,
+      supports_turn_ids: true,
+      messages: [userWithId('abandoned', 't1')],
+    }))).toBe('idle');
+  });
+
+  it('is AWAITING on the server\'s explicit true', () => {
+    expect(resolveAwaitingReply(session({
+      awaiting_reply: true,
+      messages: [user('hi'), assistant('done')],
+    }))).toBe('awaiting');
+  });
+
+  it('is AWAITING from the transcript when the server omits the field', () => {
+    // The legacy guard still LOCKS — it is all such a tenant has.
+    expect(resolveAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('running', 't1')],
+    }))).toBe('awaiting');
+  });
+
+  it('is UNKNOWN — never idle — when the field is omitted and the transcript looks settled', () => {
+    // THE FIX. A settled-looking transcript is not proof: the server omits the
+    // field precisely when it could not read receipts, and the same failure can
+    // leave the transcript itself degraded and empty.
+    expect(resolveAwaitingReply(session({
+      supports_turn_ids: true,
+      messages: [userWithId('done', 't1'), assistantWithId('reply', 't1')],
+    }))).toBe('unknown');
+    expect(resolveAwaitingReply(session({ messages: [] }))).toBe('unknown');
+  });
+
+  it('is UNKNOWN when there is no session at all', () => {
+    expect(resolveAwaitingReply(null)).toBe('unknown');
+    expect(resolveAwaitingReply(undefined)).toBe('unknown');
+  });
+
+  it('keeps sessionIsAwaitingReply as the lock half of the same verdict', () => {
+    // The two must never disagree — that was the round-12 bug class.
+    for (const s of [
+      session({ awaiting_reply: false }),
+      session({ awaiting_reply: true }),
+      session({ supports_turn_ids: true, messages: [userWithId('running', 't1')] }),
+      session({ messages: [] }),
+    ]) {
+      expect(sessionIsAwaitingReply(s)).toBe(resolveAwaitingReply(s) === 'awaiting');
+    }
+  });
+});
+
+/**
+ * review !62 round 14, Important 1. Extracted from sessionAwaitsReply's pairing
+ * test so the composer lock's IDENTITY release reads the same definition of "this
+ * turn has been answered" that the awaiting check does.
+ */
+describe('answeredTurnIds — which turns the transcript proves are finished', () => {
+  it('returns the ids stamped on ASSISTANT turns only', () => {
+    // The user turn carries the id too; it is the REPLY that proves completion.
+    expect(answeredTurnIds([userWithId('a', 'id-A'), assistantWithId('a reply', 'id-A')]))
+      .toEqual(['id-A']);
+    expect(answeredTurnIds([userWithId('a', 'id-A')])).toEqual([]);
+  });
+
+  it('skips legacy id-less rows', () => {
+    expect(answeredTurnIds([user('a'), assistant('b')])).toEqual([]);
+  });
+
+  it('is empty for an empty, null or undefined transcript', () => {
+    expect(answeredTurnIds([])).toEqual([]);
+    expect(answeredTurnIds(null)).toEqual([]);
+    expect(answeredTurnIds(undefined)).toEqual([]);
+  });
+
+  it('keeps every answered id when turns interleave', () => {
+    expect(answeredTurnIds([
+      userWithId('a', 'id-A'),
+      userWithId('b', 'id-B'),
+      assistantWithId('b reply', 'id-B'),
+      assistantWithId('a reply', 'id-A'),
+    ])).toEqual(['id-B', 'id-A']);
+  });
+});
+
+describe('shouldPollSession — the page must keep reading while it is locked (review !62 round 14)', () => {
+  it('polls while the server shows a turn in flight', () => {
+    expect(shouldPollSession(true, false)).toBe(true);
+  });
+
+  it('polls while a MOUNT-LOCAL lock is held, though the server says nothing', () => {
+    // The case that deadlocked: the release can only arrive in a LATER reading,
+    // and round 13 stopped reading the moment the server verdict left 'awaiting'.
+    expect(shouldPollSession(false, true)).toBe(true);
+  });
+
+  it('stops only when neither holds', () => {
+    expect(shouldPollSession(false, false)).toBe(false);
+    expect(shouldPollSession(true, true)).toBe(true);
+  });
+});
+
+describe('sessionPollDelayMs — the poll slows down but never retires (review !62 round 15)', () => {
+  it('keeps the fast cadence through the whole first phase', () => {
+    expect(sessionPollDelayMs(0)).toBe(5_000);
+    expect(sessionPollDelayMs(FAST_SESSION_POLLS - 1)).toBe(5_000);
+  });
+
+  it('slows down once the fast phase is spent', () => {
+    // Where the old poll cleared its interval and left the lock permanent.
+    expect(sessionPollDelayMs(FAST_SESSION_POLLS)).toBe(30_000);
+  });
+
+  it('never stops, however long the outage runs', () => {
+    // Any ceiling here is the same bug at a longer horizon: a failed probe proves
+    // nothing, so the dependency that would restart the poll never moves.
+    expect(sessionPollDelayMs(10_000)).toBe(30_000);
+    expect(Number.isFinite(sessionPollDelayMs(10_000))).toBe(true);
+  });
+});

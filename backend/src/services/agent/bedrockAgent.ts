@@ -32,6 +32,7 @@ import {
   type DashboardSchema,
   type S3Location,
 } from './artifactStore.js';
+import { stripArtifactUrls, RESULT_FALLBACK_MESSAGE } from './stripArtifactUrl.js';
 import type { AgentContext, AgentService, AgentTurnInput, AgentTurnResult } from './types.js';
 
 const DEFAULT_REGION = 'eu-central-1';
@@ -237,9 +238,20 @@ export async function collectCompletion(
 }
 
 export function toDashboardResult(prose: string, schema: DashboardSchema): AgentTurnResult {
+  // The agent's own prose IS the chat bubble — minus the artifact's s3:// URL and
+  // the "Download URL" / `aws s3 cp` scaffolding around it. That bucket name is
+  // internal infrastructure, and the copy command is useless to a browser user:
+  // the dashboard is already in `result`. See stripArtifactUrl.ts.
+  const stripped = stripArtifactUrls(prose);
   return {
     type: 'result',
-    message: prose, // the agent's own prose IS the chat bubble
+    // Stripping consumes everything only when the agent said nothing BUT the
+    // URL. That is a successful build, so it must not render as a blank bubble
+    // beside a preview — the same reasoning that rejects an empty completion
+    // outright (drainCompletion). The sentence lives with the sanitizer because
+    // the read-side pass needs the SAME one (round 16): a turn stripped on write
+    // and the same turn stripped on re-read must not word themselves differently.
+    message: stripped === '' ? RESULT_FALLBACK_MESSAGE : stripped,
     result: { title: schema.title, report_schema: schema },
   };
 }

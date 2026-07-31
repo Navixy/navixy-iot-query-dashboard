@@ -1,0 +1,377 @@
+import type { AgentTurn, ChatBubble } from '@/types/agent';
+
+export type TurnDelivery = 'completed' | 'received' | 'lost';
+
+/** Shown when reconciliation could not confirm a lost turn either way. */
+export const UNCERTAIN_DELIVERY_NOTICE =
+  "We couldn't reach the server to confirm your last message was delivered. Reload the page to check before sending it again.";
+
+/**
+ * Builds the transcript for the UNCERTAIN reconcile outcome (review !62 round 5,
+ * Critical 1). The optimistic user bubble is mount-local, so on a REMOUNT it is
+ * gone and the message would be visible nowhere; re-materialize it from the
+ * failed mutation (which outlives the mount). On the ORIGINAL mount the bubble
+ * is already the last user turn — do not add a second copy. Either way append
+ * the uncertain notice. The message is shown as a transcript bubble, never
+ * restored to the composer, so it is preserved without becoming a one-click
+ * resend of a turn the server may have taken.
+ */
+export function appendUncertainNotice(
+  prev: ChatBubble[],
+  message: string,
+  makeId: () => string,
+): ChatBubble[] {
+  const lastUser = [...prev].reverse().find((b) => b.role === 'user');
+  const restored: ChatBubble[] =
+    lastUser?.text === message ? [] : [{ id: makeId(), role: 'user', text: message }];
+  return [
+    ...prev,
+    ...restored,
+    { id: makeId(), role: 'assistant', text: UNCERTAIN_DELIVERY_NOTICE, isError: true },
+  ];
+}
+
+/** Number of USER turns in `history` whose content is exactly `content`. The
+ *  send-time value is the reconciliation baseline below; the reconcile-time
+ *  value is compared against it. */
+export function countMatchingUserTurns(history: AgentTurn[], content: string): number {
+  let n = 0;
+  for (const turn of history) {
+    if (turn.role === 'user' && turn.content === content) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Classifies what happened to a chat turn whose HTTP RESPONSE was lost
+ * (review !62 rounds 3–6). POST /chat is not idempotent: the server persists
+ * the user turn at receipt and the assistant turn after the agent finishes,
+ * and the agent's memory is stateful (D19). A transport error therefore does
+ * NOT mean the turn failed — the server may have processed it completely with
+ * only the response dying. An authoritative GET /session tells the states apart.
+ *
+ * PRIMARY: MATCH BY client_turn_id (review !62 round 6, findings 4/5 — the fix
+ * the reviewer asked for across rounds 3–6). The browser mints a UUID per send;
+ * the server persists it on the user turn and returns it here. Matching by that
+ * id is DETERMINISTIC: it identifies THIS exact send, so concurrent identical
+ * turns from another tab, a repeated prompt, and the sliding 100-turn cap are
+ * all unambiguous — none of which content counting can resolve. The id is
+ * trusted only when the server actually round-trips ids: if ANY user turn in the
+ * transcript carries one, the server persists them, so the ABSENCE of ours is
+ * proof the send never landed. If NO user turn carries one (a tenant on an older
+ * 002 without the column, or a pre-feature transcript), fall through.
+ *
+ * FALLBACK: content + a SEND-TIME occurrence baseline. `priorOccurrences` is how
+ * many user turns with this exact content the client already knew about at send
+ * time. Without it a repeated prompt is silent data loss (round 4, Important 2):
+ * a genuinely-lost re-send of "refresh" would match the OLD identical turn and be
+ * called 'completed'. Requiring a match STRICTLY BEYOND the baseline means only a
+ * turn the server added THIS time counts. This path keeps its documented residual
+ * (the cap can evict an old identical turn as ours lands, degrading to a safe
+ * draft restore) — but it now only runs where no id is available; with the id the
+ * residual is closed.
+ *
+ * - 'completed' — the turn is present AND an assistant turn follows it. Succeeded;
+ *   render server truth. Never restore the draft (would re-feed the agent, R20).
+ * - 'received' — the turn is present with no assistant after it yet: the server
+ *   got it and the agent may still be working. Do not restore the draft; the
+ *   caller keeps the composer locked (Important 4).
+ * - 'lost' — the turn is absent: retrying is safe and the caller restores the
+ *   draft, but ONLY on a SUCCESSFUL settled GET (else it is 'uncertain').
+ *
+ * An assistant turn of any type counts, including type:'error': an in-band
+ * failure the server persisted IS the turn's outcome.
+ */
+export function classifyTurnDelivery(
+  history: AgentTurn[],
+  sentMessage: string,
+  clientTurnId: string | null,
+  supportsTurnIds: boolean,
+  priorOccurrences = 0,
+): TurnDelivery {
+  // PRIMARY — exact-pair id match, trusted from the EXPLICIT capability flag
+  // (finding 5a), not inferred from a visible row.
+  if (clientTurnId && supportsTurnIds) {
+    // Completion = an ASSISTANT turn stamped with OUR id (finding 3) — never "any
+    // later assistant", which mis-attributed a concurrent turn's reply.
+    if (history.some((t) => t.role === 'assistant' && t.client_turn_id === clientTurnId)) {
+      return 'completed';
+    }
+    // Our user turn present, no matching reply yet → received; absent from THIS
+    // transcript → lost, which the caller reconfirms against the durable receipt
+    // before trusting (finding 5b — the row can be evicted by 100 newer turns).
+    if (history.some((t) => t.role === 'user' && t.client_turn_id === clientTurnId)) {
+      return 'received';
+    }
+    return 'lost';
+  }
+
+  // FALLBACK — content + send-time occurrence baseline (no id support).
+  const matches: number[] = [];
+  for (let i = 0; i < history.length; i++) {
+    const turn = history[i];
+    if (turn.role === 'user' && turn.content === sentMessage) matches.push(i);
+  }
+  if (matches.length <= priorOccurrences) return 'lost';
+
+  const newestMatch = matches[matches.length - 1];
+  for (let j = newestMatch + 1; j < history.length; j++) {
+    if (history[j].role === 'assistant') return 'completed';
+  }
+  return 'received';
+}
+
+/** What the failed-turn reconciler should DO once its bounded poll has run. */
+export type ReconcileOutcome =
+  /** The server has the turn (completed/received): render server truth, no draft. */
+  | 'delivered'
+  /** The turn provably never reached the server: safe to restore the draft. */
+  | 'confirmed-lost'
+  /** We could not confirm either way: preserve the message, do NOT restore the
+   *  draft (an auto-retry might double-feed a turn the server did take). */
+  | 'uncertain';
+
+/**
+ * Turns the poll's results into the reconcile branch to take.
+ *
+ * A POSITIVE delivery (completed/received) is trustworthy whenever any GET saw
+ * it — it cannot un-happen. A 'lost' verdict is the subtle one: the route does
+ * loadHistory BEFORE it appends the user turn, so the FIRST GET can overtake an
+ * in-flight POST and read the turn as absent. The bounded poll re-checks to
+ * close that window — but only if the later probes actually SUCCEED. If an early
+ * GET said 'lost' and every later probe then FAILED, the absence was never
+ * re-confirmed after the overtake window and the true state is UNCERTAIN, not
+ * lost — restoring the draft there would invite re-sending a turn the server may
+ * have taken (review !62 round 5, Important 3). So 'lost' is only trusted when
+ * the MOST RECENT probe succeeded and still showed the turn missing.
+ */
+export function reconcileOutcome(
+  anyGetSucceeded: boolean,
+  delivery: TurnDelivery,
+  lastGetSucceeded: boolean,
+): ReconcileOutcome {
+  if (anyGetSucceeded && delivery !== 'lost') return 'delivered';
+  if (anyGetSucceeded && delivery === 'lost' && lastGetSucceeded) return 'confirmed-lost';
+  return 'uncertain';
+}
+
+/**
+ * After reconciliation, must the composer STAY LOCKED (review !62 round 6,
+ * Important 4)? A turn that reached the server but has no assistant reply yet
+ * ('received'), or one we could not confirm ('uncertain'), may still be running
+ * on the STATEFUL agent — a second POST now would race that invocation and
+ * interleave the transcript out of order. Only 'completed' (the reply is already
+ * present) and 'confirmed-lost' (never arrived, so the draft is restored for a
+ * clean retry) are safe to unlock. Reloading the page re-observes the session and
+ * is the explicit way out of the lock.
+ */
+export function locksComposerAwaitingReply(
+  outcome: ReconcileOutcome,
+  delivery: TurnDelivery,
+): boolean {
+  if (outcome === 'uncertain') return true;
+  return outcome === 'delivered' && delivery === 'received';
+}
+
+/**
+ * Must the page keep re-reading GET /session (review !62 round 14, Important 1)?
+ *
+ * The obvious half is the server's own verdict: while it shows a turn in flight,
+ * poll until the reply lands. The half that was missing is the MOUNT-LOCAL lock —
+ * and it is the one that cannot do without polling. That lock is released only by
+ * a reading NEWER than the lock itself, so a page that holds one and stops reading
+ * can never learn what would free it; the composer stays disabled until a reload.
+ *
+ * The two conditions do not overlap. Reconciliation takes a local lock exactly
+ * when the server's verdict is NOT 'awaiting' — an 'uncertain' turn the server
+ * cannot show, or a durable receipt that outran the capped transcript — which is
+ * precisely when polling on the server verdict alone has already stopped.
+ */
+export function shouldPollSession(
+  serverAwaitingReply: boolean,
+  locallyLocked: boolean,
+): boolean {
+  return serverAwaitingReply || locallyLocked;
+}
+
+/** Probes at the fast cadence before it slows down — 48 x 5 s covers the 190 s
+ *  transport ceiling with margin, so a healthy turn resolves inside this phase. */
+export const FAST_SESSION_POLLS = 48;
+const FAST_POLL_MS = 5_000;
+const SLOW_POLL_MS = 30_000;
+
+/**
+ * How long to wait before the next session poll (review !62 round 15, Important 3).
+ *
+ * The fast phase used to be the WHOLE poll: after 48 attempts the interval was
+ * cleared and nothing re-armed it. That is fine when a probe SUCCEEDS and proves
+ * something — but a probe that fails proves nothing, records no observation and
+ * moves no effect dependency, so 48 failures during a backend outage retired the
+ * poll while the lock it was meant to release was still held. With
+ * refetchOnWindowFocus off, that composer never recovered without a reload.
+ *
+ * So the phase after it is slower, not absent: the lock has no other way out, and
+ * a page that has waited four minutes can afford to ask every thirty seconds.
+ * Unbounded on purpose — every bound here is the same bug at a longer horizon —
+ * and paid for by pausing entirely while the tab is hidden (see AiChat), so an
+ * abandoned tab costs nothing and a returning one is read immediately.
+ */
+export function sessionPollDelayMs(attemptsSoFar: number): number {
+  return attemptsSoFar < FAST_SESSION_POLLS ? FAST_POLL_MS : SLOW_POLL_MS;
+}
+
+/**
+ * Fold a DURABLE-RECEIPT lookup into a poll's delivery verdict (review !62 round
+ * 7, finding 5b). Only a 'lost' verdict is reconsidered — a positive delivery
+ * already saw the turn, and a receipt cannot un-happen it. On the id path a 'lost'
+ * only means "not in THIS capped transcript"; the receipt lives outside that
+ * window, so it is authoritative. `supported: false` (older schema / demo) leaves
+ * the transcript verdict untouched, and an unknown-but-supported receipt confirms
+ * the turn genuinely never reached the server.
+ */
+export function applyReceiptToDelivery(
+  delivery: TurnDelivery,
+  receipt: { status: 'received' | 'answered' | 'unknown'; supported: boolean } | null,
+): TurnDelivery {
+  if (delivery !== 'lost' || !receipt?.supported) return delivery;
+  if (receipt.status === 'answered') return 'completed';
+  if (receipt.status === 'received') return 'received';
+  return 'lost';
+}
+
+/**
+ * The reconcile outcome for an ID-PATH turn ABSENT from the capped transcript
+ * (review !62 round 8, finding 3). On the id path a transcript 'lost' means only
+ * "not in the newest-100 window" — a delivered+answered turn's rows can be evicted
+ * by 100 newer turns while its mutation lives on (gcTime: Infinity). The DURABLE
+ * receipt is the ONLY authority, so 'lost' must be PROVEN, never assumed:
+ *
+ * - answered / received  → 'delivered' (the turn landed; render server truth).
+ * - supported + 'unknown' WITHIN the retention window → 'confirmed-lost': the turn
+ *   is absent from the receipts table too, and that table is guaranteed to still
+ *   hold it, so it genuinely never reached the server → safe to restore the draft.
+ * - anything else → 'uncertain', NEVER confirmed-lost. An UNAVAILABLE receipt
+ *   (lookup failed), an UNSUPPORTED one (older schema / demo — 'unknown' is
+ *   uninformative there), or an EXPIRED one (older than the receipt retention, so
+ *   an 'unknown' may just mean the row was pruned) is not proof of loss.
+ *   Restoring the draft there would invite re-feeding the stateful agent a turn it
+ *   may have taken (R20/D19); preserve the message, do not auto-resend.
+ */
+export function reconcileReceiptOutcome(
+  receipt: { status: 'received' | 'answered' | 'unknown'; supported: boolean } | null,
+  withinRetentionWindow: boolean,
+): ReconcileOutcome {
+  if (!receipt?.supported) return 'uncertain';
+  if (receipt.status === 'answered' || receipt.status === 'received') return 'delivered';
+  return withinRetentionWindow ? 'confirmed-lost' : 'uncertain';
+}
+
+/**
+ * What the server says about whether a turn is still running in this session.
+ *
+ * TRI-STATE (review !62 round 13, Important 1 & 2), because two callers need
+ * things a boolean cannot express:
+ *
+ * - 'awaiting' — a turn is in flight. Lock the composer.
+ * - 'idle'     — the server PROVED nothing is running. Only a boolean
+ *                `awaiting_reply` in the response can produce this, and it is
+ *                the only thing allowed to RELEASE a lock taken locally.
+ * - 'unknown'  — nobody could tell. The server omits the field when it has no
+ *                usable receipts table or its read failed, and a
+ *                transcript-derived "no unmatched turn" is not proof either: the
+ *                transcript may itself be a degraded, empty buffer. Hold whatever
+ *                lock is already held; do not take a new one.
+ *
+ * The server's answer wins whenever it has one, because it applies the same TTL
+ * as the single-active-turn guard — so an ABANDONED turn, one whose process died
+ * between the user append and the assistant append, stops counting as active
+ * there. The transcript fallback has no notion of age, so it said "awaiting"
+ * forever: polling gave up after 48 attempts and a reload re-read the same
+ * unmatched row, leaving the composer locked with nothing the user could do.
+ *
+ * ONE resolver for every consumer — the composer lock, the lock RELEASE and the
+ * pre-send guard — because those disagreeing is its own class of bug.
+ */
+export type AwaitingReplyVerdict = 'awaiting' | 'idle' | 'unknown';
+
+export function resolveAwaitingReply(session: {
+  awaiting_reply?: boolean;
+  supports_turn_ids?: boolean;
+  messages?: AgentTurn[];
+} | null | undefined): AwaitingReplyVerdict {
+  // No session read at all: not evidence of an idle server.
+  if (!session) return 'unknown';
+  if (typeof session.awaiting_reply === 'boolean') {
+    return session.awaiting_reply ? 'awaiting' : 'idle';
+  }
+  // Legacy/degraded response. An unmatched turn still locks — that guard predates
+  // round 12 and is all such a tenant has — but its ABSENCE proves nothing, so it
+  // can never be the thing that unlocks.
+  return sessionAwaitsReply(session.messages ?? [], session.supports_turn_ids === true)
+    ? 'awaiting'
+    : 'unknown';
+}
+
+/** Should the composer be locked because a turn is running? Convenience over
+ *  resolveAwaitingReply for the callers that only ever needed the lock half. */
+export function sessionIsAwaitingReply(session: {
+  awaiting_reply?: boolean;
+  supports_turn_ids?: boolean;
+  messages?: AgentTurn[];
+} | null | undefined): boolean {
+  return resolveAwaitingReply(session) === 'awaiting';
+}
+
+/**
+ * True when the persisted transcript still owes a reply — a turn is in flight,
+ * because the route appends the assistant reply only AFTER the agent call
+ * (review !62 round 7 finding 4; round 8 finding 4). Deriving the composer lock
+ * from this SERVER state (re-read from GET /session on every mount) is what makes
+ * it survive a route remount, which the round-6 mount-local flag did not.
+ *
+ * FALLBACK ONLY since round 12 — prefer sessionIsAwaitingReply, which uses the
+ * server's own age-aware verdict when the response carries one.
+ *
+ * Two conditions, because the newest-turn test alone was unsound under CONCURRENCY
+ * (round 8): with two turns in flight the transcript can read `[user A, user B,
+ * assistant B]` — B answered first — whose NEWEST turn is an assistant, yet A is
+ * still running. So when the server round-trips ids, also PAIR them: any user turn
+ * whose client_turn_id has no matching assistant reply is unanswered. The reply is
+ * stamped with the originating user turn's id (finding 3), so an unmatched user id
+ * is an in-flight turn. Legacy/id-less rows fall back to the newest-turn test.
+ */
+export function sessionAwaitsReply(messages: AgentTurn[], supportsTurnIds = false): boolean {
+  if (messages.length === 0) return false;
+  // Newest turn is a user turn → its reply has not been appended yet. Covers the
+  // simple case and the id-less tail (older 002 rows).
+  if (messages[messages.length - 1].role === 'user') return true;
+  if (!supportsTurnIds) return false;
+  // Interleaved concurrency: is there a user turn whose id was never answered?
+  const answered = new Set(answeredTurnIds(messages));
+  return messages.some(
+    (m) => m.role === 'user' && m.client_turn_id != null && !answered.has(m.client_turn_id),
+  );
+}
+
+/**
+ * The client_turn_ids this transcript shows an ASSISTANT reply for — i.e. the
+ * turns it PROVES are finished.
+ *
+ * The reply is stamped with the originating user turn's id (round 7, finding 3),
+ * so an id in here means that exact send has been answered. That fact is
+ * MONOTONE: a turn cannot go back to running once its reply is persisted, which
+ * is what lets a lock held for one specific turn be released by it even from an
+ * old observation (review !62 round 14, Important 1) — and what lets a legacy
+ * tenant, whose server sends no awaiting_reply at all, release a lock at all.
+ *
+ * One definition, three readers (this, sessionAwaitsReply's pairing test, and
+ * classifyTurnDelivery's completion test) — they disagreeing is its own class of
+ * bug.
+ */
+export function answeredTurnIds(messages: readonly AgentTurn[] | null | undefined): string[] {
+  const ids: string[] = [];
+  for (const turn of messages ?? []) {
+    if (turn.role === 'assistant' && turn.client_turn_id) ids.push(turn.client_turn_id);
+  }
+  return ids;
+}

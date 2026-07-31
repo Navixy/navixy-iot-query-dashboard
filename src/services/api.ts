@@ -8,6 +8,7 @@ import type { DateFormat, TimeFormat } from '@/utils/datetime';
 import type { ChartCatalog } from '@/types/chart-catalog';
 import type { MenuTree, ReorderResponse, RenameResponse, DeleteSectionResponse, DeleteReportResponse } from '@/types/menu-editor';
 import type { CompositeReport, CompositeReportExecutionResult, StoredReport, RawReportSchema } from '@/types/dashboard-types';
+import type { AgentChatRequest, AgentChatResponse, AgentSessionResponse, AgentTurnStatusResponse } from '@/types/agent';
 import { toErrorMeta } from '@/utils/errors';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -85,21 +86,68 @@ class ApiService {
     return token ? { 'Authorization': `Bearer ${token}` } : {};
   }
 
+  /**
+   * Resolve a chat call's bound bearer token into request headers (review !62
+   * round 9, finding 1).
+   *
+   * getAuthHeaders above reads the ORIGIN-WIDE localStorage key at REQUEST time,
+   * so any agent call left on that path is authorized by whichever tab signed in
+   * last — a probe, poll or turn-status lookup dispatched by a tab whose token a
+   * second tab had already replaced authorizes as the SUCCESSOR, and its response
+   * can land in this tab's cache before the cross-tab storage event tears the tab
+   * down. Every agent call therefore carries the token its caller holds:
+   *
+   * - a string BINDS it — options.headers wins request()'s merge, overriding the
+   *   localStorage-derived header;
+   * - `null` FAILS CLOSED — the caller explicitly has no identity (signed out, or
+   *   torn down by the cross-tab ender). Falling back to shared storage there is
+   *   precisely the leak, so no request is made at all;
+   * - `undefined` (parameter omitted) keeps the legacy localStorage behaviour for
+   *   callers with no anchor to bind.
+   *
+   * Shaped as `{ reject?, headers? }` rather than a discriminated union because
+   * this project compiles with `strict: false`, where a boolean discriminant does
+   * not narrow.
+   */
+  private resolveBoundAuth(authToken: string | null | undefined): {
+    reject?: ApiResponse<never>;
+    headers?: Record<string, string>;
+  } {
+    if (authToken === undefined) return {};
+    if (!authToken) {
+      return {
+        reject: {
+          error: {
+            code: 'NOT_AUTHENTICATED',
+            message: 'Not signed in; the request was not sent.',
+          },
+        },
+      };
+    }
+    return { headers: { Authorization: `Bearer ${authToken}` } };
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
   ): Promise<ApiResponse<T>> {
     const url = `${API_BASE_URL}${endpoint}`;
+    // Destructure headers OUT of options so the merged set wins: a caller-supplied
+    // header (e.g. agentChat's bound Authorization, review !62 round 7 finding 2)
+    // merges over getAuthHeaders while Content-Type is preserved. Spreading the
+    // whole `options` after `headers` used to re-apply options.headers on top,
+    // dropping Content-Type and the default auth header.
+    const { headers: optionHeaders, ...restOptions } = options;
     const headers = {
       'Content-Type': 'application/json',
       ...this.getAuthHeaders(),
-      ...options.headers,
+      ...optionHeaders,
     };
 
     try {
       const response = await fetch(url, {
+        ...restOptions,
         headers,
-        ...options,
       });
 
       const data = await response.json();
@@ -846,6 +894,94 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify({ coordinates }),
     });
+  }
+
+  // ==========================================
+  // AI Agent API (DO-313)
+  // ==========================================
+
+  /**
+   * NO isDemoMode() BRANCH, AND NO demoApi.ts TWIN — deliberate (D11).
+   *
+   * The agent (mock or Bedrock) lives server-side behind an authed route that a
+   * demo user reaches normally, and demo storage has no LLM state to emulate.
+   * This mirrors the existing SQL carve-out: executeSQL (api.ts:149) also does not
+   * demo-branch — see its comment "SQL queries always go to real backend, even in
+   * demo mode" (api.ts:171) — and demoApi routes SQL to the real backend through
+   * realRequest (definition demoApi.ts:113, section banner :158-160, call :213).
+   *
+   * This is SAFE ONLY BECAUSE THE REST OF THE APPLY CHAIN IS DEMO-BRANCHED:
+   * getSections (api.ts:254-255), createSection (:295-296), createReport
+   * (:326, :333). A demo user therefore gets the full chat -> preview -> apply flow,
+   * with the dashboard landing in IndexedDB.
+   *
+   * REVIEWERS: CLAUDE.md's rule "verify the same shape is honoured in demoApi.ts"
+   * does NOT apply to this method. This comment is the record of the exception.
+   */
+  async agentChat(
+    params: AgentChatRequest,
+    authToken?: string | null,
+  ): Promise<ApiResponse<AgentChatResponse>> {
+    // The whole body forwards, including client_turn_id (review !62 round 6) — the
+    // server persists it on the user turn and returns it in GET /session.
+    //
+    // BIND the send-time token (review !62 round 7, finding 2): getAuthHeaders
+    // re-reads localStorage at REQUEST time, so a cross-tab sign-in between the
+    // send-time guard and here would POST this turn under the NEW identity's
+    // token. When the caller passes the token captured at send, build the
+    // Authorization header from THAT snapshot; options.headers wins the merge in
+    // request(), so it overrides the localStorage-derived header. Omit to keep the
+    // legacy behaviour for non-chat callers.
+    //
+    // An EXPLICIT null now fails closed here too (round 9, finding 1): the old
+    // truthy check silently fell back to the shared localStorage token, so the
+    // API surface itself was not safe — only the hook's own null reject stood
+    // between a torn-down tab and a POST under the successor's identity.
+    const bound = this.resolveBoundAuth(authToken);
+    if (bound.reject) return bound.reject;
+    return this.request<AgentChatResponse>('/api/agent/chat', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      ...(bound.headers ? { headers: bound.headers } : {}),
+      // A ceiling above the server's AGENT_TIMEOUT_MS (180 s), not a policy
+      // deadline: it exists so a wedged connection cannot hang a tab forever;
+      // the server's deadline is the real one and fires first. Do not lower it
+      // to a "nicer" number — a 36 s build (n=1) against a 180 s server budget
+      // means any client timeout below ~185 s can abort a turn the server
+      // would have completed.
+      signal: AbortSignal.timeout(190_000),
+    });
+  }
+
+  /** `authToken` binds the CALLER's own token instead of the origin-wide
+   *  localStorage read (review !62 round 9, finding 1) — see resolveBoundAuth. A
+   *  transcript read is exactly as identity-sensitive as the POST: authorized by
+   *  a successor's token it would return THEIR chat history to this tab. */
+  async getAgentSession(
+    authToken?: string | null,
+  ): Promise<ApiResponse<AgentSessionResponse>> {
+    const bound = this.resolveBoundAuth(authToken);
+    if (bound.reject) return bound.reject;
+    return this.request<AgentSessionResponse>('/api/agent/session', {
+      ...(bound.headers ? { headers: bound.headers } : {}),
+    });
+  }
+
+  /** Durable per-turn status lookup (review !62 round 7, finding 5b): confirms a
+   *  turn's delivery by client_turn_id even after it has been evicted from the
+   *  capped transcript. `authToken` binds the caller's own token (round 9,
+   *  finding 1) — a receipt lookup under a successor's identity would answer
+   *  about THEIR turns, and 'unknown' there is what drives a confirmed-lost. */
+  async getAgentTurnStatus(
+    clientTurnId: string,
+    authToken?: string | null,
+  ): Promise<ApiResponse<AgentTurnStatusResponse>> {
+    const bound = this.resolveBoundAuth(authToken);
+    if (bound.reject) return bound.reject;
+    return this.request<AgentTurnStatusResponse>(
+      `/api/agent/turn-status?client_turn_id=${encodeURIComponent(clientTurnId)}`,
+      { ...(bound.headers ? { headers: bound.headers } : {}) },
+    );
   }
 
   // Panel Export
