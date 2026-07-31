@@ -9,11 +9,22 @@
  * `content` to `__html` that skips it" was enforced by nobody. These two assertions
  * are the enforcement. (!64 review round 3, finding 5)
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { cleanup, render } from '@testing-library/react';
-import { TextPanel } from '../TextPanel';
 import type { Panel } from '@/types/dashboard-types';
+
+// Spied, NOT replaced: the default implementation is the real sanitizer, so the
+// assertions below keep their teeth. The spy exists so two things can be asked that a
+// pure output check cannot — how OFTEN it ran, and what happens when it throws.
+vi.mock('../panelHtml', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../panelHtml')>();
+  return { ...actual, toSafePanelHtml: vi.fn(actual.toSafePanelHtml) };
+});
+
+const { toSafePanelHtml } = await import('../panelHtml');
+const { TextPanel } = await import('../TextPanel');
+const sanitize = vi.mocked(toSafePanelHtml);
 
 const gridPos = { x: 0, y: 0, w: 24, h: 5 };
 
@@ -37,6 +48,7 @@ const liveUrls = (root: HTMLElement) =>
       .map((attr) => el.getAttribute(attr))
       .filter((value): value is string => value !== null));
 
+beforeEach(() => { sanitize.mockClear(); });
 afterEach(cleanup);
 
 describe('TextPanel', () => {
@@ -74,4 +86,35 @@ describe('TextPanel', () => {
     expect(container.querySelectorAll('img')).toHaveLength(0);
     expect(container.textContent).toContain('<img src=x onerror="alert(1)">');
   });
+
+  it('sanitizes once per content/mode, not once per render', () => {
+    // renderPanel is a plain function, this component is not memoized, and the
+    // renderer re-renders on every setPanelData — so the parse+sanitize ran on every
+    // one of them. (!64 review round 4, finding 5)
+    const panel = panelWith('# Heading\n\nbody', 'markdown');
+    const view = render(createElement(TextPanel, { panel }));
+    expect(sanitize).toHaveBeenCalledTimes(1);
+
+    view.rerender(createElement(TextPanel, { panel: { ...panel } }));
+    view.rerender(createElement(TextPanel, { panel: { ...panel } }));
+    expect(sanitize).toHaveBeenCalledTimes(1);
+
+    // ...and it does re-run when the content actually changes.
+    view.rerender(createElement(TextPanel, { panel: panelWith('# Other', 'markdown') }));
+    expect(sanitize).toHaveBeenCalledTimes(2);
+  });
+
+  for (const mode of ['markdown', 'html'] as const) {
+    it(`survives the sanitizer throwing in ${mode} mode`, () => {
+      // There is no ErrorBoundary anywhere in src, so a throw out of here blanks the
+      // whole app — the applied report as much as the preview. html mode used to call
+      // the sanitizer inline in JSX with no catch at all. (round 4, finding 4)
+      sanitize.mockImplementationOnce(() => { throw new Error('sanitizer exploded'); });
+
+      const { container } = render(createElement(TextPanel, { panel: panelWith('x', mode) }));
+
+      expect(container.textContent).toContain('sanitizer exploded');
+      expect(container.querySelectorAll('*').length).toBeGreaterThan(0);
+    });
+  }
 });
