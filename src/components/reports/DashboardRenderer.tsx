@@ -535,10 +535,17 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
   // read displayDashboard, which is declared here. Deps on the effect below are the
   // four primitive counts rather than the object, so a stable-identity consumer is
   // not re-notified on every panelData mutation (e.g. a refreshing flag flipping).
-  const panelStatus = React.useMemo<PanelLoadStatus>(
-    () => computePanelLoadStatus(displayDashboard.panels, panelData),
-    [displayDashboard, panelData],
-  );
+  //
+  // DELIBERATELY NOT MEMOIZED on `panelData`. The query loop builds one `newPanelData`
+  // object, sets it, then MUTATES that same object as each query lands and sets it a
+  // second time — so the identity React sees can be unchanged while the contents are
+  // completely different. `useMemo(..., [displayDashboard, panelData])` therefore
+  // returned the status computed from the all-pending snapshot and the banner stuck on
+  // "Loading N panels…" for a dashboard that had finished. Counting is an O(panels)
+  // walk over an already-normalized list; the effect below is what stops consumers
+  // being re-notified. (!64 review round 4, finding 1 — found by the harness it asked
+  // for, in DashboardRenderer.panelStatus.test.tsx.)
+  const panelStatus: PanelLoadStatus = computePanelLoadStatus(displayDashboard.panels, panelData);
   useEffect(() => {
     onPanelStatusChange?.(panelStatus);
     // Keyed on the primitive counts: panelStatus is a fresh object on every panelData
