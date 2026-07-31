@@ -29,6 +29,14 @@ export interface AgentChatRequest {
    *  unknown id silently yields a fresh session. It never 400s or 404s. */
   session_id?: string | null;
   message: string;
+  /** Client-minted idempotency id for THIS user turn (DO-313 review !62 round 6).
+   *  The browser mints a UUID per send; the server persists it on the user turn
+   *  and returns it in GET /session, so the client reconciles a lost HTTP
+   *  response by id — deterministic — instead of by fragile content/occurrence
+   *  counting, which cannot tell concurrent identical turns apart or survive the
+   *  100-turn cap sliding. Optional and free-form (the route caps length only);
+   *  an absent id degrades to the prior content-based reconciliation. */
+  client_turn_id?: string | null;
 }
 
 /** POST /api/agent/chat 200 body. Note: type:'error' arrives with HTTP 200.
@@ -53,10 +61,16 @@ export type AgentChatResponse =
  *  s3:// URL. The artifact is fetched exactly once, at the moment the turn
  *  is produced, and persisted here. Preview, Apply, history load and page
  *  reload all read from here and NEVER re-fetch S3. See §3.4.6 and R28. */
+//  `client_turn_id` (review !62 round 7, finding 3): the ORIGINATING user turn's
+//  client id. Carried on the USER turn (the browser mints it) AND stamped onto
+//  its assistant/error reply, so the client matches the exact user↔reply PAIR
+//  instead of "any later assistant" — which mis-associates concurrent turns
+//  ([user A, user B, reply B, reply A] is a legitimate interleave). NULL on
+//  legacy rows and any turn sent without an id.
 export type AgentTurn =
-  | { role: 'user'; type?: never; content: string; result?: never }
-  | { role: 'assistant'; type?: 'question' | 'error'; content: string; result?: null }
-  | { role: 'assistant'; type: 'result'; content: string; result: AgentChatResult };
+  | { role: 'user'; type?: never; content: string; result?: never; client_turn_id?: string }
+  | { role: 'assistant'; type?: 'question' | 'error'; content: string; result?: null; client_turn_id?: string }
+  | { role: 'assistant'; type: 'result'; content: string; result: AgentChatResult; client_turn_id?: string };
 
 /** GET /api/agent/session 200 body. */
 export interface AgentSessionResponse {
@@ -66,7 +80,49 @@ export interface AgentSessionResponse {
    *  line of copy; it never disables anything. NOTE (D19): it says nothing about
    *  the AGENT's memory, which Bedrock holds server-side either way. */
   persisted: boolean;
+  /** EXPLICIT capability (review !62 round 7, finding 5a): whether this response's
+   *  turns round-trip client_turn_id, so the client trusts id reconciliation
+   *  instead of INFERRING support from "some visible row has an id" (which fails
+   *  when the baseline GET failed and only legacy rows are visible). True for the
+   *  in-memory path (it carries ids) and for Postgres WITH the round-6 column;
+   *  false only for a tenant on an older 002 whose column is absent. */
+  supports_turn_ids: boolean;
+  /**
+   * AUTHORITATIVE "is a turn still running in this session" (review !62 round 12,
+   * Important 4), judged by the SAME TTL the single-active-turn guard applies on
+   * POST /chat.
+   *
+   * The client used to derive this itself from an unmatched user row in the
+   * transcript, with no notion of age — so a turn abandoned between its user
+   * append and its assistant append (crashed process, timed-out agent call)
+   * locked the composer FOREVER: the backend stopped counting it after ~200 s,
+   * but polling gave up after 48 attempts and a reload re-read the same row. Two
+   * definitions of "awaiting" is one too many.
+   *
+   * OMITTED WHEN THE SERVER CANNOT DETERMINE IT (review !62 round 13, Important 1):
+   * a tenant with no usable receipts table (including 003-without-004), or a read
+   * that failed. Round 12 sent a plain boolean, so all of those answered `false` —
+   * and since the client treats a boolean as final, that switched off its
+   * transcript fallback on exactly the tenants whose server-side guard is also
+   * off. Absence is the signal to fall back, so never default this to false.
+   */
+  awaiting_reply?: boolean;
   messages: AgentTurn[];
+}
+
+/** GET /api/agent/turn-status?client_turn_id=… 200 body (review !62 round 7,
+ *  finding 5b). A DURABLE per-turn receipt lookup, so a delivered turn evicted
+ *  from the capped transcript can still be confirmed — absence from the 100-row
+ *  window alone is not proof of non-delivery. */
+export interface AgentTurnStatusResponse {
+  /** 'received' — the user turn is persisted, no reply yet; 'answered' — its
+   *  assistant/error reply landed; 'unknown' — no receipt found. */
+  status: 'received' | 'answered' | 'unknown';
+  /** Whether this tenant's schema has the durable receipts table. When false,
+   *  'unknown' is uninformative and the client keeps its transcript fallback;
+   *  when true, 'unknown' means the turn genuinely never reached the server
+   *  (within the receipt retention window). */
+  supported: boolean;
 }
 
 /** Per-request context. */

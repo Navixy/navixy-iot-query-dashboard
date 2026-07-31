@@ -1,0 +1,645 @@
+import { describe, it, expect, afterEach, jest } from '@jest/globals';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import type { Pool } from 'pg';
+import { logger } from '../../../utils/logger.js';
+import {
+  loadHistory, appendTurns, tenantKeyFor, __resetChatStoreForTests,
+} from '../chatStore.js';
+import type { AgentChatResult, AgentTurn } from '../types.js';
+
+// The in-memory fallback path — no database anywhere. The Postgres failure
+// contract (a rejecting pool must DEGRADE, never reject) runs against an injected
+// stub pool here; the split-write/recovery contract lives in chatStore.replay.test.ts
+// against a scripted SQL stub; the happy path against a REAL server stays covered
+// by the MR's manual M-PERSIST check.
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TTL_MS = 2 * 60 * 60 * 1000;
+
+/** The REAL artifact the live agent produced on 2026-07-20 (vendored by MR 3). */
+const PROBE_ARTIFACT_PATH = fileURLToPath(new URL('./fixtures/artifact.json', import.meta.url));
+
+/** Store identity — the tenantKey is opaque to the store, so tests use plain
+ *  strings; tenantKeyFor's URL-hashing contract is pinned separately below. */
+const ident = (userId: string, tenantKey = 'tenant-1') => ({ tenantKey, userId, demo: false });
+
+const user = (content: string): AgentTurn => ({ role: 'user', content });
+const question = (content: string): AgentTurn => ({
+  role: 'assistant', type: 'question', content, result: null,
+});
+
+afterEach(() => {
+  __resetChatStoreForTests();
+  jest.restoreAllMocks();
+});
+
+describe('chatStore — in-memory fallback', () => {
+  it('round-trips turns in order and reports persisted: false', async () => {
+    const { sessionId, history, persisted } = await loadHistory(null, ident('u1'), null);
+    expect(persisted).toBe(false);
+    expect(history).toEqual([]);
+    expect(sessionId).toMatch(UUID_SHAPE);
+
+    const turns: AgentTurn[] = [
+      user('build me a mileage dashboard'),
+      question('Which time range?'),
+      user('last 7 days'),
+      question('Which vehicles?'),
+    ];
+    await appendTurns(null, ident('u1'), sessionId, [turns[0]]);
+    await appendTurns(null, ident('u1'), sessionId, [turns[1]]);
+    await appendTurns(null, ident('u1'), sessionId, [turns[2], turns[3]]);
+
+    const reloaded = await loadHistory(null, ident('u1'), sessionId);
+    expect(reloaded.sessionId).toBe(sessionId);
+    expect(reloaded.persisted).toBe(false);
+    expect(reloaded.history).toEqual(turns);
+  });
+
+  it('yields a live session for an unknown session_id instead of throwing (D13)', async () => {
+    const first = await loadHistory(null, ident('u1'), 'not-a-real-session');
+    expect(first.sessionId).toMatch(UUID_SHAPE);
+    expect(first.sessionId).not.toBe('not-a-real-session');
+
+    // The server is authoritative: a SECOND bogus id resolves to the user's single
+    // active session (D7), not to another fresh one.
+    const second = await loadHistory(null, ident('u1'), 'another-bogus-id');
+    expect(second.sessionId).toBe(first.sessionId);
+  });
+
+  it('two concurrent turn-1 calls yield one session, not two', async () => {
+    // No await between the map lookup and the insert — the resolve-or-create runs in
+    // one synchronous tick, so both concurrent calls land on the same session.
+    const [a, b] = await Promise.all([
+      loadHistory(null, ident('race-user'), null),
+      loadHistory(null, ident('race-user'), null),
+    ]);
+    expect(a.sessionId).toBe(b.sessionId);
+  });
+
+  it('caps a session at MAX_TURNS = 100 by dropping oldest — the COUNT, never the payload', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    for (let i = 0; i < 105; i++) {
+      await appendTurns(null, ident('u1'), sessionId, [user(`turn-${i}`)]);
+    }
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history).toHaveLength(100);
+    expect(history[0]).toEqual(user('turn-5')); // 0..4 dropped
+    expect(history[99]).toEqual(user('turn-104'));
+  });
+
+  it('a result turn round-trips its full report_schema object — not a URL, not a truncated copy', async () => {
+    const artifact = JSON.parse(readFileSync(PROBE_ARTIFACT_PATH, 'utf8')) as Record<string, unknown>;
+    const result: AgentChatResult = { title: artifact.title as string, report_schema: artifact };
+
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [
+      { role: 'assistant', type: 'result', content: 'I have built it.', result },
+    ]);
+
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history).toHaveLength(1);
+    const turn = history[0];
+    if (turn.role !== 'assistant' || turn.type !== 'result') {
+      throw new Error('expected an assistant result turn');
+    }
+    expect(turn.result.report_schema).toEqual(artifact); // deep-equal against the real probe artifact
+    expect(turn.result.title).toBe('Fleet Distance & Trip Summary — Last 7 Days');
+  });
+
+  it('evicts oldest-first when MAX_SESSIONS = 500 overflows', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const t0 = 1_700_000_000_000;
+    const ids: string[] = [];
+    for (let i = 0; i < 500; i++) {
+      nowSpy.mockReturnValue(t0 + i); // strictly increasing — user-0 is strictly oldest
+      ids.push((await loadHistory(null, ident(`user-${i}`), null)).sessionId);
+    }
+
+    nowSpy.mockReturnValue(t0 + 500);
+    await loadHistory(null, ident('user-500'), null); // the 501st session
+
+    // Assert the SURVIVOR first: loadHistory is resolve-or-CREATE, so probing the
+    // evicted user first would mint a fresh 501st session and cascade-evict the
+    // very survivor this assertion is about.
+    nowSpy.mockReturnValue(t0 + 501);
+    const survivor = await loadHistory(null, ident('user-1'), ids[1]);
+    expect(survivor.sessionId).toBe(ids[1]); // second-oldest survived
+
+    const evicted = await loadHistory(null, ident('user-0'), ids[0]);
+    expect(evicted.sessionId).not.toBe(ids[0]); // oldest is gone — minted fresh
+    expect(evicted.persisted).toBe(false);
+  });
+
+  it('sweeps sessions older than the 2 h TTL on write', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const t0 = 1_700_000_000_000;
+
+    nowSpy.mockReturnValue(t0);
+    const first = await loadHistory(null, ident('ttl-user'), null);
+    await appendTurns(null, ident('ttl-user'), first.sessionId, [user('hello')]);
+
+    // A WRITE for a DIFFERENT user past the TTL runs the lazy sweep.
+    nowSpy.mockReturnValue(t0 + TTL_MS + 1);
+    await appendTurns(null, ident('other-user'), 'adopted-session-id', [user('x')]);
+
+    // Rewind the clock to prove the WRITE above did the eviction: at t0 the session
+    // would not be expired, so if it were still in the map this read would find it.
+    nowSpy.mockReturnValue(t0);
+    const again = await loadHistory(null, ident('ttl-user'), first.sessionId);
+    expect(again.sessionId).not.toBe(first.sessionId);
+    expect(again.history).toEqual([]);
+  });
+});
+
+describe('chatStore — tenant isolation (MR !61 review, Critical)', () => {
+  // userId is only unique within ONE tenant's settings database, and login trusts
+  // any presented userDbUrl — a hostile tenant can mint a JWT for a CHOSEN userId.
+  // The fallback map must therefore never key on bare userId.
+  const sharedUserId = '11111111-2222-3333-4444-555555555555';
+
+  it('the same userId under two different tenants yields two isolated sessions', async () => {
+    const a = await loadHistory(null, ident(sharedUserId, 'tenant-a'), null);
+    await appendTurns(null, ident(sharedUserId, 'tenant-a'), a.sessionId, [
+      user('tenant A private prompt'),
+    ]);
+
+    // Tenant B presents the colliding (or deliberately chosen) userId. It must get
+    // a fresh, empty session — not tenant A's transcript, and not tenant A's
+    // sessionId, which is also the key to the agent's server-side memory.
+    const b = await loadHistory(null, ident(sharedUserId, 'tenant-b'), null);
+    expect(b.sessionId).not.toBe(a.sessionId);
+    expect(b.history).toEqual([]);
+
+    // Writes stay put in both directions.
+    await appendTurns(null, ident(sharedUserId, 'tenant-b'), b.sessionId, [user('tenant B prompt')]);
+    const aAgain = await loadHistory(null, ident(sharedUserId, 'tenant-a'), a.sessionId);
+    expect(aAgain.sessionId).toBe(a.sessionId);
+    expect(aAgain.history).toEqual([user('tenant A private prompt')]);
+  });
+
+  it('two distinct degraded pools with the same userId stay isolated (the reviewer scenario)', async () => {
+    const rejectingPool = () => ({
+      query: () => Promise.reject(new Error('boom')),
+      connect: () => Promise.reject(new Error('boom')),
+    }) as unknown as Pool;
+
+    const a = await loadHistory(rejectingPool(), ident(sharedUserId, 'tenant-a'), null);
+    const b = await loadHistory(rejectingPool(), ident(sharedUserId, 'tenant-b'), null);
+    expect(a.sessionId).not.toBe(b.sessionId);
+  });
+
+  it('a recreated pool for the SAME tenant keeps the same fallback session', async () => {
+    // The map is keyed by tenantKey (URL-derived), deliberately NOT by Pool object
+    // identity: a pool recreation (e.g. password rotation) must not orphan the
+    // transcript.
+    const rejectingPool = () => ({
+      query: () => Promise.reject(new Error('boom')),
+      connect: () => Promise.reject(new Error('boom')),
+    }) as unknown as Pool;
+
+    const a = await loadHistory(rejectingPool(), ident('u1'), null);
+    const b = await loadHistory(rejectingPool(), ident('u1'), null);
+    expect(b.sessionId).toBe(a.sessionId);
+  });
+});
+
+describe('chatStore — byte budgets on the fallback (MR !61 review)', () => {
+  // Count caps alone admitted ~250 MiB per session (100 turns can hold ~50 results
+  // at the 5 MiB artifact cap) and hundreds of GiB across 500 sessions. The store
+  // now also budgets SERIALIZED BYTES — dropping whole oldest turns/sessions, never
+  // truncating a retained payload.
+  const MIB = 1024 * 1024;
+  const bigTurn = (label: string, mib: number): AgentTurn => ({
+    role: 'assistant', type: 'result', content: label,
+    result: {
+      title: label,
+      report_schema: { title: label, panels: [], blob: 'x'.repeat(mib * MIB) },
+    },
+  });
+
+  it('caps a session at 8 MiB by dropping whole oldest turns; the newest payload stays intact', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    for (let i = 0; i < 9; i++) {
+      await appendTurns(null, ident('u1'), sessionId, [bigTurn(`turn-${i}`, 1)]);
+    }
+
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history.length).toBeLessThan(9); // byte-capped far below MAX_TURNS = 100
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[0]).not.toMatchObject({ content: 'turn-0' }); // oldest went first
+
+    const newest = history[history.length - 1];
+    if (newest.role !== 'assistant' || newest.type !== 'result') {
+      throw new Error('expected an assistant result turn');
+    }
+    expect(newest.content).toBe('turn-8');
+    const schema = newest.result.report_schema as { blob: string };
+    expect(schema.blob).toHaveLength(MIB); // intact — never truncated to fit
+  });
+
+  it('caps the whole fallback at 64 MiB by evicting whole oldest sessions', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    const t0 = 1_700_000_000_000;
+    const ids: string[] = [];
+
+    // Ten tenants' users at ~7 MiB each — 70 MiB demanded of a 64 MiB budget.
+    for (let u = 0; u < 10; u++) {
+      nowSpy.mockReturnValue(t0 + u); // strictly increasing — g0 is strictly oldest
+      const { sessionId } = await loadHistory(null, ident(`g${u}`), null);
+      ids.push(sessionId);
+      for (let i = 0; i < 7; i++) {
+        await appendTurns(null, ident(`g${u}`), sessionId, [bigTurn(`g${u}-turn-${i}`, 1)]);
+      }
+    }
+
+    // Survivor FIRST (loadHistory is resolve-or-CREATE — probing the evicted user
+    // first would mint a session and shift the byte ledger this test is about).
+    nowSpy.mockReturnValue(t0 + 100);
+    const survivor = await loadHistory(null, ident('g9'), ids[9]);
+    expect(survivor.sessionId).toBe(ids[9]);
+    expect(survivor.history).toHaveLength(7); // eviction is whole-session, not per-turn
+
+    const evicted = await loadHistory(null, ident('g0'), ids[0]);
+    expect(evicted.sessionId).not.toBe(ids[0]); // oldest session paid for the budget
+  });
+});
+
+describe('tenantKeyFor', () => {
+  it('is a stable sha256 hex that never contains the password', () => {
+    const url = 'postgresql://app:s3kret-pw@db.tenant-a.example:5432/meta';
+    const key = tenantKeyFor(url);
+    expect(key).toMatch(/^[0-9a-f]{64}$/);
+    expect(tenantKeyFor(url)).toBe(key); // deterministic — the fallback survives across requests
+    expect(key).not.toContain('s3kret-pw');
+    expect(tenantKeyFor('postgresql://app:other@db.tenant-b.example:5432/meta')).not.toBe(key);
+  });
+
+  // MR !61 round 3 (note 56573): the key must be the NORMALIZED pool identity, not a
+  // hash of the raw string. parsePostgresUrl drops every query parameter except
+  // sslmode, so URLs differing only in ignored parameters — or only in password —
+  // reach the SAME database through the SAME pool. A raw-string hash handed each
+  // spelling its own 20/min rate-limit bucket (?application_name=1, =2, … was a
+  // working bypass) and lost the fallback transcript on password rotation.
+  it('collapses URLs that differ only in ignored query parameters (the rate-limit bypass)', () => {
+    const base = 'postgresql://app:pw@db.tenant-a.example:5432/meta';
+    const key = tenantKeyFor(base);
+    expect(tenantKeyFor(`${base}?application_name=1`)).toBe(key);
+    expect(tenantKeyFor(`${base}?application_name=2`)).toBe(key);
+    expect(tenantKeyFor(`${base}?sslmode=require`)).toBe(key); // transport, not identity
+  });
+
+  it('is stable across password rotation — the pool survives, so must the tenant key', () => {
+    expect(tenantKeyFor('postgresql://app:old-pw@db.tenant-a.example:5432/meta'))
+      .toBe(tenantKeyFor('postgresql://app:new-pw@db.tenant-a.example:5432/meta'));
+  });
+
+  it('inherits pool normalization: localhost spellings and the default port collapse', () => {
+    // Outside Docker parsePostgresUrl maps localhost → 127.0.0.1; jest runs outside.
+    expect(tenantKeyFor('postgresql://app:pw@localhost:5432/meta'))
+      .toBe(tenantKeyFor('postgresql://app:pw@127.0.0.1:5432/meta'));
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-a.example/meta'))
+      .toBe(tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta'));
+  });
+
+  // MR !61 round 4 (note 56582): equivalence must extend to the network endpoint
+  // itself. postgresql: is a non-special URL scheme, so hostname case, a trailing
+  // root dot and numeric IPv4 shorthand all survived parsing — each spelling a
+  // fresh 20/min bucket (16 case-spellings of one host = 16 buckets, measured).
+  it('collapses DNS-equivalent hostname spellings — case, root dot, numeric IPv4', () => {
+    const key = tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta');
+    expect(tenantKeyFor('postgresql://app:pw@DB.TENANT-A.EXAMPLE:5432/meta')).toBe(key);
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-a.example.:5432/meta')).toBe(key);
+    expect(tenantKeyFor('postgresql://app:pw@127.1:5432/meta'))
+      .toBe(tenantKeyFor('postgresql://app:pw@127.0.0.1:5432/meta'));
+  });
+
+  it('still isolates real tenants: user, host and database each split the key', () => {
+    const base = tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/meta');
+    expect(tenantKeyFor('postgresql://other:pw@db.tenant-a.example:5432/meta')).not.toBe(base);
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-b.example:5432/meta')).not.toBe(base);
+    expect(tenantKeyFor('postgresql://app:pw@db.tenant-a.example:5432/other')).not.toBe(base);
+  });
+
+  it('never throws — an unparseable URL degrades to a raw-string key (finer, never coarser)', () => {
+    // Unreachable for a URL that passed login, but the limiter's keyGenerator must
+    // never throw: errorHandler would 500 every chat request.
+    const a = tenantKeyFor('not-a-postgres-url');
+    const b = tenantKeyFor('postgresql:///no-host');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(b).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe('chatStore — the Postgres failure contract (never rejects)', () => {
+  const rejectingPool = {
+    query: () => Promise.reject(new Error('boom')),
+    connect: () => Promise.reject(new Error('boom')),
+  } as unknown as Pool;
+
+  it('loadHistory RESOLVES to an in-memory result when the pool rejects, with a logger.warn', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn');
+    const out = await loadHistory(rejectingPool, ident('u1'), null);
+    expect(out.persisted).toBe(false);
+    expect(out.sessionId).toMatch(UUID_SHAPE);
+    expect(out.history).toEqual([]);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('appendTurns RESOLVES when the pool rejects, and the turn survives in memory', async () => {
+    const { sessionId } = await loadHistory(rejectingPool, ident('u1'), null);
+    // Resolves rather than rejecting — and says the turn WAS written (to memory).
+    // 'busy' is reserved for a refused turn (review !62 round 10) and must never
+    // be what a degraded pool produces.
+    await expect(
+      appendTurns(rejectingPool, ident('u1'), sessionId, [user('degraded but alive')]),
+    ).resolves.toBe('appended');
+
+    // The whole degraded flow stays coherent for this process.
+    const reloaded = await loadHistory(rejectingPool, ident('u1'), sessionId);
+    expect(reloaded.sessionId).toBe(sessionId);
+    expect(reloaded.history).toEqual([user('degraded but alive')]);
+  });
+});
+
+/**
+ * SINGLE ACTIVE TURN PER SESSION (review !62 round 10, Important 3/4) — the
+ * in-memory half, which is also the DEMO half (a demo identity never reaches
+ * Postgres).
+ *
+ * Every client-side guard against a second concurrent turn is per-tab and
+ * best-effort: two tabs are not synchronized, a transient GET failure leaves one
+ * unable to tell whether a turn is running, and an identical repeat login used to
+ * mint a token that fired no storage event at all. Bedrock keys its conversation
+ * memory server-side on the session id, so a second concurrent turn corrupts the
+ * dialogue for BOTH tabs. The store is the one place that sees every tab.
+ */
+describe('chatStore — single active turn (review !62 round 10)', () => {
+  const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const replyWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses a second turn while the first is unanswered', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard),
+    ).toBe('appended');
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('busy');
+
+    // Refused means NOT WRITTEN — a rejected turn must not leave a phantom in the
+    // transcript, or the client's reconciler would call it delivered.
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history).toEqual([userWithId('first', 't1')]);
+  });
+
+  it('admits the next turn once the reply lands', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    // The assistant turn RELEASES the guard, so it must never be subject to it.
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer', 't1')]),
+    ).toBe('appended');
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
+  });
+
+  it('catches an INTERLEAVED unanswered turn, not just a trailing one', async () => {
+    // [user A, user B, assistant B]: the newest turn is an assistant, but A is
+    // still running. Pairing by client_turn_id is what sees that.
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('A', 'ta')]);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('B', 'tb')]);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer B', 'tb')]);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('C', 'tc')], guard),
+    ).toBe('busy');
+  });
+
+  it('releases an ABANDONED turn after the TTL, so a dead turn cannot wedge the session', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('crashed mid-turn', 't1')]);
+
+    // A window shorter than the turn's age: the process died between persisting
+    // the user turn and its reply, and the session must not stay locked forever.
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('next', 't2')], {
+        rejectWhenTurnActive: true, activeTurnTtlMs: 0,
+      }),
+    ).toBe('appended');
+  });
+
+  it('does not refuse when the guard is not asked for (assistant turns, other callers)', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('unguarded', 't2')]),
+    ).toBe('appended');
+  });
+
+  it('is scoped to the identity — one user\'s active turn cannot block another', async () => {
+    const a = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), a.sessionId, [userWithId('mine', 't1')], guard);
+
+    const b = await loadHistory(null, ident('u2'), null);
+    expect(
+      await appendTurns(null, ident('u2'), b.sessionId, [userWithId('theirs', 't2')], guard),
+    ).toBe('appended');
+  });
+
+  it('falls back to the trailing-turn test for id-less clients', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [user('no id')], guard);
+    expect(await appendTurns(null, ident('u1'), sessionId, [user('second')], guard)).toBe('busy');
+
+    // ...and an answered id-less exchange is not "active".
+    await appendTurns(null, ident('u1'), sessionId, [question('answered')]);
+    expect(await appendTurns(null, ident('u1'), sessionId, [user('third')], guard)).toBe('appended');
+  });
+});
+
+/**
+ * review !62 round 12, Important 2. Round 11 added the duplicate-id refusal only
+ * to the Postgres path, so on the memory path — which is also the DEMO path — a
+ * repeat of an already-answered id was admitted, and its OLD assistant turn
+ * immediately made the new user turn look answered, blinding the guard again.
+ */
+describe('chatStore — the memory guard refuses a replayed id too (round 12)', () => {
+  const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const replyWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+  const guard = { rejectWhenTurnActive: true };
+
+  it('refuses an id whose exchange has already completed', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer', 't1')]);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('replayed', 't1')], guard),
+    ).toBe('duplicate');
+
+    // ...and nothing was written, so the guard is not blinded for the NEXT turn.
+    const { history } = await loadHistory(null, ident('u1'), sessionId);
+    expect(history).toHaveLength(2);
+  });
+
+  it('still admits a genuinely new id', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('answer', 't1')]);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [userWithId('second', 't2')], guard),
+    ).toBe('appended');
+  });
+});
+
+/**
+ * review !62 round 12, Important 4. The client derived "a turn is still running"
+ * from an unmatched user row in the transcript, with no notion of age — so a turn
+ * abandoned between its user append and its assistant append (crashed process,
+ * timed-out agent call) locked the composer FOREVER: the backend stopped counting
+ * it after the TTL, but polling gave up after 48 attempts and a reload re-read the
+ * same row. loadHistory now answers the question itself, with the SAME TTL the
+ * guard applies on append.
+ */
+describe('chatStore — loadHistory reports awaitingReply on the guard\'s TTL (round 12)', () => {
+  const userWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const replyWithId = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+
+  it('is false for an empty session', async () => {
+    expect((await loadHistory(null, ident('u1'), null)).awaitingReply).toBe(false);
+  });
+
+  it('is true while a turn is unanswered', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('working', 't1')]);
+    expect((await loadHistory(null, ident('u1'), sessionId)).awaitingReply).toBe(true);
+  });
+
+  it('is false once the reply lands', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('working', 't1')]);
+    await appendTurns(null, ident('u1'), sessionId, [replyWithId('done', 't1')]);
+    expect((await loadHistory(null, ident('u1'), sessionId)).awaitingReply).toBe(false);
+  });
+
+  it('is FALSE for an EXPIRED unanswered turn — the composer must unlock', async () => {
+    // The whole point: the row is still there and still unmatched, but the server
+    // no longer counts it as running, so the client must not either.
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [userWithId('abandoned', 't1')]);
+
+    expect((await loadHistory(null, ident('u1'), sessionId, 0)).awaitingReply).toBe(false);
+    // ...and the transcript still shows the turn, so nothing was hidden from the user.
+    expect((await loadHistory(null, ident('u1'), sessionId, 0)).history).toHaveLength(1);
+  });
+});
+
+/**
+ * review !62 round 13, Important 4. The memory/demo duplicate check scanned the
+ * TRANSCRIPT, which MAX_TURNS caps at 100 entries — so after ~51 completed
+ * exchanges the oldest user turns were evicted and replaying one of their ids came
+ * back 'appended', double-feeding the stateful agent with a turn it had already
+ * answered. The durable path never had this hole: its receipts live in a separate
+ * table, outside the transcript window. The registry is that separation, in memory.
+ */
+describe('chatStore — a replayed id is refused after transcript eviction (round 13)', () => {
+  const guard = { rejectWhenTurnActive: true };
+  const u = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'user', content, client_turn_id,
+  });
+  const a = (content: string, client_turn_id: string): AgentTurn => ({
+    role: 'assistant', type: 'question', content, result: null, client_turn_id,
+  });
+
+  /** Complete `n` exchanges, each with its own id. */
+  async function runExchanges(sessionId: string, n: number, from = 0): Promise<void> {
+    for (let i = from; i < from + n; i++) {
+      expect(
+        await appendTurns(null, ident('u1'), sessionId, [u(`ask ${i}`, `t${i}`)], guard),
+      ).toBe('appended');
+      await appendTurns(null, ident('u1'), sessionId, [a(`reply ${i}`, `t${i}`)]);
+    }
+  }
+
+  it('refuses an id whose turns have fallen out of the capped transcript', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    // 60 exchanges = 120 entries, so MAX_TURNS (100) has evicted the earliest.
+    await runExchanges(sessionId, 60);
+
+    const { history } = await loadHistory(null, ident('u1'), null);
+    expect(history.length).toBe(100);
+    // t0's turns are demonstrably GONE from the transcript — the old check had
+    // nothing left to match on.
+    expect(history.some((t) => t.client_turn_id === 't0')).toBe(false);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('ask 0 again', 't0')], guard),
+    ).toBe('duplicate');
+  });
+
+  it('still refuses a replay whose turns ARE still in the transcript', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await runExchanges(sessionId, 2);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('ask 0 again', 't0')], guard),
+    ).toBe('duplicate');
+  });
+
+  it('admits a genuinely NEW id after the same eviction', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await runExchanges(sessionId, 60);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('something new', 'fresh')], guard),
+    ).toBe('appended');
+  });
+
+  it('forgets ids only past the registry bound, well beyond MAX_TURNS', async () => {
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    // 300 exchanges: 600 transcript entries (evicted down to 100) but only 300
+    // distinct ids, so every one of them is still inside the 500-id registry.
+    await runExchanges(sessionId, 300);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('replay of the first', 't0')], guard),
+    ).toBe('duplicate');
+  });
+
+  it('records ids from UNGUARDED appends too, past eviction', async () => {
+    // A buffered assistant reply, or a replayed outage buffer, arrives without the
+    // guard — but it still proves the id has been seen, and must keep proving it
+    // once its turn has aged out of the transcript.
+    const { sessionId } = await loadHistory(null, ident('u1'), null);
+    await appendTurns(null, ident('u1'), sessionId, [a('reply for a lost turn', 'ghost')]);
+    await runExchanges(sessionId, 60);
+
+    const { history } = await loadHistory(null, ident('u1'), null);
+    expect(history.some((t) => t.client_turn_id === 'ghost')).toBe(false);
+
+    expect(
+      await appendTurns(null, ident('u1'), sessionId, [u('the lost turn', 'ghost')], guard),
+    ).toBe('duplicate');
+  });
+});

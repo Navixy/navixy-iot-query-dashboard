@@ -1,0 +1,195 @@
+import { describe, it, expect } from '@jest/globals';
+import { validateChatBody, buildSessionResponse, MAX_MESSAGE_LENGTH } from '../agent.js';
+import type { AgentTurn } from '../../services/agent/types.js';
+import { CustomError } from '../../middleware/errorHandler.js';
+
+// validateChatBody is exported pure precisely so the 400 taxonomy is testable
+// without supertest (which this MR does not add). The route itself — session
+// resolution, persistence, the deadline, the validateDashboard gate — is covered
+// by chatStore.memory.test.ts (session contract) and the MR's manual curl matrix.
+
+function expect400(body: unknown, messagePart: string): void {
+  try {
+    validateChatBody(body);
+    throw new Error(`expected validateChatBody to throw for ${JSON.stringify(body)}`);
+  } catch (err) {
+    expect(err).toBeInstanceOf(CustomError);
+    expect((err as CustomError).statusCode).toBe(400); // 400 < 500 → message survives errorHandler (C7)
+    expect((err as CustomError).message).toContain(messagePart);
+  }
+}
+
+describe('validateChatBody — the ONLY things that 400 (§3.2)', () => {
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a string', 'hello'],
+    ['a number', 42],
+    ['an array', [{ message: 'hi' }]],
+  ])('rejects a body that is %s', (_label, body) => {
+    expect400(body, 'JSON object');
+  });
+
+  it('rejects a missing message', () => {
+    expect400({}, 'message is required');
+    expect400({ session_id: null }, 'message is required');
+    expect400({ message: null }, 'message is required');
+  });
+
+  it.each([
+    ['a number', 7],
+    ['an object', { text: 'hi' }],
+    ['an array', ['hi']],
+    ['a boolean', true],
+  ])('rejects a message that is %s', (_label, message) => {
+    expect400({ message }, 'message must be a string');
+  });
+
+  it('rejects a message that is empty after trim', () => {
+    expect400({ message: '' }, 'must not be empty');
+    expect400({ message: '   \n\t  ' }, 'must not be empty');
+  });
+
+  it(`rejects a message over ${MAX_MESSAGE_LENGTH} chars and accepts one exactly at the limit`, () => {
+    expect400({ message: 'a'.repeat(MAX_MESSAGE_LENGTH + 1) }, 'at most');
+    expect(validateChatBody({ message: 'a'.repeat(MAX_MESSAGE_LENGTH), client_turn_id: 't' })).toEqual({
+      session_id: null,
+      message: 'a'.repeat(MAX_MESSAGE_LENGTH),
+      client_turn_id: 't',
+    });
+  });
+
+  it('measures the limit AFTER trimming — padding does not count against the user', () => {
+    const padded = `  ${'a'.repeat(MAX_MESSAGE_LENGTH)}  `;
+    expect(validateChatBody({ message: padded, client_turn_id: 't' }).message).toHaveLength(MAX_MESSAGE_LENGTH);
+  });
+
+  it.each([
+    ['a number', 123],
+    ['an object', { id: 'x' }],
+    ['an array', ['x']],
+    ['a boolean', false],
+  ])('rejects a session_id that is %s', (_label, session_id) => {
+    expect400({ session_id, message: 'hi' }, 'session_id must be a string');
+  });
+
+  it('normalizes an absent or null session_id to null', () => {
+    expect(validateChatBody({ message: 'hi', client_turn_id: 't' })).toEqual({
+      session_id: null,
+      message: 'hi',
+      client_turn_id: 't',
+    });
+    expect(validateChatBody({ session_id: null, message: 'hi', client_turn_id: 't' })).toEqual({
+      session_id: null,
+      message: 'hi',
+      client_turn_id: 't',
+    });
+  });
+
+  it('round-trips a valid body with the message trimmed', () => {
+    expect(validateChatBody({ session_id: 'abc-123', message: '  build me a dashboard  ', client_turn_id: 't' })).toEqual({
+      session_id: 'abc-123',
+      message: 'build me a dashboard',
+      client_turn_id: 't',
+    });
+  });
+
+  it('passes an arbitrary session_id STRING through untouched — resolution is the store\'s job (D13), never a 400', () => {
+    expect(validateChatBody({ session_id: 'not-a-real-session', message: 'hi', client_turn_id: 't' }).session_id).toBe(
+      'not-a-real-session',
+    );
+  });
+
+  it('pins MAX_MESSAGE_LENGTH at 4000 — MR 5\'s composer mirrors this constant', () => {
+    expect(MAX_MESSAGE_LENGTH).toBe(4_000);
+  });
+
+  // client_turn_id (review !62 round 6): the idempotency id the client mints per send.
+  describe('client_turn_id', () => {
+    it('round-trips a valid client_turn_id untouched', () => {
+      expect(
+        validateChatBody({ message: 'hi', client_turn_id: '5f1e-abc' }).client_turn_id,
+      ).toBe('5f1e-abc');
+    });
+
+    it('REQUIRES an id — absent, null and empty are all 400s (round 11, Important 2)', () => {
+      // It was optional, and an absent id meant no receipt was written, which left
+      // the single-active-turn guard with nothing to see: a second concurrent
+      // request was simply admitted. The guard's state IS the receipt.
+      expect400({ message: 'hi' }, 'client_turn_id is required');
+      expect400({ message: 'hi', client_turn_id: null }, 'client_turn_id is required');
+      expect400({ message: 'hi', client_turn_id: '' }, 'client_turn_id is required');
+    });
+
+    it.each([
+      ['a number', 123],
+      ['an object', { id: 'x' }],
+      ['an array', ['x']],
+      ['a boolean', true],
+    ])('rejects a client_turn_id that is %s', (_label, client_turn_id) => {
+      expect400({ message: 'hi', client_turn_id }, 'client_turn_id is required');
+    });
+
+    it('rejects a client_turn_id over 100 chars and accepts one at the limit', () => {
+      expect400({ message: 'hi', client_turn_id: 'a'.repeat(101) }, 'at most');
+      expect(
+        validateChatBody({ message: 'hi', client_turn_id: 'a'.repeat(100) }).client_turn_id,
+      ).toHaveLength(100);
+    });
+
+    it('does NOT require a UUID shape — the server only stores and echoes it', () => {
+      expect(validateChatBody({ message: 'hi', client_turn_id: 'not-a-uuid' }).client_turn_id).toBe(
+        'not-a-uuid',
+      );
+    });
+  });
+});
+
+/**
+ * review !62 round 13, Important 1. The store can now answer "I could not
+ * determine that" (undefined), and the wire body has to carry that distinction as
+ * ABSENCE. Serializing it as `awaiting_reply: false` is the bug: the client takes
+ * any boolean as the server's final word and stops deriving the state from the
+ * transcript, so a tenant with no usable receipts table — whose server-side guard
+ * is off for exactly the same reason — loses its last guard too.
+ */
+describe('buildSessionResponse — awaiting_reply is OMITTED when unknown', () => {
+  const base = {
+    sessionId: 'sess-1',
+    history: [] as AgentTurn[],
+    persisted: true,
+    supportsTurnIds: true,
+  };
+
+  it('OMITS the key entirely when the store could not determine it', () => {
+    const body = buildSessionResponse({ ...base });
+
+    expect('awaiting_reply' in body).toBe(false);
+    expect(body.awaiting_reply).toBeUndefined();
+    // JSON.stringify drops an undefined value, but an explicit `false` would
+    // survive it — assert on the serialized body, since that is what ships.
+    expect(JSON.parse(JSON.stringify(body))).not.toHaveProperty('awaiting_reply');
+  });
+
+  it('sends false when the store actually PROVED the session idle', () => {
+    const body = buildSessionResponse({ ...base, awaitingReply: false });
+
+    expect('awaiting_reply' in body).toBe(true);
+    expect(body.awaiting_reply).toBe(false);
+  });
+
+  it('sends true when a turn is still running', () => {
+    expect(buildSessionResponse({ ...base, awaitingReply: true }).awaiting_reply).toBe(true);
+  });
+
+  it('passes the rest of the store result through unchanged', () => {
+    const history: AgentTurn[] = [{ role: 'user', content: 'hi' }];
+    const body = buildSessionResponse({
+      sessionId: 'sess-9', history, persisted: false, supportsTurnIds: false,
+    });
+
+    expect(body).toEqual({
+      session_id: 'sess-9', persisted: false, supports_turn_ids: false, messages: history,
+    });
+  });
+});

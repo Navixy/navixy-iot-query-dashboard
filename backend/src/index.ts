@@ -18,6 +18,7 @@ import menuRoutes from './routes/menu.js';
 import compositeReportsRoutes from './routes/composite-reports.js';
 import panelsRoutes from './routes/panels.js';
 import chartCatalogRoutes from './routes/chart-catalog.js';
+import agentRoutes from './routes/agent.js';
 import { DatabaseService } from './services/database.js';
 import { RedisService } from './services/redis.js';
 
@@ -166,6 +167,10 @@ app.use('/api', chartCatalogRoutes);
 app.use('/api/sql', authenticateToken, sqlRoutes);
 app.use('/api/sql-new', authenticateToken, sqlRoutes);
 app.use('/api/analytics', authenticateToken, analyticsRoutes);
+// Auth AT THE MOUNT, not per-route (the sql/analytics style, deliberately overriding the
+// newer chart-catalog per-route style): the agent rate limiter's keyGenerator reads
+// req.user.userId, so authenticateToken must be STRUCTURALLY guaranteed to run first.
+app.use('/api/agent', authenticateToken, agentRoutes);
 
 // Error handling middleware
 app.use(errorHandler);

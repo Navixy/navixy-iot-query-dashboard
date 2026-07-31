@@ -201,6 +201,47 @@ describe('fetchArtifact — the freshness window narrows bearer replay (MR !57 r
       name: 'ArtifactExpired',
     });
   });
+
+  // MR !57 approval follow-up (a.vitshas, note 56426): an Invalid Date is still
+  // instanceof Date and yields ageMs = NaN, and `NaN > maxAgeMs` is false — the
+  // old gate passed it. A future LastModified yields a NEGATIVE age, which also
+  // passed. Both are fail-open paths in a guard whose whole point is failing
+  // closed on anomalous metadata.
+  it('rejects an Invalid Date LastModified — a NaN age fails closed, body torn down, never read', async () => {
+    const transform = jest.fn(async () => JSON.stringify({ title: 'T', panels: [] }));
+    const destroy = jest.fn();
+    stubS3({
+      Body: { transformToString: transform, destroy },
+      LastModified: new Date(NaN),
+    });
+    await expect(fetchArtifact(loc, new AbortController().signal)).rejects.toMatchObject({
+      name: 'ArtifactExpired',
+    });
+    expect(destroy).toHaveBeenCalled();
+    expect(transform).not.toHaveBeenCalled();
+  });
+
+  it('rejects a LastModified 10 minutes in the future — beyond any plausible clock skew', async () => {
+    const transform = jest.fn(async () => JSON.stringify({ title: 'T', panels: [] }));
+    const destroy = jest.fn();
+    stubS3({
+      Body: { transformToString: transform, destroy },
+      LastModified: new Date(Date.now() + 10 * 60_000),
+    });
+    await expect(fetchArtifact(loc, new AbortController().signal)).rejects.toMatchObject({
+      name: 'ArtifactExpired',
+    });
+    expect(destroy).toHaveBeenCalled();
+    expect(transform).not.toHaveBeenCalled();
+  });
+
+  it('accepts a LastModified a few seconds in the future — inside the clock-skew allowance', async () => {
+    stubS3({ LastModified: new Date(Date.now() + 5_000) });
+    await expect(fetchArtifact(loc, new AbortController().signal)).resolves.toEqual({
+      title: 'T',
+      panels: [],
+    });
+  });
 });
 
 describe('isArtifactKey', () => {
@@ -357,5 +398,25 @@ describe('envInt — feeds every tuning knob (MR !57 review gap)', () => {
 
   it('accepts a positive integer string', () => {
     expect(envInt('120000', 5_000)).toBe(120_000);
+  });
+
+  // MR !61 review: envInt feeds AbortSignal.timeout, whose domain is NARROWER than
+  // "positive finite number". Measured: 1.5 and 4294967296 throw ERR_OUT_OF_RANGE
+  // (a bare error — no statusCode — so an opaque 500 on every chat request), and on
+  // the node:22-alpine deploy image 2147483648 is silently clamped to ~1 ms with a
+  // TimeoutOverflowWarning, timing out every agent request instantly.
+  it('falls back on a fractional value — AbortSignal.timeout(1.5) throws ERR_OUT_OF_RANGE', () => {
+    expect(envInt('1.5', 5_000)).toBe(5_000);
+  });
+
+  it('accepts the timer ceiling 2147483647 exactly', () => {
+    expect(envInt('2147483647', 5_000)).toBe(2_147_483_647);
+  });
+
+  it.each([
+    ['2^31 (clamped to ~1 ms on Node 22)', '2147483648'],
+    ['2^32 (ERR_OUT_OF_RANGE on Node 24)', '4294967296'],
+  ])('falls back past the 32-bit signed timer ceiling: %s', (_label, raw) => {
+    expect(envInt(raw, 5_000)).toBe(5_000);
   });
 });

@@ -6,6 +6,7 @@ import { DatabaseService } from '../services/database.js';
 import { ExportService } from '../services/export.js';
 import { resolveExportPreferences } from '../services/userPreferences.js';
 import { authenticateToken, requireAdminOrEditor } from '../middleware/auth.js';
+import { rejectDemoWrites } from '../middleware/demoGuard.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 import { CustomError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
@@ -130,7 +131,7 @@ router.get('/composite-reports/:id', async (req: Request, res: Response, next: N
  * POST /api/composite-reports
  * Create a new composite report
  */
-router.post('/composite-reports', requireAdminOrEditor, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/composite-reports', rejectDemoWrites, requireAdminOrEditor, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { title, description, slug, section_id, sort_order, sql_query, config, report_schema } = req.body;
     const { userDbUrl, userId } = getUserInfo(req);
@@ -187,7 +188,7 @@ router.post('/composite-reports', requireAdminOrEditor, async (req: Request, res
  * PUT /api/composite-reports/:id
  * Update an existing composite report
  */
-router.put('/composite-reports/:id', requireAdminOrEditor, async (req: Request, res: Response, next: NextFunction) => {
+router.put('/composite-reports/:id', rejectDemoWrites, requireAdminOrEditor, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = req.params.id;
     if (!id) {
@@ -226,7 +227,7 @@ router.put('/composite-reports/:id', requireAdminOrEditor, async (req: Request, 
  * DELETE /api/composite-reports/:id
  * Soft delete a composite report
  */
-router.delete('/composite-reports/:id', requireAdminOrEditor, async (req: Request, res: Response, next: NextFunction) => {
+router.delete('/composite-reports/:id', rejectDemoWrites, requireAdminOrEditor, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = req.params.id;
     if (!id) {

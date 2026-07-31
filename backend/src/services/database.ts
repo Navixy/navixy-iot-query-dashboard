@@ -1,13 +1,20 @@
 import { Pool } from 'pg';
 import type { PoolClient, FieldDef } from 'pg';
+import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { CustomError } from '../middleware/errorHandler.js';
 import { SQLSelectGuard } from '../utils/sqlSelectGuard.js';
 import { RedisService } from './redis.js';
 import jwt from 'jsonwebtoken';
-import { existsSync } from 'fs';
 import { toErrorMeta, isTransientDbError, type ErrorWithMeta } from '../utils/errors.js';
+import { buildAuthTokenPayload } from './authTokenPayload.js';
+import { resolveLoginIdentity } from './passwordlessLogin.js';
 import { sanitizeTimeZone } from '../utils/datetime.js';
+import {
+  parsePostgresUrl as parseDbUrl,
+  settingsPoolKey,
+  type DatabaseConfig,
+} from './dbIdentity.js';
 import { configurePgTypeParsers } from '../utils/pgTypeParsers.js';
 
 // Applied before the first pool is built: value parsing is a property of the
@@ -15,14 +22,7 @@ import { configurePgTypeParsers } from '../utils/pgTypeParsers.js';
 // this service (DO-273).
 configurePgTypeParsers();
 
-export interface DatabaseConfig {
-  user: string;
-  password: string;
-  database: string;
-  hostname: string;
-  port: number;
-  ssl?: boolean;
-}
+export type { DatabaseConfig } from './dbIdentity.js';
 
 
 export interface QueryResult {
@@ -126,79 +126,13 @@ export class DatabaseService {
   // ==========================================
 
   /**
-   * Parse a PostgreSQL URL and extract connection components
+   * Parse a PostgreSQL URL and extract connection components.
+   * Delegates to dbIdentity.ts (MR !61 round 3), where the SAME normalization
+   * also feeds settingsPoolKey — the pool cache key and the chat tenant key must
+   * come from one construction site or they drift (note 56573).
    */
   parsePostgresUrl(url: string): DatabaseConfig {
-    try {
-      // Handle postgresql:// URLs
-      if (!url.startsWith('postgresql://') && !url.startsWith('postgres://')) {
-        throw new Error('Database URL must start with postgresql:// or postgres://');
-      }
-
-      const urlObj = new URL(url);
-      const sslmode = urlObj.searchParams.get('sslmode');
-
-      const rawUser = urlObj.username || '';
-      const rawPassword = urlObj.password || '';
-      const decodedUser = decodeURIComponent(rawUser);
-      const decodedPassword = decodeURIComponent(rawPassword);
-
-      logger.info('parsePostgresUrl: parsed components', {
-        rawUser,
-        decodedUser,
-        rawPasswordLength: rawPassword.length,
-        decodedPasswordLength: decodedPassword.length,
-        passwordFirst3: decodedPassword.substring(0, 3),
-        passwordLast3: decodedPassword.substring(decodedPassword.length - 3),
-        hostname: urlObj.hostname,
-        port: urlObj.port,
-        pathname: urlObj.pathname,
-        sslmode,
-        searchParams: urlObj.search,
-      });
-
-      if (!urlObj.hostname) {
-        throw new Error('Database URL must include a hostname');
-      }
-
-      if (!urlObj.pathname || urlObj.pathname === '/') {
-        throw new Error('Database URL must include a database name');
-      }
-
-      // Normalize localhost to IPv4, and handle Docker networking
-      let hostname = urlObj.hostname;
-      const isDocker = process.env.DOCKER_ENV === 'true' || existsSync('/.dockerenv');
-      
-      if (hostname === 'localhost' || hostname === '::1' || hostname === '[::1]' || hostname === '127.0.0.1') {
-        hostname = isDocker ? 'host.docker.internal' : '127.0.0.1';
-        logger.info('Normalized localhost in URL', { 
-          original: urlObj.hostname, 
-          normalized: hostname,
-          isDocker 
-        });
-      } else if (hostname === 'postgres' && !isDocker) {
-        hostname = '127.0.0.1';
-        logger.info('Normalized Docker hostname "postgres" to localhost', { 
-          original: urlObj.hostname, 
-          normalized: hostname 
-        });
-      }
-    
-      return {
-        user: decodedUser,
-        password: decodedPassword,
-        database: urlObj.pathname.slice(1),
-        hostname: hostname,
-        port: parseInt(urlObj.port) || 5432,
-        ssl: sslmode === 'require',
-      };
-    } catch (error) {
-      if (error instanceof CustomError) {
-        throw error;
-      }
-      logger.error('Error parsing PostgreSQL URL:', { url, error });
-      throw new CustomError(`Invalid PostgreSQL URL format ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`, 400);
-    }
+    return parseDbUrl(url);
   }
 
   /**
@@ -207,15 +141,13 @@ export class DatabaseService {
    */
   getClientSettingsPool(userDbUrl: string): Pool {
     const config = this.parsePostgresUrl(userDbUrl);
-    const poolKey = `settings:${config.user}@${config.hostname}:${config.port}/${config.database}`;
-    
+    const poolKey = settingsPoolKey(config);
+
     const existing = this.clientSettingsPools.get(poolKey);
     if (existing && existing.password !== config.password) {
-      logger.info('Password changed for client settings pool, recreating', {
-        poolKey,
-        oldPasswordFirst3: existing.password.substring(0, 3),
-        newPasswordFirst3: config.password.substring(0, 3),
-      });
+      // The EVENT is the signal — never log password fragments, even truncated
+      // ones (MR !61 round 4, note 56582).
+      logger.info('Password changed for client settings pool, recreating', { poolKey });
       existing.pool.end().catch(err => {
         logger.error('Error closing stale client settings pool', { poolKey, error: err.message });
       });
@@ -232,9 +164,6 @@ export class DatabaseService {
         database: config.database,
         ssl: config.ssl,
         sslConfig: JSON.stringify(sslConfig),
-        passwordLength: config.password.length,
-        passwordFirst3: config.password.substring(0, 3),
-        passwordLast3: config.password.substring(config.password.length - 3),
       });
 
       const pool = new Pool({
@@ -273,7 +202,7 @@ export class DatabaseService {
   async testClientSettingsConnection(userDbUrl: string): Promise<void> {
     const pool = this.getClientSettingsPool(userDbUrl);
     let client: PoolClient | null = null;
-    
+
     try {
       client = await pool.connect();
       await client.query('SELECT 1');
@@ -308,81 +237,60 @@ export class DatabaseService {
     userDbUrl: string,
     demo: boolean = false,
     sessionId?: string
-  ): Promise<{ user: User; token: string }> {
+  ): Promise<{ user: User; token: string; effectiveRole: 'admin' | 'editor' | 'viewer' }> {
     const pool = this.getClientSettingsPool(userDbUrl);
-    
+
     try {
       const client = await pool.connect();
-      
+
       try {
-        // Check if user exists in client database (match by email)
-        const result = await client.query(
-          'SELECT * FROM dashboard_studio_meta_data.users WHERE email = $1',
-          [email]
-        );
+        // Get-or-create, the role/metadata writes, the marker and therefore the
+        // JWT all happen in ONE transaction, serialized per email address —
+        // see services/passwordlessLogin.ts for the races that required it
+        // (review !62 round 12, Critical 1). It lives there rather than inline
+        // because this module cannot be imported under the repo's ts-jest ESM
+        // setup, which is why none of this was testable before.
+        const { user, isNewUser, effectiveRole, demoCleanupToken } =
+          await resolveLoginIdentity(client, { email, role, iotDbUrl, userDbUrl, demo });
 
-        let user: User;
-        let isNewUser = false;
-        
-        if (result.rows.length === 0) {
-          // Create new user
-          logger.info('Creating new user for passwordless auth', { email, role });
-          const insertResult = await client.query(
-            `INSERT INTO dashboard_studio_meta_data.users (email, email_confirmed_at, is_super_admin, raw_user_meta_data)
-             VALUES ($1, NOW(), $2, $3)
-             RETURNING *`,
-            [email, role === 'admin', JSON.stringify({ iotDbUrl, userDbUrl })]
-          );
-          user = insertResult.rows[0] as User;
-          isNewUser = true;
-
-          // Create user role
-          await client.query('DELETE FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1', [user.id]);
-          await client.query('INSERT INTO dashboard_studio_meta_data.user_roles (user_id, role) VALUES ($1, $2)', [user.id, role]);
-        } else {
-          user = result.rows[0] as User;
-          logger.info('Found existing user for passwordless auth', { email, userId: user.id, role });
-          
-          // Update user role
-          await client.query('DELETE FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1', [user.id]);
-          await client.query('INSERT INTO dashboard_studio_meta_data.user_roles (user_id, role) VALUES ($1, $2)', [user.id, role]);
-        }
-
-        // Update last sign in and store both URLs in metadata
-        await client.query(
-          'UPDATE dashboard_studio_meta_data.users SET last_sign_in_at = NOW(), raw_user_meta_data = $1 WHERE id = $2',
-          [JSON.stringify({ iotDbUrl, userDbUrl }), user.id]
-        );
-        
-        logger.info('Updated user metadata with database URLs', { 
-          userId: user.id, 
+        logger.info('Updated user metadata with database URLs', {
+          userId: user.id,
           email,
           isNewUser,
           session_id: sessionId ?? 'not provided',
         });
 
-        // Generate JWT token - include both URLs, demo flag, and optional session_id for subsequent requests
-        const tokenPayload: Record<string, unknown> = { 
-          userId: user.id, 
+        // Generate JWT token - include both URLs, demo flag, and optional session_id
+        // for subsequent requests. buildAuthTokenPayload also adds the per-login jti
+        // that makes every token unique (review !62 round 10, Important 4) — see
+        // services/authTokenPayload.ts for why that is load-bearing.
+        const tokenPayload = buildAuthTokenPayload({
+          userId: user.id,
           email: user.email,
-          role: role,
+          // The role the account ACTUALLY holds. For a demo login on a
+          // pre-existing row this is the stored role, not the requested one, so a
+          // demo sign-in can never hand itself more privilege than the account has
+          // (review !62 round 12, Critical 1).
+          role: effectiveRole,
           iotDbUrl: iotDbUrl,
           userDbUrl: userDbUrl,
-          demo: demo
-        };
-        
-        // Add session_id if provided
-        if (sessionId) {
-          tokenPayload.session_id = sessionId;
-        }
-        
+          demo: demo,
+          sessionId: sessionId != null ? String(sessionId) : undefined,
+          demoCleanupToken,
+        });
+
         const token = jwt.sign(
           tokenPayload,
           process.env.JWT_SECRET || 'fallback-secret',
           { expiresIn: '24h' }
         );
 
-        return { user, token };
+        // effectiveRole travels back to the ROUTE, not just into the token
+        // (review !62 round 13, Important 3). The login response used to echo the
+        // requested role while the JWT carried this one, so a demo sign-in that
+        // asked for 'admin' on a viewer account rendered admin-only affordances
+        // (Apply) against a token the backend would refuse.
+        return { user: user as unknown as User, token, effectiveRole };
       } finally {
         client.release();
       }
@@ -398,11 +306,11 @@ export class DatabaseService {
         errorStack: error?.stack,
         fullError: JSON.stringify(error, Object.getOwnPropertyNames(error))
       });
-      
+
       // Handle specific PostgreSQL error codes
       const errorCode = error?.code;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      
+
       // 28P01: Authentication failed (invalid password for settings user)
       // 28000: Invalid authorization specification
       if (errorCode === '28P01' || errorCode === '28000') {
@@ -411,7 +319,7 @@ export class DatabaseService {
           401
         );
       }
-      
+
       // 3D000: Database does not exist
       if (errorCode === '3D000') {
         throw new CustomError(
@@ -419,7 +327,7 @@ export class DatabaseService {
           400
         );
       }
-      
+
       // ECONNREFUSED: Cannot connect to database
       if (errorCode === 'ECONNREFUSED' || errorMessage.includes('ECONNREFUSED')) {
         throw new CustomError(
@@ -427,7 +335,7 @@ export class DatabaseService {
           400
         );
       }
-      
+
       // ENOTFOUND: Host not found
       if (errorCode === 'ENOTFOUND' || errorMessage.includes('ENOTFOUND')) {
         throw new CustomError(
@@ -435,7 +343,7 @@ export class DatabaseService {
           400
         );
       }
-      
+
       // 42P01: Table does not exist (schema not set up)
       if (errorCode === '42P01') {
         throw new CustomError(
@@ -443,7 +351,7 @@ export class DatabaseService {
           403
         );
       }
-      
+
       // 3F000: Schema does not exist
       if (errorCode === '3F000' || errorMessage.includes('schema') && errorMessage.includes('does not exist')) {
         throw new CustomError(
@@ -451,7 +359,7 @@ export class DatabaseService {
           403
         );
       }
-      
+
       throw new CustomError(
         `Authentication failed: ${errorMessage}`,
         500
@@ -462,7 +370,7 @@ export class DatabaseService {
   async getUserRole(userId: string, pool: Pool): Promise<string> {
     try {
       const client = await pool.connect();
-      
+
       try {
         const result = await client.query(
           'SELECT role FROM dashboard_studio_meta_data.user_roles WHERE user_id = $1',
@@ -482,7 +390,7 @@ export class DatabaseService {
   async getUsers(pool: Pool): Promise<User[]> {
     try {
       const client = await pool.connect();
-      
+
       try {
         const result = await client.query(
           'SELECT * FROM dashboard_studio_meta_data.users ORDER BY created_at ASC'
@@ -781,7 +689,7 @@ export class DatabaseService {
   async getGlobalVariableById(id: string, pool: Pool): Promise<Record<string, unknown> | null> {
     try {
       const client = await pool.connect();
-      
+
       try {
         const result = await client.query(
           'SELECT * FROM dashboard_studio_meta_data.global_variables WHERE id = $1',
@@ -805,7 +713,7 @@ export class DatabaseService {
   }, pool: Pool): Promise<Record<string, unknown>> {
     try {
       const client = await pool.connect();
-      
+
       try {
         const result = await client.query(
           `INSERT INTO dashboard_studio_meta_data.global_variables (label, description, value)
@@ -835,7 +743,7 @@ export class DatabaseService {
   }, pool: Pool): Promise<Record<string, unknown>> {
     try {
       const client = await pool.connect();
-      
+
       try {
         // Get existing variable
         const existing = await this.getGlobalVariableById(id, pool);
@@ -900,7 +808,7 @@ export class DatabaseService {
   async deleteGlobalVariable(id: string, pool: Pool): Promise<void> {
     try {
       const client = await pool.connect();
-      
+
       try {
         const result = await client.query(
           'DELETE FROM dashboard_studio_meta_data.global_variables WHERE id = $1',
@@ -923,7 +831,7 @@ export class DatabaseService {
     try {
       const variables = await this.getGlobalVariables(pool);
       const map: Record<string, string> = {};
-      
+
       variables.forEach(variable => {
         if (variable.value !== null && variable.value !== undefined) {
           map[variable.label as string] = variable.value as string;
@@ -971,7 +879,7 @@ export class DatabaseService {
   async getUserIotDbUrl(userId: string, pool: Pool): Promise<string | null> {
     try {
       const client = await pool.connect();
-      
+
       try {
         const result = await client.query(
           'SELECT raw_user_meta_data FROM dashboard_studio_meta_data.users WHERE id = $1',
@@ -984,15 +892,15 @@ export class DatabaseService {
         }
 
         const rawMetaData = result.rows[0].raw_user_meta_data;
-        
+
         if (!rawMetaData) {
           logger.warn('User has no raw_user_meta_data', { userId });
           return null;
         }
 
         // Parse if it's a string, otherwise use as-is (PostgreSQL JSONB)
-        const metaData = typeof rawMetaData === 'string' 
-          ? JSON.parse(rawMetaData) 
+        const metaData = typeof rawMetaData === 'string'
+          ? JSON.parse(rawMetaData)
           : rawMetaData;
 
         if (!metaData.iotDbUrl) {
@@ -1039,7 +947,7 @@ export class DatabaseService {
       } else {
         throw new CustomError('Incomplete database configuration provided for testing', 400);
       }
-      
+
       // Create a temporary pool for testing
       const poolConfig = {
         user: config.user,
@@ -1075,7 +983,7 @@ export class DatabaseService {
         const queryStartTime = Date.now();
         const result = await client.query('SELECT 1 as test');
         const queryTime = Date.now() - queryStartTime;
-        logger.info('Test query executed successfully', { 
+        logger.info('Test query executed successfully', {
           queryTimeMs: queryTime,
           result: result.rows[0]
         });
@@ -1090,7 +998,7 @@ export class DatabaseService {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         const errorCode = toErrorMeta(error).code;
-        
+
         logger.error('Database connection test failed - detailed error:', {
           host: config.hostname,
           port: config.port,
@@ -1099,7 +1007,7 @@ export class DatabaseService {
           errorMessage,
           errorCode,
         });
-        
+
         // Provide more helpful error messages
         let userFriendlyMessage = errorMessage;
         if (errorMessage.includes('ECONNREFUSED') || errorCode === 'ECONNREFUSED') {
@@ -1109,7 +1017,7 @@ export class DatabaseService {
         } else if (errorMessage.includes('does not exist') || errorCode === '3D000') {
           userFriendlyMessage = `Database "${config.database}" does not exist. Please check the database name.`;
         }
-        
+
         throw new CustomError(`Failed to connect to database: ${userFriendlyMessage}`, 400);
       } finally {
         if (client) {
@@ -1135,7 +1043,7 @@ export class DatabaseService {
 
   private async getExternalPool(config: DatabaseConfig): Promise<Pool> {
     const configKey = `${config.user}@${config.hostname}:${config.port}/${config.database}`;
-    
+
     const existing = this.externalPools.get(configKey);
     if (existing && existing.password !== config.password) {
       logger.info('Password changed for external pool, recreating', { configKey });
@@ -1229,20 +1137,20 @@ export class DatabaseService {
       // Extract LIMIT from user's query if present
       const limitMatch = sql.trim().match(/\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+\d+)?(?:\s*;)?$/i);
       const userLimit = limitMatch && limitMatch[1] ? parseInt(limitMatch[1]) : null;
-      
+
       // Strip any existing LIMIT/OFFSET from the user's query
       const cleanedSql = sql.trim().replace(/;$/, '').replace(/\s+LIMIT\s+\d+(?:\s+OFFSET\s+\d+)?$/i, '');
 
       // Get total count
       const countSql = `SELECT COUNT(*) as total FROM (${cleanedSql}) as count_query`;
       const countResult = await client.query(countSql);
-      const total = countResult.rows && countResult.rows.length > 0 
-        ? parseInt(countResult.rows[0].total) 
+      const total = countResult.rows && countResult.rows.length > 0
+        ? parseInt(countResult.rows[0].total)
         : 0;
 
       // Use user's LIMIT if it's smaller than pageSize, otherwise use pageSize
       const effectiveLimit = userLimit !== null && userLimit < pageSize ? userLimit : pageSize;
-      
+
       // Apply pagination
       const offset = (page - 1) * effectiveLimit;
       const paginatedSql = `${cleanedSql} LIMIT ${effectiveLimit} OFFSET ${offset}`;
@@ -1251,7 +1159,7 @@ export class DatabaseService {
 
       // Extract columns and rows
       const columns = result.rows && result.rows.length > 0 ? Object.keys(result.rows[0]) : [];
-      
+
       // Convert BigInt values to strings for JSON serialization
       const rows = (result.rows || []).map((row: Record<string, unknown>) => {
         const convertedRow: Record<string, unknown> = {};
@@ -1346,7 +1254,7 @@ export class DatabaseService {
       if (result.rows && result.rows.length > 0) {
         const firstRow = result.rows[0];
         const firstValue = Object.values(firstRow)[0];
-        
+
         // Handle BigInt conversion
         if (typeof firstValue === 'bigint') {
           value = Number(firstValue);
@@ -1398,7 +1306,7 @@ export class DatabaseService {
   async getSections(pool: Pool, userId?: string): Promise<Record<string, unknown>[]> {
     try {
       const client = await pool.connect();
-      
+
       try {
         if (userId) {
           // Filter by user_id
@@ -1416,7 +1324,7 @@ export class DatabaseService {
               WHERE n.nspname = 'dashboard_studio_meta_data' AND p.proname = 'get_section_hierarchy'
             )`
           );
-          
+
           if (functionCheck.rows[0].exists) {
             const result = await client.query(`SELECT * FROM dashboard_studio_meta_data.get_section_hierarchy()`);
             return result.rows;
@@ -1440,7 +1348,7 @@ export class DatabaseService {
   async getReports(pool: Pool, userId?: string): Promise<Record<string, unknown>[]> {
     try {
       const client = await pool.connect();
-      
+
       try {
         let result;
         if (userId) {
@@ -1488,7 +1396,7 @@ export class DatabaseService {
   async getReportById(id: string, pool: Pool, userId?: string): Promise<Record<string, unknown> | null> {
     try {
       const client = await pool.connect();
-      
+
       try {
         let result;
         if (userId) {
@@ -1515,7 +1423,7 @@ export class DatabaseService {
         }
 
         const report = result.rows[0];
-        
+
         // Parse the report_schema JSONB field if it exists
         if (report.report_schema && typeof report.report_schema === 'string') {
           try {
@@ -1586,7 +1494,7 @@ export class DatabaseService {
   async getCompositeReports(pool: Pool, userId?: string): Promise<Record<string, unknown>[]> {
     try {
       const client = await pool.connect();
-      
+
       try {
         let result;
         if (userId) {
@@ -1676,7 +1584,7 @@ export class DatabaseService {
   }, pool: Pool): Promise<Record<string, unknown>> {
     try {
       const client = await pool.connect();
-      
+
       try {
         // Build the report_schema with composite report data
         const compositeSchema = {
@@ -1731,7 +1639,7 @@ export class DatabaseService {
   }, pool: Pool, userId?: string): Promise<Record<string, unknown>> {
     try {
       const client = await pool.connect();
-      
+
       try {
         // Verify report exists and user has access
         const existing = await this.getCompositeReportById(id, pool, userId);
@@ -1785,7 +1693,7 @@ export class DatabaseService {
         paramIndex++;
 
         updateFields.push(`updated_at = NOW()`);
-        
+
         updateValues.push(id);
 
         const result = await client.query(
@@ -1817,7 +1725,7 @@ export class DatabaseService {
   async deleteCompositeReport(id: string, pool: Pool, userId?: string): Promise<void> {
     try {
       const client = await pool.connect();
-      
+
       try {
         // Verify report exists and user has access
         const existing = await this.getCompositeReportById(id, pool, userId);
@@ -1978,7 +1886,7 @@ export class DatabaseService {
 
       // Check if there are any parameters to process
       const hasParameters = Object.keys(params).length > 0;
-      
+
       let processedStatement = statement;
       const paramValues: unknown[] = [];
       let usedParamCount = 0;
@@ -1996,7 +1904,7 @@ export class DatabaseService {
             usedParamCount++;
             const placeholder = `$${usedParamCount}`;
             processedStatement = processedStatement.replace(
-              paramPattern, 
+              paramPattern,
               placeholder
             );
             paramValues.push(value);
@@ -2022,7 +1930,7 @@ export class DatabaseService {
       // Handle pagination if requested
       if (pagination) {
         const { page, pageSize } = pagination;
-        
+
         // Validate pagination parameters
         if (page < 1 || pageSize < 1 || pageSize > 10000) {
           throw new CustomError('Invalid pagination parameters. Page must be >= 1 and pageSize must be between 1 and 10000', 400);
@@ -2034,15 +1942,15 @@ export class DatabaseService {
 
         // Strip any existing LIMIT/OFFSET from the query
         const cleanedStatement = processedStatement.trim().replace(/;$/, '').replace(/\s+LIMIT\s+\d+(?:\s+OFFSET\s+\d+)?$/i, '');
-        
+
         // Get total count (wrap query in COUNT)
         const countStatement = `SELECT COUNT(*) as total FROM (${cleanedStatement}) as count_query`;
         const countResult = usedParamCount > 0
           ? await client.query(countStatement, paramValues)
           : await client.query(countStatement);
-        
-        total = countResult.rows && countResult.rows.length > 0 
-          ? parseInt(countResult.rows[0].total as string, 10) 
+
+        total = countResult.rows && countResult.rows.length > 0
+          ? parseInt(countResult.rows[0].total as string, 10)
           : 0;
 
         // If user specified LIMIT, cap the total to respect it
