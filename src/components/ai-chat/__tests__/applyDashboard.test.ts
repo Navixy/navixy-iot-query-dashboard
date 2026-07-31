@@ -60,6 +60,23 @@ describe('applyDashboard', () => {
     expect(h.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ section_id: 'b' }));
   });
 
+  it('reuses a section whose name only differs by case or stray spaces', async () => {
+    // Renaming it in the menu editor should not silently mint a duplicate.
+    getSections.mockResolvedValue({ data: [{ id: 'renamed', name: '  ai dashboards ' }] });
+    const h = harness();
+    await applyDashboard({ result, ...h });
+
+    expect(createSection).not.toHaveBeenCalled();
+    expect(h.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ section_id: 'renamed' }));
+  });
+
+  it('does not mistake a differently named section for this one', async () => {
+    getSections.mockResolvedValue({ data: [{ id: 'x', name: 'AI Dashboards (old)' }] });
+    await applyDashboard({ result, ...harness() });
+
+    expect(createSection).toHaveBeenCalledWith('AI Dashboards', 1000);
+  });
+
   it('creates the section with POSITIONAL arguments when it is absent', async () => {
     getSections.mockResolvedValue({ data: [] });
     const h = harness();

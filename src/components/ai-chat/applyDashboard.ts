@@ -152,7 +152,13 @@ export async function applyDashboard({
   }
 
   const existing = (sections.data as Array<{ id: string; name: string; sort_order?: number }> | undefined) ?? [];
-  let sectionId = existing.find((section) => section.name === SECTION_NAME)?.id ?? null;
+  // Matched loosely on purpose: an exact comparison means renaming the section in the
+  // menu editor — or a stray trailing space — makes the next Apply create a duplicate
+  // beside it. (Self-healing after that: every later Apply finds and reuses the new
+  // one. Still one avoidable duplicate.) (!64 review round 3)
+  const sameName = (name: string) => name.trim().toLowerCase() === SECTION_NAME.toLowerCase();
+  let sectionId = existing.find((section) =>
+    typeof section.name === 'string' && sameName(section.name))?.id ?? null;
 
   if (!sectionId) {
     // APPEND, never prepend. The menu is ordered by `sort_order` ascending and the
