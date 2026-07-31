@@ -1,6 +1,12 @@
 import { describe, it, expect } from '@jest/globals';
-import { stripArtifactUrls } from '../stripArtifactUrl.js';
+import {
+  RESULT_FALLBACK_MESSAGE,
+  stripArtifactUrls,
+  withoutArtifactUrls,
+} from '../stripArtifactUrl.js';
 import { interpretAgentResponse } from '../interpretResponse.js';
+import { toDashboardResult } from '../bedrockAgent.js';
+import type { AgentTurn } from '../types.js';
 
 /**
  * Bucket and job id are PLACEHOLDERS, deliberately. The shapes below mirror real
@@ -173,5 +179,101 @@ describe('stripArtifactUrls', () => {
       expect(interpretAgentResponse(reply).type).toBe('result');
       expect(interpretAgentResponse(stripArtifactUrls(reply)).type).toBe('question');
     }
+  });
+});
+
+/**
+ * ROUND 16, Important — the READ side. Stripping on write only ever protected
+ * turns written after it shipped; a transcript saved before it (or by an old
+ * replica mid-rollout) is stored verbatim and re-published in full on the next
+ * page load. This is the pass that catches those, and the rows stay untouched.
+ */
+describe('withoutArtifactUrls — a transcript on its way back to the browser', () => {
+  const dashboard = { title: 'Fleet Overview', report_schema: { title: 'Fleet Overview' } };
+  const savedResult = (content: string): AgentTurn => ({
+    role: 'assistant', type: 'result', content, result: dashboard,
+  });
+
+  it('cleans a result turn saved before the sanitizer existed, preview intact', () => {
+    const [turn] = withoutArtifactUrls([savedResult(TABLE_AND_FENCE_REPLY)]);
+
+    expect(turn.content).not.toContain('s3://');
+    expect(turn.content).not.toContain(BUCKET);
+    expect(turn.content).not.toContain('Download URL');
+    expect(turn.content).not.toContain('aws s3 cp');
+    expect(turn.content).not.toContain('```');
+    // What the turn was FOR survives: the prose and the dashboard behind Preview.
+    expect(turn.content).toContain('built and uploaded successfully');
+    expect(turn.content).toContain('Panel 1 — Bar Chart');
+    expect(turn.result).toBe(dashboard);
+    expect(turn.type).toBe('result');
+  });
+
+  it('words an emptied turn exactly as the live turn did — no drift between the two', () => {
+    // toDashboardResult is the oracle: the same reply stripped on the way in and
+    // on the way out must produce the same bubble, or a reload silently reworded
+    // the conversation. One constant, asserted from both ends.
+    const proseThatWasOnlyTheUrl = `\`${URL}\``;
+    const [turn] = withoutArtifactUrls([savedResult(proseThatWasOnlyTheUrl)]);
+
+    expect(turn.content).toBe(
+      toDashboardResult(proseThatWasOnlyTheUrl, { title: 'Fleet Overview' }).message,
+    );
+    expect(turn.content).toBe(RESULT_FALLBACK_MESSAGE);
+  });
+
+  it('never edits what the USER typed, URL and all', () => {
+    // Their words are theirs. A transcript that quietly rewrites them is a
+    // transcript that lies — and there is nothing of ours to leak in one.
+    const typed = `can you read ${URL} for me?`;
+    const [turn] = withoutArtifactUrls([{ role: 'user', content: typed }]);
+
+    expect(turn.content).toBe(typed);
+  });
+
+  it('cleans a legacy assistant row that carries a URL without a result payload', () => {
+    // rowToTurn maps a type-NULL row onto plain assistant prose. Such a row cannot
+    // be produced today, but a read-side backstop is exactly where that kind of
+    // thing belongs.
+    const [turn] = withoutArtifactUrls([
+      { role: 'assistant', content: `Here it is: \`${URL}\` — enjoy.` },
+    ]);
+
+    expect(turn.content).not.toContain('s3://');
+    expect(turn.content).toContain('Here it is:');
+    expect(turn.content).toContain('enjoy');
+  });
+
+  it('promises no dashboard on an arm that has none, even stripped to nothing', () => {
+    // The fallback sentence belongs to the result arm, where a payload makes it
+    // true. Reaching for it here would invent a dashboard the turn cannot preview.
+    const [turn] = withoutArtifactUrls([{ role: 'assistant', content: `\`${URL}\`` }]);
+
+    expect(turn.content).toBe('');
+    expect(turn.content).not.toBe(RESULT_FALLBACK_MESSAGE);
+  });
+
+  it('returns a clean transcript BY REFERENCE — the common path rewrites nothing', () => {
+    const history: AgentTurn[] = [
+      { role: 'user', content: 'build me a mileage dashboard' },
+      { role: 'assistant', type: 'question', content: 'Which time range?', result: null },
+      savedResult('Built it! 🎉'),
+    ];
+
+    const out = withoutArtifactUrls(history);
+
+    expect(out).toBe(history);
+    expect(out[2]).toBe(history[2]);
+  });
+
+  it('leaves the turns it did not have to touch alone, by reference', () => {
+    const clean: AgentTurn = { role: 'user', content: 'and now by depot?' };
+    const dirty = savedResult(`Done — \`${URL}\``);
+
+    const out = withoutArtifactUrls([clean, dirty]);
+
+    expect(out[0]).toBe(clean);
+    expect(out[1]).not.toBe(dirty);
+    expect(dirty.content).toContain('s3://'); // the input is not mutated
   });
 });

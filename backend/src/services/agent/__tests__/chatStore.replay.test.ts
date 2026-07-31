@@ -2,6 +2,10 @@ import { describe, it, expect, afterEach, jest } from '@jest/globals';
 import type { Pool } from 'pg';
 import { loadHistory, appendTurns, getTurnStatus, __resetChatStoreForTests } from '../chatStore.js';
 import type { AgentTurn } from '../types.js';
+// The wire body builder, imported across the layer on purpose: the round-16
+// finding is about what the STORED row becomes on the way out, and only the two
+// together show that.
+import { buildSessionResponse } from '../../../routes/agent.js';
 
 /**
  * The split-write / recovery contract (MR !61 review, Important): a turn that fails
@@ -1002,5 +1006,53 @@ describe('chatStore — awaitingReply is UNKNOWN when it cannot be proved (round
 
     const loaded = await loadHistory(null, demo, null);
     expect(loaded.awaitingReply).toBe(true);
+  });
+});
+
+describe('chatStore — a stored result row is served without its artifact URL (round 16)', () => {
+  // Placeholder bucket and job id: this repo is mirrored publicly.
+  const URL = 's3://example-dashboard-artifacts-0000/jobs/'
+    + '11111111-2222-4333-8444-555555555555/report_schema.json';
+  const dashboard = { title: 'Driver Mileage', report_schema: { title: 'Driver Mileage' } };
+  const savedReply: AgentTurn = {
+    role: 'assistant',
+    type: 'result',
+    content: [
+      'Built it! 🎉',
+      '',
+      `| **Download URL** | \`${URL}\` |`,
+      '',
+      'To download it locally, you can run:',
+      '```bash',
+      `aws s3 cp ${URL} ./report_schema.json`,
+      '```',
+    ].join('\n'),
+    result: dashboard,
+  };
+
+  it('keeps the row exactly as written, and strips it on the way to the browser', async () => {
+    const { pool, db } = makeScriptedPool();
+    const { sessionId } = await loadHistory(pool, ident('u1'), null);
+
+    // Written the way a pre-round-16 backend wrote it — the agent's prose verbatim.
+    await appendTurns(pool, ident('u1'), sessionId, [user('build it'), savedReply]);
+
+    // THE ROW IS UNTOUCHED. No migration, no backfill: the record still holds
+    // what the agent said, so the rule can be revisited without data loss.
+    expect(db.messages[1].content).toContain(URL);
+
+    // And rowToTurn still hands it back verbatim — the store is not where this is
+    // fixed, which is exactly why serializing it raw was a leak.
+    const loaded = await loadHistory(pool, ident('u1'), sessionId);
+    expect(loaded.persisted).toBe(true);
+    expect(loaded.history[1].content).toContain(URL);
+
+    // The wire body is where it goes.
+    const body = buildSessionResponse(loaded);
+    expect(JSON.stringify(body)).not.toContain('s3://');
+    expect(JSON.stringify(body)).not.toContain('example-dashboard-artifacts');
+    expect(body.messages[1].content).toBe('Built it! 🎉');
+    expect(body.messages[1].result).toEqual(dashboard); // Preview still works
+    expect(body.messages[0]).toEqual(user('build it'));
   });
 });

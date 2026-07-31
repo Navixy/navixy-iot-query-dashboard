@@ -23,6 +23,7 @@ import { agentService } from '../services/agent/index.js';
 import { loadHistory, appendTurns, getTurnStatus, tenantKeyFor } from '../services/agent/chatStore.js';
 import type { ChatIdentity, ChatStoreResult } from '../services/agent/chatStore.js';
 import { validateDashboard } from '../services/agent/validateDashboard.js';
+import { withoutArtifactUrls } from '../services/agent/stripArtifactUrl.js';
 import { envInt } from '../services/agent/artifactStore.js';
 import type { AgentTurn, AgentSessionResponse } from '../services/agent/types.js';
 
@@ -98,6 +99,14 @@ export interface ChatBody { session_id: string | null; message: string; client_t
  * (including 003-without-004) and a read that failed both answered `false` —
  * switching off the client's only remaining guard on exactly the tenants whose
  * SERVER-side guard is also off. Absence is what puts the fallback back.
+ *
+ * It is also where the artifact URL leaves the transcript (review !62 round 16,
+ * Important). Stripping it as the turn is BUILT covers only turns built from now
+ * on: rows already in chat_messages come back verbatim through rowToTurn, so
+ * every conversation saved before that shipped — and every reply an old replica
+ * writes during a rolling deploy — re-published the bucket on the next page load.
+ * Here catches both stores at once, since both arrive as one ChatStoreResult, and
+ * the rows themselves are left untouched.
  */
 export function buildSessionResponse(result: ChatStoreResult): AgentSessionResponse {
   return {
@@ -111,7 +120,7 @@ export function buildSessionResponse(result: ChatStoreResult): AgentSessionRespo
     // locks its composer on THIS rather than re-deriving it from the transcript,
     // where an abandoned turn has no age and so never stops looking active.
     ...(result.awaitingReply !== undefined && { awaiting_reply: result.awaitingReply }),
-    messages: result.history,
+    messages: withoutArtifactUrls(result.history),
   };
 }
 
