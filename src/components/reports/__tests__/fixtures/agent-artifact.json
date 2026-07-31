@@ -1,0 +1,147 @@
+{
+  "id": null,
+  "uid": "driver-mileage-last-30-days",
+  "title": "Driver Mileage — Last 30 Days",
+  "description": "Compares total distance driven per driver over the past 30 days using a bar chart and a ranked table.",
+  "tags": [],
+  "style": "dark",
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "refresh": "5m",
+  "schemaVersion": 38,
+  "version": 1,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Attention",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 5
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "This dashboard was created using an AI agent.\nThe AI agent is in Alpha stage, so the results may contain inaccuracies. Please verify the data before using it.\nJob ID: `738dcdfe-f700-46e4-9802-510f2d7cabf3` · Generated: 2026-07-30 10:54:53 UTC"
+      },
+      "x-navixy": {
+        "sql": {
+          "statement": "",
+          "params": {}
+        },
+        "dataset": {
+          "shape": "table",
+          "columns": {}
+        },
+        "verify": {
+          "max_rows": null,
+          "min_rows": null,
+          "required_columns": null
+        },
+        "filters": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Total Mileage by Driver (km)",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 14
+      },
+      "options": {},
+      "x-navixy": {
+        "sql": {
+          "statement": "SELECT\n  COALESCE(e.first_name || ' ' || e.last_name, 'Unknown') AS category,\n  ROUND(SUM(t.trip_distance_meters) / 1000.0, 1) AS value\nFROM processed_common_data.trips t\nLEFT JOIN raw_business_data.objects o\n  ON o.device_id = t.device_id\n  AND o.is_deleted IS NOT TRUE\nLEFT JOIN raw_business_data.employees e\n  ON e.employee_id = o.employee_id\nWHERE t.trip_start_time >= NOW() - INTERVAL '30 days'\n  AND t.trip_start_time < NOW()\nGROUP BY COALESCE(e.first_name || ' ' || e.last_name, 'Unknown')\nORDER BY value DESC",
+          "params": {}
+        },
+        "dataset": {
+          "shape": "category_value",
+          "columns": {
+            "category": {
+              "type": "string"
+            },
+            "value": {
+              "type": "number"
+            }
+          }
+        },
+        "verify": {
+          "max_rows": 500,
+          "min_rows": null,
+          "required_columns": null
+        },
+        "filters": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Driver Mileage Ranking (km)",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 14
+      },
+      "options": {},
+      "x-navixy": {
+        "sql": {
+          "statement": "SELECT\n  COALESCE(e.first_name || ' ' || e.last_name, 'Unknown Driver') AS driver_name,\n  o.object_label AS object_label,\n  ROUND(SUM(t.trip_distance_meters) / 1000.0, 2) AS total_mileage_km,\n  COUNT(t.trip_start_time) AS trip_count,\n  ROUND(AVG(t.avg_speed), 1) AS avg_speed_kmh,\n  ROUND(MAX(t.max_speed), 1) AS max_speed_kmh\nFROM processed_common_data.trips t\nJOIN raw_business_data.objects o ON o.device_id = t.device_id AND o.is_deleted IS NOT TRUE\nLEFT JOIN raw_business_data.employees e ON e.employee_id = t.driver_id\nWHERE t.trip_start_time >= NOW() - INTERVAL '30 days'\n  AND t.trip_start_time < NOW()\nGROUP BY e.first_name, e.last_name, o.object_label\nORDER BY total_mileage_km DESC",
+          "params": {}
+        },
+        "dataset": {
+          "shape": "table",
+          "columns": {
+            "driver_name": {
+              "type": "string"
+            },
+            "object_label": {
+              "type": "string"
+            },
+            "total_mileage_km": {
+              "type": "number"
+            },
+            "trip_count": {
+              "type": "integer"
+            },
+            "avg_speed_kmh": {
+              "type": "number"
+            },
+            "max_speed_kmh": {
+              "type": "number"
+            }
+          }
+        },
+        "verify": {
+          "max_rows": 1000,
+          "min_rows": null,
+          "required_columns": null
+        },
+        "filters": []
+      }
+    }
+  ],
+  "x-navixy": {
+    "schemaVersion": "1.0.0",
+    "execution": {
+      "dialect": "postgresql",
+      "endpoint": "/api/v1/sql/run",
+      "max_rows": 10000,
+      "read_only": true,
+      "timeout_ms": 30000
+    },
+    "parameters": {
+      "bindings": {}
+    }
+  }
+}

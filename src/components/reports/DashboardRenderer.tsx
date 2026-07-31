@@ -37,6 +37,7 @@ import { createRunGate } from '@/utils/runGate';
 import { filterUsedParameters, dashboardPanelsHaveTemplateParameters } from '@/utils/sqlParameterExtractor';
 import { applyPanelFilters, getActivePanelFilters, resolveBindingExpression } from '@/utils/filterVariables';
 import { PanelFilterIndicator } from './PanelFilterIndicator';
+import { computePanelLoadStatus, type PanelLoadStatus } from './panelLoadStatus';
 import { Canvas } from '@/layout/ui/Canvas';
 import { PanelGrid } from '@/layout/ui/PanelGrid';
 import { useEditorStore } from '@/layout/state/editorStore';
@@ -93,6 +94,23 @@ interface DashboardRendererProps {
    * button on this so it isn't clickable during the null-root window on first load.
    */
   onLoadingChange?: (loading: boolean) => void;
+  /**
+   * Aggregate per-panel query status, emitted whenever it changes.
+   *
+   * Counts SQL-bearing panels only: `text` panels and panels with no
+   * `x-navixy.sql.statement` never execute a query and are excluded from every count
+   * (same predicate the query loop uses).
+   *
+   * Added for the AI chat preview (DO-313). AI-generated SQL passes the SELECT-only
+   * guard and can still fail at execution — a hallucinated column was observed on the
+   * first real agent dashboard (`42703 column o.employee_id does not exist`). Static
+   * validation structurally cannot catch that; only execution can. The preview dialog
+   * uses these counts to make a failed panel impossible to miss.
+   *
+   * IMPORTANT: wrap your handler in `useCallback`. It is emitted from an effect keyed on
+   * the four counts, so an unstable identity re-fires it on every render.
+   */
+  onPanelStatusChange?: (status: PanelLoadStatus) => void;
 }
 
 export interface DashboardRendererRef {
@@ -376,6 +394,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                                                                                              onSave,
                                                                                              globalVariables = [],
                                                                                              onLoadingChange,
+                                                                                             onPanelStatusChange,
                                                                                            }, ref) => {
   // The viewer's effective SQL-session zone. Part of the execution cache key
   // below: when it changes — server preferences merging in after the first
@@ -502,6 +521,24 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
 
     return { ...canonicalized, panels: withIds(canonicalized.panels) };
   }, [dashboard, storeDashboard]);
+
+  // Mirrors the onLoadingChange emitter above. It cannot sit next to it: the counts
+  // read displayDashboard, which is declared here. Deps on the effect below are the
+  // four primitive counts rather than the object, so a stable-identity consumer is
+  // not re-notified on every panelData mutation (e.g. a refreshing flag flipping).
+  const panelStatus = React.useMemo<PanelLoadStatus>(
+    () => computePanelLoadStatus(displayDashboard.panels, panelData),
+    [displayDashboard, panelData],
+  );
+  useEffect(() => {
+    onPanelStatusChange?.(panelStatus);
+    // Keyed on the primitive counts: panelStatus is a fresh object on every panelData
+    // change and would re-fire this effect for a status that did not actually change.
+    // (The directive must be the LAST line before the dependency array — the rule
+    // reports on that node, so an explanation between them un-suppresses it.)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelStatus.total, panelStatus.loaded, panelStatus.failed, panelStatus.pending,
+      onPanelStatusChange]);
 
   const showParameterBar = React.useMemo(() => {
     const hasExplicitParams = !!(dashboard['x-navixy']?.params && dashboard['x-navixy'].params.length > 0);
