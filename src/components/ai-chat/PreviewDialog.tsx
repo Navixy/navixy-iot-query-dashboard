@@ -146,8 +146,6 @@ function PreviewBody({ result, nonce, applyAction }: {
             read as a dashboard" only contradicts it. */}
         {dashboard && (
           <div
-            role="status"
-            aria-live="polite"
             className={cn(
               'flex items-center gap-2 rounded-md px-3 py-2 text-sm',
               banner.severity === 'destructive'
@@ -159,7 +157,19 @@ function PreviewBody({ result, nonce, applyAction }: {
             {banner.severity === 'destructive' && (
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
             )}
-            <span>{banner.text}</span>
+            {/* The visible copy counts DOWN as panels settle. aria-hidden because the
+                live region beside it is the accessible copy of the same sentence. */}
+            <span aria-hidden="true">{banner.text}</span>
+            {/* One announcement per OUTCOME, not one per panel. Panels execute
+                sequentially, so the visible text changes once per panel — a polite
+                live region carrying it would read "Loading 11 panels…", "Loading 10
+                panels…" eleven times over. This region is present and polite from the
+                first render (flipping aria-live off→polite in the same commit as the
+                text change is not reliably announced) and simply holds still while
+                busy. (!64 review round 4, finding 9) */}
+            <span role="status" aria-live="polite" className="sr-only">
+              {banner.busy ? 'Loading panels…' : banner.text}
+            </span>
           </div>
         )}
       </DialogHeader>

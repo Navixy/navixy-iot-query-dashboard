@@ -74,7 +74,14 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-const banner = () => screen.getByRole('status');
+/**
+ * The banner is three nodes: a styled row, the visible sentence inside it (aria-hidden,
+ * because it counts down), and the sr-only live region that carries the accessible
+ * copy. `getByRole('status')` finds the live region; the other two hang off it.
+ */
+const announced = () => screen.getByRole('status').textContent;
+const banner = () => screen.getByRole('status').previousElementSibling as HTMLElement;
+const bannerRow = () => screen.getByRole('status').parentElement as HTMLElement;
 
 describe('PreviewDialog', () => {
   it('renders with the user`s global variables, the way the report view does', async () => {
@@ -173,7 +180,7 @@ describe('PreviewDialog — the panel banner', () => {
 
     expect(banner().textContent)
       .toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
-    expect(banner().className).toContain('text-destructive');
+    expect(bannerRow().className).toContain('text-destructive');
   });
 
   it('pluralises the failures, since "1 panel failed" about three is a lie', async () => {
@@ -187,7 +194,7 @@ describe('PreviewDialog — the panel banner', () => {
     await withStatus({ total: 11, loaded: 11, failed: 0, pending: 0 });
 
     expect(banner().textContent).toBe('All 11 panels loaded.');
-    expect(banner().className).not.toContain('text-destructive');
+    expect(bannerRow().className).not.toContain('text-destructive');
   });
 
   it('states one panel population, never two that disagree', async () => {
@@ -214,5 +221,24 @@ describe('PreviewDialog — the panel banner', () => {
     mount();
 
     await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
+  });
+
+  it('announces the outcome, not one line per panel', async () => {
+    // Panels execute sequentially, so the visible sentence changes once per panel.
+    // A live region carrying it reads "Loading 11 panels…", "Loading 10 panels…",
+    // eleven times over. (!64 review round 4, finding 9)
+    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3 };
+    mount();
+
+    await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
+    expect(announced()).toBe('Loading panels…');
+  });
+
+  it('announces the terminal state through a region that was there all along', async () => {
+    // A region only added — or only made polite — at the moment its text changes is
+    // not reliably read out.
+    await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0 });
+
+    expect(announced()).toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
   });
 });
