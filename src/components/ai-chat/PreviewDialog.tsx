@@ -11,6 +11,7 @@ import {
 import { cn } from '@/lib/utils';
 import { DashboardRenderer } from '@/components/reports/DashboardRenderer';
 import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
+import { apiService } from '@/services/api';
 import { useEditorStore } from '@/layout/state/editorStore';
 import type { AgentChatResult } from '@/types/agent';
 import { toPreviewDashboard } from './previewDashboard';
@@ -75,6 +76,31 @@ function PreviewBody({ result, nonce, applyAction }: {
   // has no data panels" and would be the first thing every preview says.
   const [status, setStatus] = useState<PanelLoadStatus | null>(null);
 
+  // The preview must execute in the SAME context the applied report will.
+  // `globalVariables` is one such input: ParameterBar merges them over declared
+  // parameter defaults, and those defaults are the values the panel queries bind.
+  // ReportView passes the user's real globals; a preview that defaulted to [] would
+  // run a dashboard binding `:fleet_id` with nothing bound, fail, and report "1 panel
+  // failed" about a dashboard that works the moment it is applied — or pass where the
+  // applied report fails, if a global masks a bad declared default. Either way the
+  // banner would be lying, which is the one thing this dialog exists not to do.
+  // Fail-silent to [] exactly as ReportView does. (!64 review round 3)
+  const [globalVariables, setGlobalVariables] =
+    useState<Array<{ label: string; value: string; description?: string }> | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const settle = (vars: Array<{ label: string; value: string; description?: string }>) => {
+      if (alive) setGlobalVariables(vars);
+    };
+    apiService.getGlobalVariables()
+      .then((response) => settle(Array.isArray(response.data)
+        ? response.data as Array<{ label: string; value: string; description?: string }>
+        : []))
+      .catch(() => settle([]));
+    return () => { alive = false; };
+  }, []);
+
   // Stable identity: DashboardRenderer emits from an effect keyed on the counts, so
   // an unstable handler would re-fire it on every render.
   const handleStatus = useCallback((next: PanelLoadStatus) => setStatus(next), []);
@@ -136,11 +162,18 @@ function PreviewBody({ result, nonce, applyAction }: {
 
       <div className="flex-1 min-h-0 overflow-y-auto p-4">
         {dashboard ? (
-          <DashboardRenderer
-            key={nonce}
-            dashboard={dashboard}
-            onPanelStatusChange={handleStatus}
-          />
+          // Mounted only once the globals have SETTLED (loaded or failed). Mounting
+          // first would execute every panel once with no bindings, paint failures,
+          // then re-execute when they arrive — the banner would announce a failure
+          // that was never real.
+          globalVariables !== null && (
+            <DashboardRenderer
+              key={nonce}
+              dashboard={dashboard}
+              globalVariables={globalVariables}
+              onPanelStatusChange={handleStatus}
+            />
+          )
         ) : (
           <p className="text-sm text-destructive">
             This result could not be read as a dashboard. Ask the assistant to rebuild it.
