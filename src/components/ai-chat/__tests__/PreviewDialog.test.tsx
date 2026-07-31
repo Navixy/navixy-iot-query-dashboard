@@ -1,26 +1,42 @@
 /**
  * @vitest-environment jsdom
  *
- * What the preview hands the renderer.
+ * What the preview hands the renderer, and what it tells the user back.
  *
- * The dialog's RENDERING is deliberately not tested — mounting the real
- * DashboardRenderer would mean stubbing Recharts, Leaflet, `apiService`,
- * ResizeObserver and the editor store, producing a test that asserts the mock. Its
- * PROP WIRING is a different question, and it is the one !64 review round 3 found
- * broken: the preview ran with `globalVariables` defaulting to `[]` while the applied
- * report runs with the user's real ones, so a dashboard binding a global could fail in
- * the preview and work after Apply. A banner that lies about that defeats the dialog.
+ * The renderer is a stub here on purpose — the real one is exercised in
+ * DashboardRenderer.panelStatus.test.tsx, which is where a claim about panel counting
+ * belongs. What this file owns is the seam between them, in both directions:
+ *
+ * - OUT, the props. Round 3 found the preview running with `globalVariables`
+ *   defaulting to `[]` while the applied report runs with the user's real ones, so a
+ *   dashboard binding a global could fail here and work after Apply.
+ * - BACK, the banner. Round 4 found nothing holding `onPanelStatusChange` in place:
+ *   dropping it left the header on "Loading panels…" forever with every test green.
+ *
+ * Both failures are the same failure — a preview that reports something other than
+ * what applying would produce.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createElement } from 'react';
+import { createElement, useEffect } from 'react';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
 import type { AgentChatResult } from '@/types/agent';
 
-const rendererProps = vi.hoisted(() => ({ calls: [] as Array<Record<string, unknown>> }));
+const rendererProps = vi.hoisted(() => ({
+  calls: [] as Array<Record<string, unknown>>,
+  /** What the stub renderer reports through `onPanelStatusChange`; null = silent. */
+  status: null as PanelLoadStatus | null,
+}));
 
 vi.mock('@/components/reports/DashboardRenderer', () => ({
   DashboardRenderer: (props: Record<string, unknown>) => {
     rendererProps.calls.push(props);
+    const report = props.onPanelStatusChange as ((status: PanelLoadStatus) => void) | undefined;
+    // From an effect, as the real renderer does — reporting during render would be a
+    // parent setState mid-child-render.
+    useEffect(() => {
+      if (rendererProps.status) report?.(rendererProps.status);
+    }, [report]);
     return createElement('div', { 'data-testid': 'renderer' });
   },
 }));
@@ -52,10 +68,13 @@ function mount(over: Partial<{ result: AgentChatResult }> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   rendererProps.calls.length = 0;
+  rendererProps.status = null;
   getGlobalVariables.mockResolvedValue({ data: globals });
 });
 
 afterEach(cleanup);
+
+const banner = () => screen.getByRole('status');
 
 describe('PreviewDialog', () => {
   it('renders with the user`s global variables, the way the report view does', async () => {
@@ -124,5 +143,57 @@ describe('PreviewDialog', () => {
     expect(rendererProps.calls).toHaveLength(0);
     // ...and no panel banner beside it to contradict the message.
     expect(screen.queryByRole('status')).toBeNull();
+  });
+});
+
+/**
+ * The banner is the reason this dialog exists: a preview the user does not read as
+ * "one of these panels is broken" is a preview that did not do its job. Deleting
+ * `onPanelStatusChange={handleStatus}` left every other test in the repo green while
+ * the header sat on "Loading panels..." forever. (!64 review round 4, finding 1)
+ */
+describe('PreviewDialog — the panel banner', () => {
+  const withStatus = async (status: PanelLoadStatus) => {
+    rendererProps.status = status;
+    mount();
+    await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
+    await waitFor(() => expect(banner().textContent).not.toMatch(/Loading panels/));
+  };
+
+  it('says only that it is loading until the renderer has reported anything', async () => {
+    mount();
+    await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
+
+    // NOT "this dashboard has no data panels" — nobody has counted yet.
+    expect(banner().textContent).toContain('Loading panels');
+  });
+
+  it('names the failure count, and marks it, when a panel does not load', async () => {
+    await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0 });
+
+    expect(banner().textContent)
+      .toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
+    expect(banner().className).toContain('text-destructive');
+  });
+
+  it('pluralises the failures, since "1 panel failed" about three is a lie', async () => {
+    await withStatus({ total: 5, loaded: 2, failed: 3, pending: 0 });
+
+    expect(banner().textContent)
+      .toBe('2 of 5 panels loaded. 3 panels failed — check them before applying.');
+  });
+
+  it('says everything loaded, without the destructive treatment', async () => {
+    await withStatus({ total: 11, loaded: 11, failed: 0, pending: 0 });
+
+    expect(banner().textContent).toBe('All 11 panels loaded.');
+    expect(banner().className).not.toContain('text-destructive');
+  });
+
+  it('counts down while panels are still executing', async () => {
+    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3 };
+    mount();
+
+    await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
   });
 });
