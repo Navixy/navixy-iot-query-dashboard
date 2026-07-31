@@ -101,7 +101,9 @@ function PreviewBody({ result, nonce, applyAction }: {
 
   return (
     <>
-      <DialogHeader className="shrink-0 p-4 pb-2">
+      {/* pr-12 keeps a long agent title clear of DialogContent's own absolute close X
+          (right-4 top-4), which p-0 on the content pulls right up against the text. */}
+      <DialogHeader className="shrink-0 p-4 pb-2 pr-12">
         <DialogTitle className="text-left">{result.title}</DialogTitle>
         <DialogDescription className="text-left">
           {panelCount === 1 ? '1 panel' : `${panelCount} panels`}, previewed against your data.

@@ -199,6 +199,13 @@ export async function applyDashboard({
 
     // The mutation invalidates the menu cache — that is what makes the dashboard
     // appear in the sidebar — and raises the success toast. Do NOT add a second one.
+    // sort_order 0 for the REPORT is a known, accepted limitation, not an oversight:
+    // the menu editor files new dashboards at max+1000, so every AI report sorts above
+    // any dashboard the user adds to this section by hand, and reports applied here tie
+    // with each other (demo storage sorts on sortOrder alone over random uuid keys, so
+    // that tie is genuinely unordered). Fixing it needs a getReports() round-trip on
+    // every Apply, or an epoch-derived value that risks an int4 overflow on a column
+    // this repo has no DDL for. Reordering is a drag in the menu editor. (!64 review)
     const report = await createReportMutation.mutateAsync({
       title: result.title,
       slug,
