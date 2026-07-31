@@ -71,7 +71,9 @@ export function PreviewDialog({ result, open, onOpenChange, nonce, applyAction }
 function PreviewBody({ result, nonce, applyAction }: {
   result: AgentChatResult; nonce: number; applyAction?: ReactNode;
 }) {
-  const [status, setStatus] = useState<PanelLoadStatus>({ total: 0, loaded: 0, failed: 0, pending: 0 });
+  // null until the renderer reports — NOT {0,0,0,0}, which reads as "this dashboard
+  // has no data panels" and would be the first thing every preview says.
+  const [status, setStatus] = useState<PanelLoadStatus | null>(null);
 
   // Stable identity: DashboardRenderer emits from an effect keyed on the counts, so
   // an unstable handler would re-fire it on every render.
@@ -106,23 +108,28 @@ function PreviewBody({ result, nonce, applyAction }: {
         </DialogDescription>
         {/* The banner lives in the HEADER, which is shrink-0 and therefore visible
             however far the grid below is scrolled. A failure the user does not notice
-            is the same as no preview at all. */}
-        <div
-          role="status"
-          aria-live="polite"
-          className={cn(
-            'flex items-center gap-2 rounded-md px-3 py-2 text-sm',
-            banner.severity === 'destructive'
-              ? 'border border-destructive/30 bg-destructive/10 text-destructive'
-              : 'text-muted-foreground',
-          )}
-        >
-          {banner.busy && <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />}
-          {banner.severity === 'destructive' && (
-            <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
-          )}
-          <span>{banner.text}</span>
-        </div>
+            is the same as no preview at all.
+            Suppressed entirely when the schema could not be read: no renderer mounts,
+            so no count is ever coming, and a panel banner beside "this could not be
+            read as a dashboard" only contradicts it. */}
+        {dashboard && (
+          <div
+            role="status"
+            aria-live="polite"
+            className={cn(
+              'flex items-center gap-2 rounded-md px-3 py-2 text-sm',
+              banner.severity === 'destructive'
+                ? 'border border-destructive/30 bg-destructive/10 text-destructive'
+                : 'text-muted-foreground',
+            )}
+          >
+            {banner.busy && <Loader2 className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />}
+            {banner.severity === 'destructive' && (
+              <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+            )}
+            <span>{banner.text}</span>
+          </div>
+        )}
       </DialogHeader>
 
       <div className="flex-1 min-h-0 overflow-y-auto p-4">

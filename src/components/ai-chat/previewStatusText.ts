@@ -18,7 +18,20 @@ export interface PanelStatusDescription {
 
 const panels = (n: number) => (n === 1 ? 'panel' : 'panels');
 
-export function describePanelStatus(status: PanelLoadStatus): PanelStatusDescription {
+/**
+ * @param status the renderer's latest counts, or `null` before it has reported any.
+ *
+ * The null case is not the same as `{total: 0}` and must not be folded into it: the
+ * renderer emits its first status from a passive effect, so an all-zero initial state
+ * would have the banner announce "This dashboard has no data panels" about a
+ * dashboard nobody has counted yet — briefly on every preview, and permanently on the
+ * one path where no renderer ever mounts.
+ */
+export function describePanelStatus(status: PanelLoadStatus | null): PanelStatusDescription {
+  if (!status) {
+    return { text: 'Loading panels…', severity: 'muted', busy: true };
+  }
+
   const { total, loaded, failed, pending } = status;
 
   if (total === 0) {

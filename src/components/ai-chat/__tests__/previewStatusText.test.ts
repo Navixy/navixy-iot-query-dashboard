@@ -2,6 +2,23 @@ import { describe, expect, it } from 'vitest';
 import { describePanelStatus } from '../previewStatusText';
 
 describe('describePanelStatus', () => {
+  it('does not claim the dashboard is empty before the renderer has counted it', () => {
+    // null is "nobody has counted yet", which is NOT the same as "counted, and there
+    // are none" — folding them together made every preview open on
+    // "This dashboard has no data panels."
+    expect(describePanelStatus(null)).toEqual({
+      text: 'Loading panels…',
+      severity: 'muted',
+      busy: true,
+    });
+    expect(describePanelStatus(null).text).not.toContain('no data panels');
+  });
+
+  it('still says so once the renderer has counted and there really are none', () => {
+    expect(describePanelStatus({ total: 0, loaded: 0, failed: 0, pending: 0 }).text)
+      .toBe('This dashboard has no data panels.');
+  });
+
   it('reports how many panels are still executing', () => {
     const banner = describePanelStatus({ total: 4, loaded: 1, failed: 0, pending: 3 });
     expect(banner).toEqual({ text: 'Loading 3 panels…', severity: 'muted', busy: true });
