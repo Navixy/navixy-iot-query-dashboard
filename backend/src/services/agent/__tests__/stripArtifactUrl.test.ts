@@ -163,6 +163,66 @@ describe('stripArtifactUrls', () => {
     }
   });
 
+  it('removes an INLINE copy command rather than publish it mutilated', () => {
+    // ROUND 16, Minor. Excising the URL from the middle of a sentence that WAS
+    // the command left `Run aws s3 cp ./report_schema.json` on screen: a command
+    // with its source argument deleted, which the reader cannot run and cannot
+    // repair. The line went to advertise the copy, so the line goes.
+    const out = stripArtifactUrls(
+      `Your dashboard is built. Run aws s3 cp ${URL} ./report_schema.json to download it.`,
+    );
+
+    expect(out).not.toContain('aws s3 cp');
+    expect(out).not.toContain('report_schema.json');
+    expect(out).not.toContain('s3://');
+    expect(out).toBe('');
+  });
+
+  it('removes a copy-command fence written against a PLACEHOLDER', () => {
+    // ROUND 16, Minor. The fence rule keyed on a literal s3:// INSIDE the fence,
+    // so this shape — real URL in the table above, placeholder in the command —
+    // survived whole, and the chat renderer parses no fences: the user saw the
+    // backticks too.
+    const out = stripArtifactUrls(
+      [
+        'Your dashboard is ready.',
+        '',
+        `- Download URL: \`${URL}\``,
+        '',
+        'To fetch it, substitute the URL above:',
+        '```bash',
+        'aws s3 cp ARTIFACT_URL ./report_schema.json',
+        '```',
+      ].join('\n'),
+    );
+
+    expect(out).toBe('Your dashboard is ready.');
+    expect(out).not.toContain('```');
+    expect(out).not.toContain('aws s3');
+    expect(out).not.toContain('ARTIFACT_URL');
+  });
+
+  it('recognises the command in the other shapes the agent writes it in', () => {
+    for (const command of [
+      `aws s3 cp ${URL} .`,
+      'aws s3 cp <ARTIFACT_URL> ./report_schema.json',
+      '$ aws  s3   cp ARTIFACT_URL ./out.json',
+      'aws s3api get-object --bucket example-dashboard-artifacts-0000 --key jobs/x.json out.json',
+    ]) {
+      const out = stripArtifactUrls([`Download URL: \`${URL}\``, command].join('\n'));
+      expect(out).toBe('');
+    }
+  });
+
+  it('leaves a URL-FREE reply alone even when it mentions the AWS CLI', () => {
+    // The deliberate boundary of the command rule. The entry guard is still "this
+    // prose carries an s3:// URL", which is what makes it safe to run this over
+    // every assistant turn: nothing leaks from a reply with no URL in it, and a
+    // question turn that discusses `aws s3 cp` is the user's answer, not our husk.
+    const clean = 'You would normally use `aws s3 cp` for that, but I have the file already.';
+    expect(stripArtifactUrls(clean)).toBe(clean);
+  });
+
   it('leaves nothing the classifier can still see — the twin regexes agree', () => {
     // interpretAgentResponse is the oracle: it classifies as 'result' exactly
     // when it finds an s3:// URL. If a stripped reply still reads as a result,

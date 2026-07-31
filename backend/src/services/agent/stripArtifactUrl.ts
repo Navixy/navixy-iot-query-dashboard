@@ -34,10 +34,21 @@
  * interpretResponse extracted, so a reply carrying two URLs — or one the
  * classifier rejected as implausible — still comes out clean.
  *
- * SCOPE. The entry guard is "this prose carries an s3:// URL", which is what lets
- * withoutArtifactUrls run over EVERY assistant turn: a reply with no URL is
- * returned byte-identical, so a clean turn is provably never rewritten. A question
- * turn is in any case *defined* as prose with no s3:// URL (interpretResponse.ts,
+ * THE COPY COMMAND GOES BY ITS OWN SHAPE, not by carrying the URL (review !62
+ * round 16, Minor). Keying the fence rule on a literal s3:// inside it left two
+ * ordinary wordings intact: an inline `Run aws s3 cp s3://… ./report_schema.json`
+ * excised the URL and published the mutilated command that was left, and a fence
+ * written against a placeholder — `aws s3 cp ARTIFACT_URL ./report_schema.json`,
+ * with the real URL a few lines up in the table — survived whole, backticks and
+ * all. So `aws s3 …` is recognised wherever it sits.
+ *
+ * SCOPE. The entry guard stays "this prose carries an s3:// URL", which is what
+ * lets withoutArtifactUrls run over EVERY assistant turn: a reply with no URL is
+ * returned byte-identical, command or no command, so a genuine question turn that
+ * happens to discuss the AWS CLI is not rewritten. The cost of that boundary is a
+ * URL-free reply whose only sin is an unusable copy command — nothing leaks there,
+ * and a stray sentence is worth less than the guarantee. A question turn is in any
+ * case *defined* as prose with no s3:// URL (interpretResponse.ts,
  * fromProseHeuristic). The one shape that could carry one anyway is the proposed
  * structured trailer (§3.4.4) marking type:'question' over prose that mentions a
  * URL — it does not exist yet, and covering every assistant turn takes it for free
@@ -76,6 +87,12 @@ const WRAPPED_S3_URL_G = new RegExp(
   ].join('|'),
   'g',
 );
+
+/** The artifact copy command, recognised by SHAPE — the URL it operates on may be
+ *  a placeholder, or sit in a table row several lines away. `aws s3` and
+ *  `aws s3api` both, since either can name the bucket. \b keeps it off ordinary
+ *  words; it only ever runs on prose already known to carry an artifact URL. */
+const ARTIFACT_COMMAND_RE = /\baws\s+s3(?:api)?\b/i;
 
 /** Opens or closes a fenced block, at any indent. */
 const FENCE_RE = /^\s*(?:```|~~~)/;
@@ -135,25 +152,37 @@ export function stripArtifactUrls(prose: string): string {
    *  below: a line that is not there is no label, no table row and no URL. */
   const at = (i: number): string => lines[i] ?? '';
 
-  // 1. A fenced block goes whole if any line inside carries a URL: half a
-  //    command is worse than no command, and fences render literally here.
+  // 1. A fenced block goes whole if any line inside carries a URL OR the copy
+  //    command: half a command is worse than no command, a command against a
+  //    placeholder is no more runnable, and fences render literally here.
   const inFence = new Set<number>();
   for (const [start, end] of fenceRanges(lines)) {
-    let carriesUrl = false;
+    let aboutTheArtifact = false;
     for (let i = start; i <= end; i++) {
       inFence.add(i);
-      if (S3_URL.test(at(i))) carriesUrl = true;
+      if (S3_URL.test(at(i)) || ARTIFACT_COMMAND_RE.test(at(i))) aboutTheArtifact = true;
     }
-    if (carriesUrl) for (let i = start; i <= end; i++) drop.add(i);
+    if (aboutTheArtifact) for (let i = start; i <= end; i++) drop.add(i);
   }
 
   // 2. Outside fences, line by line.
   for (const [i, line] of lines.entries()) {
-    if (inFence.has(i) || !S3_URL.test(line)) continue;
+    if (inFence.has(i)) continue;
+    const carriesCommand = ARTIFACT_COMMAND_RE.test(line);
+    if (!carriesCommand && !S3_URL.test(line)) continue;
 
     // A table row is a label/value record ABOUT the URL, so it goes with it;
     // excising in place would leave `| **Download URL** | |`.
     if (TABLE_ROW_RE.test(line)) {
+      drop.add(i);
+      continue;
+    }
+
+    // A copy command goes WHOLE, like the fence and for the same reason —
+    // deleting the URL out of the middle of it publishes `aws s3 cp
+    // ./report_schema.json`, which is worse than either the command or nothing.
+    // Any lead-in on the same line went to advertise it and goes with it.
+    if (carriesCommand) {
       drop.add(i);
       continue;
     }
