@@ -43,10 +43,18 @@ export interface PanelLoadStatus {
  * Counts describe what is on screen right now, not history: a panel that failed and
  * was then refreshed successfully moves from `failed` back to `loaded`.
  *
- * `panels` is the renderer's flat, already-normalized panel list — row children have
- * been hoisted into it by `normalizeDashboardForRender`, so nested children are
- * counted. Row headers are `type: 'row'` and carry no SQL, so the `hasSql` guard
- * excludes them without a special case.
+ * `panels` must be the renderer's `displayDashboard.panels` — the SAME list its query
+ * loop walks. That, and not any property of the list itself, is what makes the count
+ * trustworthy: whatever is in it gets executed, and nothing else does.
+ *
+ * It is worth being exact about that list, because an earlier version of this comment
+ * was not. `canonicalizeRows` does not hoist row children up into it. An EXPANDED
+ * row's children were always top-level in the Grafana shape (it empties `row.panels`
+ * to match), and a COLLAPSED row's children are moved the other way — down into
+ * `row.panels[]` and out of the top-level list. So a collapsed row's children are
+ * neither counted here nor queried there, which is the same answer on both sides.
+ * Row headers are `type: 'row'` and carry no SQL, so the `hasSql` guard excludes them
+ * without a special case. (!64 review round 4, finding 7)
  */
 export function computePanelLoadStatus(
   panels: Panel[],

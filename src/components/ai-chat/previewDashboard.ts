@@ -24,6 +24,17 @@ import { normalizeToDashboard } from '@/types/schema-conversions';
  * — and the re-run also flips the failure banner back through "Loading N panels…",
  * momentarily hiding the count that is the point of the dialog.
  *
+ * **What ReportView does here that this does not.** It migrates a `rows`-shaped legacy
+ * schema through `ReportMigration.migrateToGrafana` before normalizing, and it treats
+ * `panels.length === 0` as an error rather than a dashboard. Neither is reachable from
+ * the agent, which emits Grafana-shaped `panels` and is rejected upstream by
+ * `validateDashboard` otherwise — a rows-shaped schema fails the null check below and
+ * the dialog says so, which is honest rather than wrong. It is recorded because it is
+ * the same class as round 3's globals defect: the preview and the applied report
+ * running the same dashboard through different preparation. Before adding a prop OR a
+ * TRANSFORM to ReportView's renderer, ask whether the preview needs it too.
+ * (!64 review round 4, finding 8)
+ *
  * **This does not weaken "the saved bytes are the previewed bytes".** Apply saves
  * `result.report_schema` untouched, `refresh` included; what is dropped here is a
  * re-execution cadence, never a panel, a statement or a coordinate. Everything the
