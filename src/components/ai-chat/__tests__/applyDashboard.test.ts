@@ -117,6 +117,20 @@ describe('applyDashboard', () => {
     expect(h.onSettled).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps the server`s own reason, which is not always the soft-delete one', async () => {
+    // Reachable without any soft-deleted row: a settings-DB role with SELECT but no
+    // INSERT, or demo mode when the store's ownership moved to another tab. The hint
+    // stays, but it must not be the only thing the user or support is given.
+    getSections.mockResolvedValue({ data: [] });
+    createSection.mockResolvedValue({
+      error: { code: 'DEMO_ERROR', message: 'Demo data is now owned by another tab' },
+    });
+    await applyDashboard({ result, ...harness() });
+
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastError.mock.calls[0][0]).toContain('Demo data is now owned by another tab');
+  });
+
   it('raises NO toast of its own when createReport rejects — the hook already did', async () => {
     const h = harness(vi.fn().mockRejectedValue(new Error('Section not found or access denied')));
     await applyDashboard({ result, ...h });

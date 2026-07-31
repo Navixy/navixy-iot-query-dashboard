@@ -165,11 +165,15 @@ export async function applyDashboard({
     // successfully", which is noise in the middle of applying a dashboard.
     const created = await apiService.createSection(SECTION_NAME, sortOrder);  // POSITIONAL
     if (created.error) {
-      // A unique-constraint failure here means a SOFT-DELETED row already holds the
-      // name: POST /api/sections is a bare INSERT with no ON CONFLICT. Surface a
-      // specific, actionable message. Do NOT retry blindly.
-      toast.error(`Could not create the "${SECTION_NAME}" section. If you deleted it ` +
-                  'earlier, restore it from the menu editor and try again.');
+      // The likeliest cause is a SOFT-DELETED row already holding the name: sections
+      // are soft-deleted, getSections filters them out, and POST /api/sections is a
+      // bare INSERT with no ON CONFLICT — so name the recovery. But KEEP the server's
+      // own message: this branch is also reached by a settings-DB role without INSERT,
+      // and in demo mode by a store whose ownership moved to another tab, and
+      // "restore it from the menu editor" is actively wrong advice for both. Do NOT
+      // retry blindly.
+      toast.error(`Could not create the "${SECTION_NAME}" section: ${created.error.message}. ` +
+                  'If you deleted it earlier, restore it from the menu editor and try again.');
       onSettled();
       return;
     }
