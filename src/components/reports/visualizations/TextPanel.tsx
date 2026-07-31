@@ -1,5 +1,5 @@
-import { marked } from 'marked';
 import type { Panel } from '@/types/dashboard-types';
+import { toSafePanelHtml } from './panelHtml';
 
 interface TextPanelProps {
   panel: Panel;
@@ -21,12 +21,13 @@ export function TextPanel({ panel }: TextPanelProps) {
   const mode = panel.options?.mode || navixyText?.format || 'markdown';
   const content = (panel.options?.content as string | undefined) || navixyText?.content || '';
 
-  // Configure marked options for safe rendering
-  marked.setOptions({
-    breaks: true,
-    gfm: true,
-  });
-
+  // Both HTML-producing branches below go through toSafePanelHtml, which parses
+  // (markdown mode) and then SANITIZES. Panel content is no longer only
+  // author-written: the AI chat preview renders an agent-authored dashboard through
+  // this same component, and every agent dashboard ships a text panel. Injecting
+  // marked's output raw let an event handler or a javascript: URL straight into the
+  // DOM — and Apply persists the panel, so it would re-fire on every later open.
+  // Do not reintroduce a path from `content` to __html that skips it. (DO-313)
   const renderContent = () => {
     if (!content) {
       return (
@@ -39,7 +40,7 @@ export function TextPanel({ panel }: TextPanelProps) {
     switch (mode) {
       case 'markdown': {
         try {
-          const html = marked.parse(content);
+          const html = toSafePanelHtml(content, 'markdown');
           return (
             <div
               className="prose prose-sm dark:prose-invert max-w-none"
@@ -60,7 +61,7 @@ export function TextPanel({ panel }: TextPanelProps) {
         return (
           <div
             className="prose prose-sm dark:prose-invert max-w-none"
-            dangerouslySetInnerHTML={{ __html: content }}
+            dangerouslySetInnerHTML={{ __html: toSafePanelHtml(content, 'html') }}
           />
         );
       }
