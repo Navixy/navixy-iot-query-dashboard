@@ -11,9 +11,9 @@ import {
 import { cn } from '@/lib/utils';
 import { DashboardRenderer } from '@/components/reports/DashboardRenderer';
 import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
-import { normalizeToDashboard } from '@/types/schema-conversions';
 import { useEditorStore } from '@/layout/state/editorStore';
 import type { AgentChatResult } from '@/types/agent';
+import { toPreviewDashboard } from './previewDashboard';
 import { describePanelStatus } from './previewStatusText';
 
 interface PreviewDialogProps {
@@ -77,8 +77,11 @@ function PreviewBody({ result, nonce, applyAction }: {
   // an unstable handler would re-fire it on every render.
   const handleStatus = useCallback((next: PanelLoadStatus) => setStatus(next), []);
 
+  // Drops the agent's `refresh: "5m"` — a preview is a one-shot validation, not a
+  // live dashboard. See previewDashboard.ts for why, and for why this does not
+  // weaken the "saved bytes are the previewed bytes" guarantee.
   const dashboard = useMemo(
-    () => normalizeToDashboard(result.report_schema),
+    () => toPreviewDashboard(result.report_schema),
     [result.report_schema],
   );
 
@@ -124,10 +127,6 @@ function PreviewBody({ result, nonce, applyAction }: {
 
       <div className="flex-1 min-h-0 overflow-y-auto p-4">
         {dashboard ? (
-          // normalizeToDashboard decides membership purely on shape and returns null
-          // only when neither the object nor `.dashboard` carries a panels array.
-          // Server-side validateDashboard already rejected that, so null here means a
-          // contract break upstream, not bad user input.
           <DashboardRenderer
             key={nonce}
             dashboard={dashboard}
