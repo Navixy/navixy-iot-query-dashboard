@@ -65,8 +65,30 @@ describe('applyDashboard', () => {
     const h = harness();
     await applyDashboard({ result, ...h });
 
-    expect(createSection).toHaveBeenCalledWith('AI Dashboards', 0);
+    expect(createSection).toHaveBeenCalledWith('AI Dashboards', 1000);
     expect(h.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ section_id: 'sec-new' }));
+  });
+
+  it('files the new section AFTER the sections the user already has', async () => {
+    // The menu is ordered by sort_order ascending, and the app files new sections
+    // 1000 past the current maximum. A hard-coded 0 would put the AI section above
+    // "Fleet Management" for good.
+    getSections.mockResolvedValue({
+      data: [
+        { id: 'a', name: 'Fleet Management', sort_order: 0 },
+        { id: 'b', name: 'Safety', sort_order: 3000 },
+      ],
+    });
+    await applyDashboard({ result, ...harness() });
+
+    expect(createSection).toHaveBeenCalledWith('AI Dashboards', 4000);
+  });
+
+  it('still files the section last when a section carries no sort_order', async () => {
+    getSections.mockResolvedValue({ data: [{ id: 'a', name: 'Fleet Management' }] });
+    await applyDashboard({ result, ...harness() });
+
+    expect(createSection).toHaveBeenCalledWith('AI Dashboards', 1000);
   });
 
   it('stops with one toast when the menu cannot be read', async () => {

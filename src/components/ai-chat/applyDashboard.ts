@@ -147,13 +147,23 @@ export async function applyDashboard({
     return;
   }
 
-  let sectionId = (sections.data as Array<{ id: string; name: string }> | undefined)
-    ?.find((section) => section.name === SECTION_NAME)?.id ?? null;
+  const existing = (sections.data as Array<{ id: string; name: string; sort_order?: number }> | undefined) ?? [];
+  let sectionId = existing.find((section) => section.name === SECTION_NAME)?.id ?? null;
 
   if (!sectionId) {
+    // APPEND, never prepend. The menu is ordered by `sort_order` ascending and the
+    // app's own convention is 1000-spacing from the current maximum (see the menu
+    // editor's section and dashboard dialogs). A hard-coded 0 would file this
+    // section above every section the user made themselves — a permanent change to
+    // their sidebar, written silently on the first Apply.
+    const sortOrder = existing.reduce(
+      (max, section) => Math.max(max, typeof section.sort_order === 'number' ? section.sort_order : 0),
+      0,
+    ) + 1000;
+
     // Raw apiService, not useCreateSectionMutation — that hook toasts "Section created
     // successfully", which is noise in the middle of applying a dashboard.
-    const created = await apiService.createSection(SECTION_NAME, 0);  // POSITIONAL
+    const created = await apiService.createSection(SECTION_NAME, sortOrder);  // POSITIONAL
     if (created.error) {
       // A unique-constraint failure here means a SOFT-DELETED row already holds the
       // name: POST /api/sections is a bare INSERT with no ON CONFLICT. Surface a
