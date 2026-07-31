@@ -4,8 +4,7 @@
  * The sanitizer at the text-panel seam. jsdom because DOMPurify needs a DOM — and
  * because the fail-closed branch below is what happens when it does not have one.
  */
-import { afterEach, describe, expect, it } from 'vitest';
-import DOMPurify from 'dompurify';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { marked } from 'marked';
 import { toSafePanelHtml } from '../panelHtml';
 // The real agent artifact: its panel 1 is the markdown text panel that every agent
@@ -159,33 +158,57 @@ describe('the injection surface script-blocking alone leaves open', () => {
 describe('without a DOM, it fails CLOSED', () => {
   // The docblock cites this branch as the reason the file chose jsdom, and nothing
   // entered it: returning `rendered` instead of escaping kept every other test green.
-  const original = Object.getOwnPropertyDescriptor(DOMPurify, 'isSupported');
+  //
+  // The REAL library is asked for an instance bound to a runtime with no document —
+  // which is exactly what it builds under Node or SSR. `sanitize` is not stubbed and
+  // no flag is overwritten; the module under test simply holds an instance that
+  // reports `isSupported: false`. (Flipping the shared singleton's flag no longer
+  // reaches it: the module keeps a private instance now. Round 4, finding 6.)
+  const withoutDom = async () => {
+    vi.doMock('dompurify', async () => {
+      const actual = await vi.importActual<typeof import('dompurify')>('dompurify');
+      return { default: () => actual.default({} as never) };
+    });
+    vi.resetModules();
+    return (await import('../panelHtml')).toSafePanelHtml;
+  };
 
   afterEach(() => {
-    if (original) Object.defineProperty(DOMPurify, 'isSupported', original);
+    vi.doUnmock('dompurify');
+    vi.resetModules();
   });
 
-  const withoutDom = () =>
-    Object.defineProperty(DOMPurify, 'isSupported', { value: false, configurable: true });
-
-  it('escapes the content to text rather than passing HTML through', () => {
-    withoutDom();
-    const html = toSafePanelHtml('<img src=x onerror="alert(1)">', 'markdown');
+  it('escapes the content to text rather than passing HTML through', async () => {
+    const safeHtml = await withoutDom();
+    const html = safeHtml('<img src=x onerror="alert(1)">', 'markdown');
 
     expect(html).not.toContain('<img');
     expect(html).toContain('&lt;img');
     expect(html).toContain('onerror=&quot;alert(1)&quot;');
   });
 
-  it('escapes html-mode content the same way', () => {
-    withoutDom();
-    expect(toSafePanelHtml('<b>hi</b>', 'html')).toBe('&lt;b&gt;hi&lt;/b&gt;');
+  it('escapes html-mode content the same way', async () => {
+    const safeHtml = await withoutDom();
+    expect(safeHtml('<b>hi</b>', 'html')).toBe('&lt;b&gt;hi&lt;/b&gt;');
   });
 
-  it('escapes the RAW content, never the parsed markdown', () => {
-    withoutDom();
+  it('escapes the RAW content, never the parsed markdown', async () => {
+    const safeHtml = await withoutDom();
     // Escaping marked's output would leak the parser's own tags as visible text.
-    expect(toSafePanelHtml('# Title', 'markdown')).toBe('# Title');
+    expect(safeHtml('# Title', 'markdown')).toBe('# Title');
+  });
+});
+
+describe('the sanitizer instance is private to this module', () => {
+  it('does not install its rel hook on the shared DOMPurify singleton', async () => {
+    // Whether some future DOMPurify.sanitize() elsewhere in src inherits our
+    // rel-forcing hook must not depend on whether a text panel rendered first.
+    const shared = (await vi.importActual<typeof import('dompurify')>('dompurify')).default;
+
+    expect(toSafePanelHtml('<a href="https://x.example" target="_blank">go</a>', 'html'))
+      .toContain('rel="noopener noreferrer"');
+    expect(shared.sanitize('<a href="https://x.example" target="_blank">go</a>', { ADD_ATTR: ['target'] }))
+      .not.toContain('rel=');
   });
 });
 

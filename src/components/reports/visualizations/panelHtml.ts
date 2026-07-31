@@ -26,7 +26,7 @@
  * constructs an HTML string at all. That remains the stronger pattern; it is not
  * available here because panels legitimately carry author-written HTML.
  */
-import DOMPurify, { type Config } from 'dompurify';
+import DOMPurify, { type Config, type DOMPurify as PurifyInstance } from 'dompurify';
 import { marked } from 'marked';
 
 /** Matches the options TextPanel has always parsed with. */
@@ -73,22 +73,41 @@ const SANITIZE_CONFIG: Config = {
   FORBID_ATTR: ['style'],
 };
 
-let hookInstalled = false;
+let purifier: PurifyInstance | null = null;
 
 /**
- * `target="_blank"` without `rel` hands the opened page a `window.opener` handle.
- * DOMPurify's own documented remedy is this hook; it only sets an attribute on an
- * already-sanitized node and never touches the allow-lists, which is the mutation
- * that its published hook advisories are about.
+ * A PRIVATE DOMPurify instance, built once and kept here.
+ *
+ * Hooks live on the instance, so installing the `rel` hook on the shared default
+ * export would have silently changed the behaviour of every other
+ * `DOMPurify.sanitize()` call in the app — and, because it is installed lazily on the
+ * first text-panel render, changed it only for the sessions where a text panel
+ * happened to render first. There is no other consumer in `src` today; the point is
+ * that whether a future one inherits our policy should not depend on render order.
+ * (!64 review round 4, finding 6)
+ *
+ * The hook itself: `target="_blank"` without `rel` hands the opened page a
+ * `window.opener` handle. This is DOMPurify's own documented remedy — it sets an
+ * attribute on an already-sanitized node and never touches the allow-lists, which is
+ * the mutation its published hook advisories are about.
  */
-function installRelHook() {
-  if (hookInstalled) return;
-  hookInstalled = true;
-  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (node instanceof Element && node.hasAttribute('target')) {
-      node.setAttribute('rel', 'noopener noreferrer');
-    }
-  });
+function getPurifier(): PurifyInstance {
+  if (purifier) return purifier;
+
+  const instance = DOMPurify();
+  // Guarded because `addHook` exists only on a SUPPORTED instance: with no document,
+  // createDOMPurify returns a bare factory carrying `isSupported: false` and little
+  // else, so installing unguarded would throw on the very path that must fail closed.
+  if (instance.isSupported) {
+    instance.addHook('afterSanitizeAttributes', (node) => {
+      if (node instanceof Element && node.hasAttribute('target')) {
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    });
+  }
+
+  purifier = instance;
+  return instance;
 }
 
 const escapeHtml = (text: string) =>
@@ -119,11 +138,11 @@ export function toSafePanelHtml(content: string, mode: 'markdown' | 'html'): str
     ? content
     : (marked.parse(content, MARKED_OPTIONS) as string);
 
-  if (!DOMPurify.isSupported) {
+  const purify = getPurifier();
+  if (!purify.isSupported) {
     return escapeHtml(content);
   }
-  installRelHook();
   // Typed as string | TrustedHTML because the overload allows RETURN_TRUSTED_TYPE;
   // SANITIZE_CONFIG never sets it, so this is always a string at runtime.
-  return DOMPurify.sanitize(rendered, SANITIZE_CONFIG) as string;
+  return purify.sanitize(rendered, SANITIZE_CONFIG) as string;
 }
