@@ -1,0 +1,203 @@
+/**
+ * Save an agent-generated dashboard as a report.
+ *
+ * Pure orchestration over the existing menu API, kept out of ResultCard so it can be
+ * unit-tested: resolve (or create) the section, create the report with an explicitly
+ * disambiguated slug, let the mutation invalidate the menu cache, navigate to it.
+ *
+ * The user must never be left believing a dashboard was saved when it was not — that
+ * is the single rule every failure path here serves. (DO-313)
+ */
+import { toast } from 'sonner';
+import { apiService } from '@/services/api';
+import type { AgentChatResult } from '@/types/agent';
+
+/**
+ * Human-readable, matching how sections are actually named in production
+ * ("Fleet Management"): it appears verbatim in the sidebar next to them. The
+ * slug-styled `ai-dashboard` survives below as a URL fallback, where slug styling
+ * is correct. Sections are resolved by NAME — `sections` has no slug column.
+ */
+const SECTION_NAME = 'AI Dashboards';
+
+/**
+ * URL-safe base, following the backend's own derivation in POST /api/reports but
+ * tighter: collapsing dash runs and trimming the ends is what makes the fallback
+ * reachable at all. Stripping alone leaves a title like "№ — ///" as "---", which is
+ * truthy, so `|| 'ai-dashboard'` never fired and the report got a slug of pure dashes.
+ */
+const baseSlug = (title: string) =>
+  title
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'ai-dashboard';
+
+/**
+ * The disclaimer strip is a deliberate divergence from what the agent emits and is NOT
+ * yet agreed with its author (R32/Q10) — so it ships OFF.
+ *
+ * The agent emits a full-width "Attention" text panel at y=0 warning that the dashboard
+ * is AI-generated. We render that warning as preview chrome instead, where the decision
+ * is actually made, so the intent is already served. After Apply the panel is saved into
+ * the user's dashboard permanently, above their content, removable only via the layout
+ * editor. Flip to true once agreed.
+ *
+ * Unwindable later only by editing every already-applied dashboard, which is why the
+ * decision belongs to v1 rather than a fast-follow.
+ */
+const STRIP_DISCLAIMER_ON_APPLY = false;
+
+type PanelLike = {
+  type?: unknown;
+  title?: unknown;
+  gridPos?: { x?: unknown; y?: unknown; w?: unknown; h?: unknown };
+};
+
+/** The misspelling the agent shipped first AND the correct spelling, so fixing the
+ *  typo upstream does not silently disable the strip. */
+const DISCLAIMER_TITLE_RE = /^att?ention$/i;
+
+const isDisclaimer = (panel: PanelLike) =>
+  panel?.type === 'text' &&
+  typeof panel.title === 'string' &&
+  DISCLAIMER_TITLE_RE.test(panel.title.trim()) &&
+  panel.gridPos?.y === 0 &&
+  panel.gridPos?.w === 24;
+
+/**
+ * Remove the agent's AI-generated disclaimer panel and close the hole it leaves.
+ *
+ * Defensive in every direction: it bails out unchanged rather than guessing. Exported
+ * for its unit test — production reaches it only through `prepareSchemaForSave`, and
+ * only when the flag above is on.
+ */
+export function stripDisclaimerPanel(schema: Record<string, unknown>): Record<string, unknown> {
+  const panels = schema?.['panels'];
+  if (!Array.isArray(panels)) return schema;
+
+  // Row children live in `panel.panels` with their own coordinates, and re-packing
+  // them is out of scope. The agent emits no rows today; if it starts, the disclaimer
+  // survives rather than the layout breaking.
+  if (panels.some((panel: PanelLike) => panel?.type === 'row')) return schema;
+
+  const matches = panels.filter((panel: PanelLike) => isDisclaimer(panel));
+  if (matches.length !== 1) return schema;
+
+  const removed = matches[0] as PanelLike;
+  const shift = typeof removed.gridPos?.h === 'number' ? removed.gridPos.h : 0;
+
+  const kept = panels.filter((panel) => panel !== removed) as PanelLike[];
+  const shifted = kept.map((panel) => {
+    const y = panel?.gridPos?.y;
+    if (typeof y !== 'number' || y < 0) return panel;
+    return { ...panel, gridPos: { ...panel.gridPos, y: y - shift } };
+  });
+
+  // A negative y is off-canvas and unrecoverable in the layout editor (and the
+  // backend validator rejects it), so a schema that would produce one is left alone.
+  if (shifted.some((panel) => typeof panel?.gridPos?.y === 'number' && panel.gridPos.y < 0)) {
+    return schema;
+  }
+
+  return { ...schema, panels: shifted };
+}
+
+/**
+ * With the flag off this is the IDENTITY function, and that is load-bearing: the saved
+ * bytes must be the bytes the preview rendered, or preview-before-Apply is an
+ * approximation rather than a guarantee.
+ */
+export function prepareSchemaForSave(schema: Record<string, unknown>): Record<string, unknown> {
+  return STRIP_DISCLAIMER_ON_APPLY ? stripDisclaimerPanel(schema) : schema;
+}
+
+export interface ApplyArgs {
+  result: AgentChatResult;
+  /** `useCreateReportMutation()` — it owns the success toast and the menu invalidation. */
+  createReportMutation: {
+    mutateAsync: (vars: {
+      title: string;
+      slug: string;
+      section_id: string | null;
+      sort_order: number;
+      report_schema: unknown;
+    }) => Promise<unknown>;
+  };
+  navigate: (to: string) => void;
+  /** Re-enables Apply. Not called on success — navigation unmounts the card. */
+  onSettled: () => void;
+}
+
+export async function applyDashboard({
+  result, createReportMutation, navigate, onSettled,
+}: ApplyArgs): Promise<void> {
+  // getSections() — the legacy shape — rather than the v1 menu tree: it is
+  // demo-branched, and Apply must work in demo mode.
+  //
+  // Sections are SOFT-deleted and getSections filters is_deleted = FALSE, so a
+  // previously deleted section is INVISIBLE here and we would proceed to create a
+  // colliding one. See the createSection failure below.
+  const sections = await apiService.getSections();
+  if (sections.error) {
+    toast.error(`Could not read the menu: ${sections.error.message}`);
+    onSettled();
+    return;
+  }
+
+  let sectionId = (sections.data as Array<{ id: string; name: string }> | undefined)
+    ?.find((section) => section.name === SECTION_NAME)?.id ?? null;
+
+  if (!sectionId) {
+    // Raw apiService, not useCreateSectionMutation — that hook toasts "Section created
+    // successfully", which is noise in the middle of applying a dashboard.
+    const created = await apiService.createSection(SECTION_NAME, 0);  // POSITIONAL
+    if (created.error) {
+      // A unique-constraint failure here means a SOFT-DELETED row already holds the
+      // name: POST /api/sections is a bare INSERT with no ON CONFLICT. Surface a
+      // specific, actionable message. Do NOT retry blindly.
+      toast.error(`Could not create the "${SECTION_NAME}" section. If you deleted it ` +
+                  'earlier, restore it from the menu editor and try again.');
+      onSettled();
+      return;
+    }
+    sectionId = (created.data as { id: string }).id;
+  }
+
+  try {
+    // Pass an EXPLICIT slug. Without it the backend derives one from the title, and
+    // because the agent returns the same title for the same prompt, applying twice
+    // inserts the SAME slug twice. Whether that is a 23505 depends on a constraint
+    // this repo has no DDL for. Disambiguating costs one line and removes the question.
+    //
+    // Timestamp AND randomness: `Date.now()` has millisecond resolution, so two
+    // applies inside the same millisecond — a double click, a scripted retry — mint
+    // the identical slug, which is exactly the collision this line exists to avoid.
+    // The random half is for collision resistance, not secrecy.
+    const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const slug = `${baseSlug(result.title)}-${suffix}`;
+
+    // The mutation invalidates the menu cache — that is what makes the dashboard
+    // appear in the sidebar — and raises the success toast. Do NOT add a second one.
+    const report = await createReportMutation.mutateAsync({
+      title: result.title,
+      slug,
+      section_id: sectionId,
+      sort_order: 0,
+      report_schema: prepareSchemaForSave(result.report_schema),
+    });
+
+    navigate(`/app/report/${(report as { id: string }).id}`);
+  } catch {
+    // mutateAsync REJECTS on failure and the hook's own onError already toasted.
+    // Swallow here: do not double-toast, do not navigate, and re-enable Apply so the
+    // user can retry. The dashboard they were shown is untouched and still on screen.
+    //
+    // If createSection succeeded and createReport then failed, an EMPTY section is
+    // left in the sidebar. Deliberate and self-healing: the next Apply finds it by
+    // name and reuses it.
+    onSettled();
+  }
+}

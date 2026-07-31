@@ -1,10 +1,13 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
+import { useCreateReportMutation } from '@/hooks/use-menu-mutations';
 import { useEditorStore } from '@/layout/state/editorStore';
 import type { AgentChatResult } from '@/types/agent';
+import { applyDashboard } from './applyDashboard';
 import { PreviewDialog } from './PreviewDialog';
 import { resultCardState } from './resultCardState';
 
@@ -32,6 +35,8 @@ const APPLY_DISABLED_TOOLTIP: Record<'role' | 'pending' | 'applying', string> = 
  */
 export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
   const { user } = useAuth();
+  const navigate = useNavigate();
+  const createReportMutation = useCreateReportMutation();
   const [open, setOpen] = useState(false);
   const [previewNonce, setPreviewNonce] = useState(0);
   const [isApplying, setIsApplying] = useState(false);
@@ -59,8 +64,16 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
   };
 
   const handleApply = () => {
-    // The apply orchestration lands in commit 12c (applyDashboard.ts), which ships in
-    // this same MR; this commit builds the card, its enablement rules and the preview.
+    if (!applyEnabled) return;
+    setIsApplying(true);
+    // Every failure path re-enables the button; the success path navigates away and
+    // this card unmounts with the page.
+    void applyDashboard({
+      result,
+      createReportMutation,
+      navigate,
+      onSettled: () => setIsApplying(false),
+    });
   };
 
   // One element, rendered in two places: here and in the preview dialog's footer, so
