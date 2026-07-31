@@ -32,7 +32,7 @@ import {
   type DashboardSchema,
   type S3Location,
 } from './artifactStore.js';
-import { stripArtifactUrls } from './stripArtifactUrl.js';
+import { stripArtifactUrls, RESULT_FALLBACK_MESSAGE } from './stripArtifactUrl.js';
 import type { AgentContext, AgentService, AgentTurnInput, AgentTurnResult } from './types.js';
 
 const DEFAULT_REGION = 'eu-central-1';
@@ -248,14 +248,13 @@ export function toDashboardResult(prose: string, schema: DashboardSchema): Agent
     // Stripping consumes everything only when the agent said nothing BUT the
     // URL. That is a successful build, so it must not render as a blank bubble
     // beside a preview — the same reasoning that rejects an empty completion
-    // outright (drainCompletion). One synthesized sentence, and only here.
+    // outright (drainCompletion). The sentence lives with the sanitizer because
+    // the read-side pass needs the SAME one (round 16): a turn stripped on write
+    // and the same turn stripped on re-read must not word themselves differently.
     message: stripped === '' ? RESULT_FALLBACK_MESSAGE : stripped,
     result: { title: schema.title, report_schema: schema },
   };
 }
-
-/** Only for a reply that was nothing but the artifact URL — see toDashboardResult. */
-const RESULT_FALLBACK_MESSAGE = 'Your dashboard is ready.';
 
 const CONFIG_MESSAGE = 'The assistant is unavailable due to a configuration problem.';
 const BUSY_MESSAGE = 'The assistant is busy right now. Please try again in a moment.';

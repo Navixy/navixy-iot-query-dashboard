@@ -1,6 +1,9 @@
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, afterEach } from '@jest/globals';
 import { validateChatBody, buildSessionResponse, MAX_MESSAGE_LENGTH } from '../agent.js';
 import type { AgentTurn } from '../../services/agent/types.js';
+import {
+  appendTurns, loadHistory, __resetChatStoreForTests,
+} from '../../services/agent/chatStore.js';
 import { CustomError } from '../../middleware/errorHandler.js';
 
 // validateChatBody is exported pure precisely so the 400 taxonomy is testable
@@ -191,5 +194,118 @@ describe('buildSessionResponse — awaiting_reply is OMITTED when unknown', () =
     expect(body).toEqual({
       session_id: 'sess-9', persisted: false, supports_turn_ids: false, messages: history,
     });
+  });
+});
+
+/**
+ * review !62 round 16, Important — the artifact URL must not come back on reload.
+ *
+ * The sanitizer ran only where a turn was BUILT, so it protected nothing already
+ * written: rowToTurn hands a stored row back as `content: row.content`, and every
+ * transcript saved before it shipped — plus every reply an old replica writes
+ * during a rolling deploy — put the internal bucket back on screen at the next
+ * page load. GET /session's body builder is where that is closed, because it is
+ * the one place both stores become the wire.
+ *
+ * Bucket and job id are PLACEHOLDERS: this repo is mirrored publicly.
+ */
+describe('buildSessionResponse — a transcript saved before the sanitizer existed', () => {
+  const BUCKET = 'example-dashboard-artifacts-0000';
+  const JOB_ID = '11111111-2222-4333-8444-555555555555';
+  const URL = `s3://${BUCKET}/jobs/${JOB_ID}/report_schema.json`;
+  const dashboard = { title: 'Driver Mileage', report_schema: { title: 'Driver Mileage' } };
+
+  /** Exactly what the pre-round-16 code persisted: the agent's reply verbatim. */
+  const STORED_REPLY = [
+    'Your **Driver Mileage** dashboard has been built and uploaded successfully! 🎉',
+    '',
+    '**📦 Build Details:**',
+    '',
+    '| Field | Value |',
+    '|---|---|',
+    `| **Job ID** | \`${JOB_ID}\` |`,
+    `| **Download URL** | \`${URL}\` |`,
+    '',
+    'To download the report schema locally, you can run:',
+    '```bash',
+    `aws s3 cp ${URL} ./report_schema.json`,
+    '```',
+  ].join('\n');
+
+  const stored: AgentTurn[] = [
+    { role: 'user', content: 'build me a driver mileage dashboard' },
+    { role: 'assistant', type: 'result', content: STORED_REPLY, result: dashboard },
+  ];
+
+  it('serves it with no URL, no bucket and no husks — and the preview still works', () => {
+    const body = buildSessionResponse({
+      sessionId: 'sess-1', history: stored, persisted: true, supportsTurnIds: true,
+    });
+    const wire = JSON.stringify(body);
+    const reply = body.messages[1];
+
+    expect(wire).not.toContain('s3://');
+    expect(wire).not.toContain(BUCKET);
+    expect(reply.content).not.toContain('Download URL');
+    expect(reply.content).not.toContain('aws s3 cp');
+    expect(reply.content).not.toContain('```');
+    // The husks the URL left behind are gone too, not just the URL.
+    expect(reply.content).not.toContain('| **Download URL** |');
+    expect(reply.content).not.toContain('To download the report schema locally');
+
+    // Everything the turn was FOR survives.
+    expect(reply.content).toContain('built and uploaded successfully');
+    expect(reply.content).toContain(JOB_ID); // the support handle stays
+    expect(reply.result).toEqual(dashboard); // Preview and Apply still have it
+    expect(body.messages[0]).toEqual(stored[0]); // the user's own words, untouched
+  });
+
+  it('does not touch the stored turns — nothing is migrated or rewritten in place', () => {
+    buildSessionResponse({
+      sessionId: 'sess-1', history: stored, persisted: true, supportsTurnIds: true,
+    });
+
+    // The row keeps the agent's own words. Whatever this rule becomes later, the
+    // record it was applied to is still there to apply it to.
+    expect(stored[1].content).toBe(STORED_REPLY);
+    expect(stored[1].content).toContain(URL);
+  });
+});
+
+/**
+ * The same leak through the DEGRADED store (round 16, Important). A tenant that
+ * has not applied 002 keeps its transcript in the process buffer, which the same
+ * builder serializes — so the fix has to hold on a path that never sees Postgres.
+ */
+describe('GET /session body from the in-memory store', () => {
+  afterEach(() => {
+    __resetChatStoreForTests();
+  });
+
+  it('is clean even though the buffer still holds the agent\'s raw words', async () => {
+    const URL = 's3://example-dashboard-artifacts-0000/jobs/'
+      + '11111111-2222-4333-8444-555555555555/report_schema.json';
+    const ident = { tenantKey: 'tenant-1', userId: 'u1', demo: false };
+    const { sessionId } = await loadHistory(null, ident, null);
+
+    // Written the way a pre-round-16 backend wrote it: prose straight through.
+    await appendTurns(null, ident, sessionId, [
+      { role: 'user', content: 'build it' },
+      {
+        role: 'assistant',
+        type: 'result',
+        content: ['Done!', '', `Download URL: \`${URL}\``].join('\n'),
+        result: { title: 'D', report_schema: { title: 'D' } },
+      },
+    ]);
+
+    const stored = await loadHistory(null, ident, null);
+    expect(stored.persisted).toBe(false);
+    expect(stored.history[1].content).toContain('s3://'); // the store is unchanged...
+
+    const body = buildSessionResponse(stored);
+    expect(JSON.stringify(body)).not.toContain('s3://'); // ...the wire is not
+    expect(body.messages[1].content).toBe('Done!');
+    expect(body.messages[1].result).toEqual({ title: 'D', report_schema: { title: 'D' } });
   });
 });

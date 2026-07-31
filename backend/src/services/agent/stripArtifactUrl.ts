@@ -34,12 +34,26 @@
  * interpretResponse extracted, so a reply carrying two URLs — or one the
  * classifier rejected as implausible — still comes out clean.
  *
- * SCOPE. Applied to result turns, the only ones that can carry an artifact URL:
- * a question turn is *defined* as prose with no s3:// URL (interpretResponse.ts,
- * fromProseHeuristic). The one gap is the proposed structured trailer (§3.4.4)
- * marking type:'question' over prose that mentions a URL anyway — that trailer
- * does not exist yet, and if it ever ships this call moves up to cover both arms.
+ * SCOPE. The entry guard is "this prose carries an s3:// URL", which is what lets
+ * withoutArtifactUrls run over EVERY assistant turn: a reply with no URL is
+ * returned byte-identical, so a clean turn is provably never rewritten. A question
+ * turn is in any case *defined* as prose with no s3:// URL (interpretResponse.ts,
+ * fromProseHeuristic). The one shape that could carry one anyway is the proposed
+ * structured trailer (§3.4.4) marking type:'question' over prose that mentions a
+ * URL — it does not exist yet, and covering every assistant turn takes it for free
+ * if it ever ships.
+ *
+ * WHERE IT RUNS. Twice, deliberately: on the way IN (toDashboardResult, so the
+ * URL is never persisted in the first place) and on the way OUT
+ * (withoutArtifactUrls below, wired into GET /session's body builder). The read
+ * side is not redundant — it is the only thing that covers rows already written:
+ * every transcript saved before this shipped, and every reply a still-old replica
+ * writes during a rolling deploy, comes back through it (round 16, Important).
+ * Neither side rewrites the database: the stored row keeps the agent's own words,
+ * so nothing is lost if the rule ever has to change.
  */
+
+import type { AgentTurn } from './types.js';
 
 /** Deliberate twin of interpretResponse's S3_URL_RE: the same character class,
  *  so what the classifier can find is exactly what this can remove. Kept
@@ -196,4 +210,48 @@ export function stripArtifactUrls(prose: string): string {
   // Whole lines leaving behind blank runs would open gaps the prose never had.
   // Collapse to the single blank line that is a paragraph break.
   return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Only for a reply that stripping consumed ENTIRELY — see toDashboardResult and
+ *  withoutArtifactUrls. One synthesized sentence, defined once so a live turn and
+ *  the same turn re-read from history cannot say different things. */
+export const RESULT_FALLBACK_MESSAGE = 'Your dashboard is ready.';
+
+/**
+ * A transcript with no artifact URL left in any assistant turn (review !62 round
+ * 16, Important). Wired into GET /session's body builder — the ONE place where
+ * both stores, Postgres and the degraded in-memory buffer, become the wire.
+ *
+ * WHY A READ-SIDE PASS EXISTS AT ALL. Stripping on write protects turns written
+ * from now on. It does nothing for the ones already in `chat_messages`, which
+ * rowToTurn hands back as `content: row.content` and which reappear in full on
+ * every page load — nor for a reply an old replica writes mid-rollout. The leak
+ * is in the reading, so the fix is in the reading. Rows are left exactly as the
+ * agent wrote them: no migration, no backfill, nothing to undo.
+ *
+ * USER TURNS ARE NEVER TOUCHED. A user who typed an s3:// URL typed it, and a
+ * transcript that quietly edits what they said is a transcript that lies. Only
+ * the assistant's own words are ours to trim.
+ *
+ * Identity-preserving: an already-clean transcript comes back as the SAME array
+ * holding the same turn objects, so the common path allocates nothing and "this
+ * changed nothing" is assertable by reference.
+ */
+export function withoutArtifactUrls(history: AgentTurn[]): AgentTurn[] {
+  let changed = false;
+  const cleaned = history.map((turn) => {
+    if (turn.role !== 'assistant') return turn;
+    const stripped = stripArtifactUrls(turn.content);
+    if (stripped === turn.content) return turn;
+    changed = true;
+    // The fallback belongs to the result arm alone, where a dashboard really is
+    // attached and the sentence is therefore true. No other arm can reach it: a
+    // turn whose entire content was the artifact advertisement is classified
+    // 'result' by construction (interpretResponse, fromProseHeuristic).
+    if (turn.type === 'result') {
+      return { ...turn, content: stripped === '' ? RESULT_FALLBACK_MESSAGE : stripped };
+    }
+    return { ...turn, content: stripped };
+  });
+  return changed ? cleaned : history;
 }
