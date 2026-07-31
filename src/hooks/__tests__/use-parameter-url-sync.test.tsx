@@ -53,6 +53,24 @@ describe('useParameterUrlSync, enabled (a report at its own URL)', () => {
   });
 });
 
+describe('useParameterUrlSync, turned on after mount', () => {
+  it('publishes what changed while it was off, instead of swallowing one write', () => {
+    // Unreachable today — both call sites pass a literal — but the guard that skips
+    // the mount write used to be consumed by the run that ENABLES the sync, so the
+    // first write after enabling went nowhere. (!64 review round 4, finding 3)
+    const tree = (enabled: boolean) =>
+      createElement(MemoryRouter, { initialEntries: ['/r/1'] },
+        createElement(Harness, { defaults: { region: 'south' }, enabled }));
+
+    const view = render(tree(false));
+    act(() => { screen.getByTestId('change').click(); });
+    expect(search()).toBe('');
+
+    view.rerender(tree(true));
+    expect(search()).toContain('region=north');
+  });
+});
+
 describe('useParameterUrlSync, disabled (a dashboard that is a guest on the route)', () => {
   it('ignores parameters already in the URL', () => {
     // Preview B must run its own `time`, not whatever preview A left behind.

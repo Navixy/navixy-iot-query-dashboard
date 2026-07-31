@@ -105,13 +105,18 @@ export function useParameterUrlSync(
   const isInitialMount = useRef(true);
   
   useEffect(() => {
+    // Consumed BEFORE the opt-out returns, not after. Below it, a run triggered by
+    // `enabled` going false -> true finds the flag still set, consumes it there, and
+    // returns — swallowing the first write the newly-enabled sync owed the URL.
+    // Unreachable while both call sites pass a compile-time literal; the ordering is
+    // free and the alternative is a bug waiting for the first dynamic caller.
+    const isFirstRun = isInitialMount.current;
+    isInitialMount.current = false;
+
     if (!enabled) return;
 
     // Skip URL update on initial mount (URL -> values sync already happened)
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
+    if (isFirstRun) return;
 
     const newParams = new URLSearchParams();
 
@@ -142,6 +147,6 @@ export function useParameterUrlSync(
     if (currentParams !== newParamsStr) {
       setSearchParams(newParams, { replace: true });
     }
-  }, [values, searchParams, setSearchParams]);
+  }, [values, searchParams, setSearchParams, enabled]);
 }
 
