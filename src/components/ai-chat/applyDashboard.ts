@@ -86,6 +86,10 @@ export function stripDisclaimerPanel(schema: Record<string, unknown>): Record<st
   const matches = panels.filter((panel: PanelLike) => isDisclaimer(panel));
   if (matches.length !== 1) return schema;
 
+  // A dashboard whose ONLY panel is the disclaimer would be saved empty — nothing to
+  // render, nothing to fix in the layout editor, and no clue why. Keep the panel.
+  if (panels.length === 1) return schema;
+
   const removed = matches[0] as PanelLike;
   const shift = typeof removed.gridPos?.h === 'number' ? removed.gridPos.h : 0;
 

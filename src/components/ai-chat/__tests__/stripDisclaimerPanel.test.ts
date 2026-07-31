@@ -75,6 +75,13 @@ describe('stripDisclaimerPanel', () => {
     expect(stripDisclaimerPanel(schema)).toBe(schema);
   });
 
+  it('leaves the disclaimer alone rather than saving an empty dashboard', () => {
+    // Latent until the flag flips, but the failure is silent: a dashboard with no
+    // panels renders nothing and gives the user no clue what happened.
+    const schema = { panels: [disclaimer()] };
+    expect(stripDisclaimerPanel(schema)).toBe(schema);
+  });
+
   it('leaves a schema with no panels array alone', () => {
     const schema = { title: 'No panels here' };
     expect(stripDisclaimerPanel(schema)).toBe(schema);
