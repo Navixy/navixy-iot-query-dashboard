@@ -97,6 +97,15 @@ describe('PreviewDialog', () => {
     expect(rendererProps.calls.at(-1)?.globalVariables).toEqual([]);
   });
 
+  it('keeps its parameters out of the chat page`s URL', async () => {
+    // /app/chat owns no parameters and never clears them, so preview A's time window
+    // would be read back by preview B and executed instead of B's own `time`.
+    mount();
+    await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
+
+    expect(rendererProps.calls.at(-1)?.syncParametersToUrl).toBe(false);
+  });
+
   it('hands the renderer a dashboard with no auto-refresh', async () => {
     mount();
     await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());

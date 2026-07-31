@@ -49,6 +49,8 @@ interface ParameterBarProps {
   onChange: (values: ParameterValues) => void;
   className?: string;
   globalVariables?: Array<{ label: string; value: string; description?: string }>;
+  /** False in the AI chat preview: /app/chat owns no parameters (see the hook). */
+  syncParametersToUrl?: boolean;
 }
 
 interface TimeRangePreset {
@@ -62,7 +64,8 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
   values,
   onChange,
   className,
-  globalVariables = []
+  globalVariables = [],
+  syncParametersToUrl = true
 }) => {
   const { prefs: datetimePrefs } = useDatetimePrefs();
 
@@ -317,7 +320,7 @@ export const ParameterBar: React.FC<ParameterBarProps> = ({
   // Sync with URL parameters (multiselect filters carry string[] values, so they
   // need JSON encoding to round-trip rather than being dropped from the URL).
   const arrayParamNames = useMemo(() => multiselectFilters.map((v) => v.name), [multiselectFilters]);
-  useParameterUrlSync(values, onChange, defaultValues, arrayParamNames);
+  useParameterUrlSync(values, onChange, defaultValues, arrayParamNames, syncParametersToUrl);
 
   // Store pending changes separately (don't apply immediately)
   const [pendingValues, setPendingValues] = useState<ParameterValues>(values);

@@ -171,6 +171,10 @@ function PreviewBody({ result, nonce, applyAction }: {
               key={nonce}
               dashboard={dashboard}
               globalVariables={globalVariables}
+              // /app/chat owns no parameters and never clears them, so a preview
+              // writing its range there would hand it to the NEXT preview, which
+              // would then execute with the previous dashboard's window.
+              syncParametersToUrl={false}
               onPanelStatusChange={handleStatus}
             />
           )

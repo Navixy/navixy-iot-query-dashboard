@@ -111,6 +111,14 @@ interface DashboardRendererProps {
    * the four counts, so an unstable identity re-fires it on every render.
    */
   onPanelStatusChange?: (status: PanelLoadStatus) => void;
+  /**
+   * Whether parameter values round-trip through the page's query string. True for a
+   * report at its own URL — that is how a filtered dashboard is shared. FALSE where
+   * the dashboard is a guest on someone else's route (the AI chat preview at
+   * /app/chat), which owns no parameters, never clears them, and would otherwise feed
+   * one preview's time window to the next. (DO-313)
+   */
+  syncParametersToUrl?: boolean;
 }
 
 export interface DashboardRendererRef {
@@ -395,6 +403,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                                                                                              globalVariables = [],
                                                                                              onLoadingChange,
                                                                                              onPanelStatusChange,
+                                                                                             syncParametersToUrl = true,
                                                                                            }, ref) => {
   // The viewer's effective SQL-session zone. Part of the execution cache key
   // below: when it changes — server preferences merging in after the first
@@ -2008,6 +2017,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
               setRefreshTrigger(prev => prev + 1);
             } }
             globalVariables={ globalVariables }
+            syncParametersToUrl={ syncParametersToUrl }
           />
         ) : null }
         <div className="space-y-4">
@@ -2063,6 +2073,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
             setRefreshTrigger(prev => prev + 1);
           } }
           globalVariables={ globalVariables }
+          syncParametersToUrl={ syncParametersToUrl }
         />
       ) : null }
 
