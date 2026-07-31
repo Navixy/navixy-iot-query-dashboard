@@ -21,7 +21,7 @@
  * (its own suite), the report mutation and the auth context.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createElement, type ReactNode } from 'react';
+import { createElement, useEffect, type ReactNode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -45,17 +45,31 @@ vi.mock('../applyDashboard', () => ({
   applyDashboard: vi.fn(),
 }));
 
+/** What the editor store held when the dialog rendered, and when its effects ran —
+ *  the two moments a real DashboardRenderer would read it (it prefers the store over
+ *  its `dashboard` prop and re-seeds it on mount). Recording both is what makes the
+ *  ordering assertion below an ordering assertion rather than an end-state one. */
+const dialogReads = vi.hoisted(() => ({
+  onRender: [] as Array<{ open: boolean; dashboard: unknown }>,
+  onEffect: [] as Array<{ open: boolean; dashboard: unknown }>,
+}));
+
 /** Records what the card hands the dialog, and renders the Apply control the
  *  card passed down — the "one element, two placements" claim, checkable. */
 vi.mock('../PreviewDialog', () => ({
   PreviewDialog: ({ open, nonce, applyAction }: {
     open: boolean; nonce: number; applyAction?: ReactNode;
-  }) =>
-    createElement(
+  }) => {
+    dialogReads.onRender.push({ open, dashboard: useEditorStore.getState().dashboard });
+    useEffect(() => {
+      dialogReads.onEffect.push({ open, dashboard: useEditorStore.getState().dashboard });
+    });
+    return createElement(
       'div',
       { 'data-testid': 'preview-dialog', 'data-open': String(open), 'data-nonce': String(nonce) },
       open ? applyAction : null,
-    ),
+    );
+  },
 }));
 
 const { applyDashboard } = await import('../applyDashboard');
@@ -101,6 +115,8 @@ const applyButton = () => applyButtons()[0];
 beforeEach(() => {
   vi.clearAllMocks();
   useEditorStore.getState().reset();
+  dialogReads.onRender.length = 0;
+  dialogReads.onEffect.length = 0;
 });
 
 afterEach(() => {
@@ -217,6 +233,13 @@ describe('ResultCard', () => {
   it('resets the editor store BEFORE the preview opens', () => {
     // Hazard 1: the store is a module singleton and DashboardRenderer prefers it
     // over its prop, so a leftover dashboard would be painted instead of this one.
+    //
+    // The ORDERING is the claim, not just the end state. A reset moved into an effect
+    // keyed on `open` leaves the store empty by the time anything asserts on it, and
+    // would still blank the renderer in production — child effects run before parent
+    // effects, so the reset would land after the renderer had seeded the store. So
+    // this asserts on what the dialog could observe at the two moments a real
+    // renderer reads the store: its own render, and its own effect.
     useEditorStore.setState({
       dashboard: { title: 'Someone else', panels: [], time: { from: '', to: '' } } as Dashboard,
       isEditingLayout: true,
@@ -226,6 +249,13 @@ describe('ResultCard', () => {
     expect(screen.getByTestId('preview-dialog').dataset.open).toBe('false');
 
     fireEvent.click(previewButton());
+
+    const openingRender = dialogReads.onRender.find((read) => read.open);
+    const openingEffect = dialogReads.onEffect.find((read) => read.open);
+    expect(openingRender).toBeDefined();
+    expect(openingEffect).toBeDefined();
+    expect(openingRender?.dashboard).toBeNull();
+    expect(openingEffect?.dashboard).toBeNull();
 
     expect(useEditorStore.getState().dashboard).toBeNull();
     expect(useEditorStore.getState().isEditingLayout).toBe(false);
