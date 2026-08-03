@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { DashboardRenderer } from '@/components/reports/DashboardRenderer';
 import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
@@ -17,12 +18,29 @@ import type { AgentChatResult } from '@/types/agent';
 import { toPreviewDashboard } from './previewDashboard';
 import { describePanelStatus } from './previewStatusText';
 
+type GlobalVariable = { label: string; value: string; description?: string };
+
+/** Loading and "could not be read" are DIFFERENT from "there are none" — see the
+ *  comment on the fetch below for why collapsing them was a defect. */
+type GlobalsState =
+  | { status: 'loading' }
+  | { status: 'ready'; vars: GlobalVariable[] }
+  | { status: 'error' };
+
 interface PreviewDialogProps {
   result: AgentChatResult;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Bumped by the opener so each preview mounts a fresh renderer instance. */
   nonce: number;
+  /**
+   * Fired when the mounted renderer reaches a TERMINAL status — every panel has either
+   * data or an error. This is what unlocks Apply (R27), so the three ways a preview can
+   * end without proving anything all resolve to "never fired": the schema could not be
+   * read (no renderer mounts), the globals could not be read (no renderer mounts), or
+   * the user closed the dialog mid-execution. (!64 review round 6, finding 1)
+   */
+  onPreviewComplete?: (status: PanelLoadStatus) => void;
   /**
    * The card's own Apply control, rendered a second time in the footer so the
    * decision can be taken where the evidence is. One element, two placements —
@@ -44,7 +62,9 @@ interface PreviewDialogProps {
  * preview answers the second question, so it must never become skippable: no "apply
  * directly", no "don't show this again", no auto-apply on a result turn. (DO-313, R27)
  */
-export function PreviewDialog({ result, open, onOpenChange, nonce, applyAction }: PreviewDialogProps) {
+export function PreviewDialog({
+  result, open, onOpenChange, nonce, applyAction, onPreviewComplete,
+}: PreviewDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* Sizing is load-bearing, not cosmetic. ui/dialog.tsx gives DialogContent no
@@ -63,14 +83,22 @@ export function PreviewDialog({ result, open, onOpenChange, nonce, applyAction }
             therefore outlives `open` by the ~200 ms fade; that cannot overlap a second
             renderer, because the modal overlay is still up and swallows the click that
             would open another preview. */}
-        <PreviewBody result={result} nonce={nonce} applyAction={applyAction} />
+        <PreviewBody
+          result={result}
+          nonce={nonce}
+          applyAction={applyAction}
+          onPreviewComplete={onPreviewComplete}
+        />
       </DialogContent>
     </Dialog>
   );
 }
 
-function PreviewBody({ result, nonce, applyAction }: {
-  result: AgentChatResult; nonce: number; applyAction?: ReactNode;
+function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
+  result: AgentChatResult;
+  nonce: number;
+  applyAction?: ReactNode;
+  onPreviewComplete?: (status: PanelLoadStatus) => void;
 }) {
   // null until the renderer reports — NOT {0,0,0,0}, which reads as "this dashboard
   // has no data panels" and would be the first thing every preview says.
@@ -84,7 +112,17 @@ function PreviewBody({ result, nonce, applyAction }: {
   // failed" about a dashboard that works the moment it is applied — or pass where the
   // applied report fails, if a global masks a bad declared default. Either way the
   // banner would be lying, which is the one thing this dialog exists not to do.
-  // Fail-silent to [] exactly as ReportView does. (!64 review round 3)
+  // (!64 review round 3)
+  //
+  // A FAILED read is therefore not the same as "there are none", and this used to
+  // collapse the two — reject, `response.error` and a wrong-shaped payload all became
+  // `[]`, and the preview then executed and reported as if it had run in the user's
+  // context. It had not: ReportView issues its own GET after Apply, which can succeed
+  // and pick up the real overrides, so a preview that says "1 panel failed" (or
+  // "All 3 loaded") after a five-second settings-DB blip is describing a dashboard
+  // nobody will ever open. Copying ReportView's fail-silent shape was the mistake —
+  // ReportView renders A report, while this dialog makes a CLAIM about one.
+  // (!64 review round 6, finding 2)
   //
   // Re-read on every open, and that is a choice rather than an oversight. Radix unmounts
   // closed content, so this effect runs once per preview — and "refine, then re-preview"
@@ -96,25 +134,41 @@ function PreviewBody({ result, nonce, applyAction }: {
   // a guaranteed-current answer is the cheap half. If it ever does need caching, it
   // needs a query invalidated by the settings screen that writes these, not a memo.
   // (!64 review round 5, finding 6)
-  const [globalVariables, setGlobalVariables] =
-    useState<Array<{ label: string; value: string; description?: string }> | null>(null);
+  const [globals, setGlobals] = useState<GlobalsState>({ status: 'loading' });
+  // Bumped by Retry. A preview the user could not repair without closing and reopening
+  // the dialog would push them straight back to the thing this state exists to prevent.
+  const [globalsAttempt, setGlobalsAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
-    const settle = (vars: Array<{ label: string; value: string; description?: string }>) => {
-      if (alive) setGlobalVariables(vars);
-    };
+    setGlobals({ status: 'loading' });
     apiService.getGlobalVariables()
-      .then((response) => settle(Array.isArray(response.data)
-        ? response.data as Array<{ label: string; value: string; description?: string }>
-        : []))
-      .catch(() => settle([]));
+      .then((response) => {
+        if (!alive) return;
+        // An `error` payload is a failure even though the promise resolved — the API
+        // client reports failure in the body, not by rejecting. An empty array is only
+        // ever the SUCCESSFUL answer "this user has no globals".
+        if (response.error || !Array.isArray(response.data)) {
+          setGlobals({ status: 'error' });
+          return;
+        }
+        setGlobals({ status: 'ready', vars: response.data as GlobalVariable[] });
+      })
+      .catch(() => { if (alive) setGlobals({ status: 'error' }); });
     return () => { alive = false; };
-  }, []);
+  }, [globalsAttempt]);
 
   // Stable identity: DashboardRenderer emits from an effect keyed on the counts, so
   // an unstable handler would re-fire it on every render.
-  const handleStatus = useCallback((next: PanelLoadStatus) => setStatus(next), []);
+  const handleStatus = useCallback((next: PanelLoadStatus) => {
+    setStatus(next);
+    // TERMINAL, not "first report": the renderer's opening emission has every panel
+    // pending, and unlocking Apply on that would gate on the dialog having been
+    // OPENED rather than on the dashboard having been EXECUTED — which is the same
+    // hole in a smaller box. `unverifiable` is not part of the test: a panel with no
+    // SQL never resolves, so waiting on it would lock Apply forever.
+    if (next.pending === 0) onPreviewComplete?.(next);
+  }, [onPreviewComplete]);
 
   // Drops the agent's `refresh: "5m"` — a preview is a one-shot validation, not a
   // live dashboard. See previewDashboard.ts for why, and for why this does not
@@ -152,10 +206,10 @@ function PreviewBody({ result, nonce, applyAction }: {
         {/* The banner lives in the HEADER, which is shrink-0 and therefore visible
             however far the grid below is scrolled. A failure the user does not notice
             is the same as no preview at all.
-            Suppressed entirely when the schema could not be read: no renderer mounts,
-            so no count is ever coming, and a panel banner beside "this could not be
-            read as a dashboard" only contradicts it. */}
-        {dashboard && (
+            Suppressed entirely when the schema could not be read, and equally when the
+            globals could not be: in both cases no renderer mounts, so no count is ever
+            coming, and a panel banner beside the explanation only contradicts it. */}
+        {dashboard && globals.status !== 'error' && (
           <div
             className={cn(
               'flex items-center gap-2 rounded-md px-3 py-2 text-sm',
@@ -187,21 +241,35 @@ function PreviewBody({ result, nonce, applyAction }: {
 
       <div className="flex-1 min-h-0 overflow-y-auto p-4">
         {dashboard ? (
-          // Mounted only once the globals have SETTLED (loaded or failed). Mounting
-          // first would execute every panel once with no bindings, paint failures,
-          // then re-execute when they arrive — the banner would announce a failure
-          // that was never real.
-          globalVariables !== null && (
-            <DashboardRenderer
-              key={nonce}
-              dashboard={dashboard}
-              globalVariables={globalVariables}
-              // /app/chat owns no parameters and never clears them, so a preview
-              // writing its range there would hand it to the NEXT preview, which
-              // would then execute with the previous dashboard's window.
-              syncParametersToUrl={false}
-              onPanelStatusChange={handleStatus}
-            />
+          globals.status === 'error' ? (
+            // NOT a renderer with `[]`. Running here would execute every statement
+            // with the wrong bindings and then report the result as if it were the
+            // truth — and unlock Apply on the strength of it.
+            <div className="flex flex-col items-start gap-3">
+              <p className="text-sm text-destructive">
+                Your global variables could not be read, so this preview would not run
+                the way the saved dashboard will. Nothing has been executed.
+              </p>
+              <Button variant="secondary" size="sm" onClick={() => setGlobalsAttempt((n) => n + 1)}>
+                Try again
+              </Button>
+            </div>
+          ) : (
+            // Mounted only once the globals are READY. Mounting first would execute
+            // every panel once with no bindings, paint failures, then re-execute when
+            // they arrive — the banner would announce a failure that was never real.
+            globals.status === 'ready' && (
+              <DashboardRenderer
+                key={nonce}
+                dashboard={dashboard}
+                globalVariables={globals.vars}
+                // /app/chat owns no parameters and never clears them, so a preview
+                // writing its range there would hand it to the NEXT preview, which
+                // would then execute with the previous dashboard's window.
+                syncParametersToUrl={false}
+                onPanelStatusChange={handleStatus}
+              />
+            )
           )
         ) : (
           <p className="text-sm text-destructive">

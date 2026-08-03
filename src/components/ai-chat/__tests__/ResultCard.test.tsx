@@ -22,7 +22,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement, useEffect, type ReactNode } from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useEditorStore } from '@/layout/state/editorStore';
@@ -54,13 +54,21 @@ const dialogReads = vi.hoisted(() => ({
   onEffect: [] as Array<{ open: boolean; dashboard: unknown }>,
 }));
 
+/** The last `onPreviewComplete` the card handed down, so a test can fire the thing
+ *  that unlocks Apply instead of reaching into card state. */
+const previewHooks = vi.hoisted(() => ({ complete: null as null | (() => void) }));
+
 /** Records what the card hands the dialog, and renders the Apply control the
  *  card passed down — the "one element, two placements" claim, checkable. */
 vi.mock('../PreviewDialog', () => ({
-  PreviewDialog: ({ open, nonce, applyAction }: {
+  PreviewDialog: ({ open, nonce, applyAction, onPreviewComplete }: {
     open: boolean; nonce: number; applyAction?: ReactNode;
+    onPreviewComplete?: (status: unknown) => void;
   }) => {
     dialogReads.onRender.push({ open, dashboard: useEditorStore.getState().dashboard });
+    previewHooks.complete = onPreviewComplete
+      ? () => onPreviewComplete({ total: 1, loaded: 1, failed: 0, pending: 0, unverifiable: 0 })
+      : null;
     useEffect(() => {
       dialogReads.onEffect.push({ open, dashboard: useEditorStore.getState().dashboard });
     });
@@ -112,6 +120,16 @@ const previewButton = () => screen.getByRole('button', { name: 'Preview' });
 const applyButtons = () => screen.getAllByRole('button', { name: 'Apply' });
 const applyButton = () => applyButtons()[0];
 
+/**
+ * Do what a real preview does: open it, and let the renderer report a terminal status.
+ * Apply is gated on that and on nothing else (R27), so almost every test below has to
+ * go through here first — which is the point of the gate.
+ */
+const runPreview = () => {
+  fireEvent.click(previewButton());
+  act(() => { previewHooks.complete?.(); });
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   // `applyDashboard` is `async`, so it ALWAYS returns a promise — a bare vi.fn()
@@ -121,6 +139,7 @@ beforeEach(() => {
   useEditorStore.getState().reset();
   dialogReads.onRender.length = 0;
   dialogReads.onEffect.length = 0;
+  previewHooks.complete = null;
 });
 
 afterEach(() => {
@@ -145,8 +164,9 @@ describe('ResultCard', () => {
     expect(screen.getByText('1 panel')).toBeTruthy();
   });
 
-  it('lets an editor apply', () => {
+  it('lets an editor apply once the preview has run', () => {
     mount({ role: 'editor' });
+    runPreview();
     expect(applyButton().disabled).toBe(false);
     expect(previewButton().disabled).toBe(false);
   });
@@ -185,6 +205,7 @@ describe('ResultCard', () => {
   it('shows no tooltip at all while Apply is available', async () => {
     // The other half of the rule: a reason is offered exactly when there is one.
     mount({ role: 'admin' });
+    runPreview();
     fireEvent.focus(applyButton().parentElement as HTMLElement);
     await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -217,6 +238,7 @@ describe('ResultCard', () => {
 
   it('hands the apply over once, and disables the button until it settles', async () => {
     mount({ role: 'editor' });
+    runPreview();
     fireEvent.click(applyButton());
 
     expect(applyDashboard).toHaveBeenCalledTimes(1);
@@ -241,6 +263,7 @@ describe('ResultCard', () => {
     // dashboard..." until the page is reloaded. (!64 review round 5, finding 1)
     vi.mocked(applyDashboard).mockRejectedValueOnce(new Error('unexpected'));
     mount({ role: 'editor' });
+    runPreview();
 
     fireEvent.click(applyButton());
     await waitFor(() => expect(applyButton().disabled).toBe(false));
@@ -309,9 +332,81 @@ describe('ResultCard', () => {
     expect(screen.getByTestId('preview-dialog').contains(both[1])).toBe(true);
   });
 
+  it('refuses to apply a dashboard nobody has previewed', async () => {
+    // The MR's whole thesis: static validation cannot tell a hallucinated column from
+    // a real one, so the execution the preview performs is the only correctness
+    // control there is (R27). Apply used to be live from the moment the card rendered.
+    // (!64 review round 6, finding 1)
+    mount({ role: 'editor' });
+
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(applyButton());
+    expect(applyDashboard).not.toHaveBeenCalled();
+
+    fireEvent.focus(applyButton().parentElement as HTMLElement);
+    await waitFor(() => {
+      expect(screen.getAllByText('Preview this dashboard first').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('still refuses while the preview is open and has not finished', async () => {
+    // Opening the dialog proves nothing: the globals may still be loading, the panels
+    // may still be executing, or the schema may not be readable at all.
+    mount({ role: 'editor' });
+    fireEvent.click(previewButton());
+
+    const [card, footer] = applyButtons();
+    expect(card.disabled).toBe(true);
+    expect(footer.disabled).toBe(true);
+
+    fireEvent.focus(card.parentElement as HTMLElement);
+    await waitFor(() => {
+      expect(screen.getAllByText('Wait for the preview to finish').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('unlocks BOTH copies of the button when the preview reports a terminal status', () => {
+    mount({ role: 'editor' });
+    fireEvent.click(previewButton());
+    expect(applyButtons().every((b) => b.disabled)).toBe(true);
+
+    act(() => { previewHooks.complete?.(); });
+
+    expect(applyButtons().every((b) => b.disabled)).toBe(false);
+  });
+
+  it('keeps Apply unlocked after the preview is closed — the evidence was seen', () => {
+    mount({ role: 'editor' });
+    runPreview();
+    fireEvent.click(previewButton());  // reopen and close again, nonce churn included
+
+    expect(applyButton().disabled).toBe(false);
+  });
+
+  it('does not let one result`s preview unlock a different one', () => {
+    // The transcript keys bubbles positionally, so a card can be reused for the next
+    // result. A boolean "already previewed" would carry over; the recorded schema
+    // identity does not. (!64 review round 6, finding 1)
+    const first: AgentChatResult = { title: 'A', report_schema: { panels: [{ id: 1 }] } };
+    const second: AgentChatResult = { title: 'B', report_schema: { panels: [{ id: 2 }] } };
+    authState.current.user = { id: 'u1', email: 'u@example.com', role: 'editor' };
+
+    const view = render(createElement(MemoryRouter, null, createElement(TooltipProvider,
+      { delayDuration: 0 },
+      createElement(ResultCard, { result: first, canApply: true, isPending: false }))));
+    runPreview();
+    expect(applyButton().disabled).toBe(false);
+
+    view.rerender(createElement(MemoryRouter, null, createElement(TooltipProvider,
+      { delayDuration: 0 },
+      createElement(ResultCard, { result: second, canApply: true, isPending: false }))));
+
+    expect(applyButton().disabled).toBe(true);
+  });
+
   it('applies from the dialog footer too', () => {
     mount({ role: 'admin' });
-    fireEvent.click(previewButton());
+    runPreview();
 
     const footerApply = applyButtons()[1];
     expect(footerApply.disabled).toBe(false);

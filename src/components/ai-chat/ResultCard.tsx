@@ -19,10 +19,12 @@ interface ResultCardProps {
   isPending: boolean;
 }
 
-const APPLY_DISABLED_TOOLTIP: Record<'role' | 'pending' | 'applying', string> = {
+const APPLY_DISABLED_TOOLTIP: Record<'role' | 'pending' | 'applying' | 'preview' | 'previewing', string> = {
   role: 'Ask an editor to create this dashboard',
   pending: 'Wait for the current reply to finish',
   applying: 'Creating the dashboard...',
+  preview: 'Preview this dashboard first',
+  previewing: 'Wait for the preview to finish',
 };
 
 /**
@@ -41,10 +43,20 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
   const [previewNonce, setPreviewNonce] = useState(0);
   const [isApplying, setIsApplying] = useState(false);
 
+  // The SCHEMA that has been previewed to completion, not a boolean: a card can be
+  // reused for a different result (the transcript keys bubbles positionally), and an
+  // "already previewed" flag would carry over and unlock Apply for a dashboard nobody
+  // has executed. Comparing identity makes a stale preview worth nothing.
+  const [previewedSchema, setPreviewedSchema] = useState<unknown>(null);
+  const previewCompleted = previewedSchema === result.report_schema;
+
   // The role is read here for the REASON (a viewer needs different copy from an
   // unresolved session); `canApply` is AiChat's single D15 computation of the same
   // useAuth().user.role. Requiring both can only ever be the safer answer.
-  const state = resultCardState(user?.role, isPending, isApplying);
+  const state = resultCardState(user?.role, isPending, isApplying, {
+    open,
+    completed: previewCompleted,
+  });
   const applyEnabled = state.canApply && canApply;
   const disabledReason = applyEnabled ? null : state.applyDisabledReason ?? 'role';
 
@@ -133,6 +145,12 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
         onOpenChange={setOpen}
         nonce={previewNonce}
         applyAction={applyButton}
+        // R27's gate, made real: Apply unlocks only once THIS schema has been executed
+        // against the user's data and the result was on screen. The dialog fires this
+        // on a terminal status and on nothing else, so closing the preview mid-run,
+        // an unreadable schema and unreadable globals all leave Apply where it was.
+        // (!64 review round 6, finding 1)
+        onPreviewComplete={() => setPreviewedSchema(result.report_schema)}
       />
     </div>
   );
