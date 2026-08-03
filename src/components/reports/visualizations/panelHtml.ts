@@ -76,6 +76,21 @@ const SANITIZE_CONFIG: Config = {
 let purifier: PurifyInstance | null = null;
 
 /**
+ * Every element that opens a window from `target`, in every namespace the sanitizer
+ * lets through. The hook ran on ANY element carrying `target` before, which hung a
+ * pointless `rel` off `<div target=x>` — but narrowing it to `A` would have been worse
+ * than either, because two of the three real cases are not `A`:
+ *
+ * - `<area target="_blank">` survives this config (measured), is a genuine link inside
+ *   an image map, and reports `AREA`.
+ * - An SVG `<a target="_blank">` survives too, and reports LOWERCASE `a` — SVG elements
+ *   keep their case, so `=== 'A'` would silently drop the `rel` exactly there.
+ *
+ * Hence lower-cased and matched against both. (!64 review round 5, finding 4)
+ */
+const TARGET_OPENS_A_WINDOW = new Set(['a', 'area']);
+
+/**
  * A PRIVATE DOMPurify instance, built once and kept here.
  *
  * Hooks live on the instance, so installing the `rel` hook on the shared default
@@ -100,7 +115,9 @@ function getPurifier(): PurifyInstance {
   // else, so installing unguarded would throw on the very path that must fail closed.
   if (instance.isSupported) {
     instance.addHook('afterSanitizeAttributes', (node) => {
-      if (node instanceof Element && node.hasAttribute('target')) {
+      if (!(node instanceof Element)) return;
+      if (!TARGET_OPENS_A_WINDOW.has(node.tagName.toLowerCase())) return;
+      if (node.hasAttribute('target')) {
         node.setAttribute('rel', 'noopener noreferrer');
       }
     });

@@ -101,6 +101,29 @@ describe('author markup the default config would have broken', () => {
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
+  it('forces rel on every element that opens a window, not just <a>', () => {
+    // Both survive the config, both open a window from `target`, and neither is `A`:
+    // <area> reports AREA, and an SVG anchor reports lowercase `a` because SVG keeps
+    // its case. A `tagName === 'A'` test would drop the rel on both.
+    // (!64 review round 5, finding 4)
+    const area = toSafePanelHtml(
+      '<map name="m"><area href="https://x.example" target="_blank"></map>', 'html');
+    expect(area).toContain('<area');
+    expect(area).toContain('rel="noopener noreferrer"');
+
+    const svg = toSafePanelHtml(
+      '<svg><a href="https://x.example" target="_blank"><text>t</text></a></svg>', 'html');
+    expect(svg).toContain('target="_blank"');
+    expect(svg).toContain('rel="noopener noreferrer"');
+  });
+
+  it('leaves rel off an element that cannot open anything', () => {
+    // `ADD_ATTR: ['target']` allows the attribute on every tag, so the hook used to
+    // hang a rel off <div target=x>. Harmless, but it made the code read as if it
+    // were doing something it was not.
+    expect(toSafePanelHtml('<div target="_blank">d</div>', 'html')).not.toContain('rel=');
+  });
+
   it('treats a tag the same wherever it sits in the string', () => {
     // The parser hoists a LEADING style/title/meta into <head> and DOMPurify returns
     // only <body>, so an ALLOWED head-hoistable tag would behave differently depending
