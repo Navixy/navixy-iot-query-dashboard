@@ -303,6 +303,43 @@ describe('remote subresources are refused', () => {
     }
   });
 
+  it('applies CSS input preprocessing, so a line continuation cannot smuggle a URL', () => {
+    // REAL control characters, built here rather than written as text — the payload is
+    // nothing without them. The browser turns CR, FF and CRLF into LF before it
+    // tokenizes, and a backslash-newline inside a string is then a line continuation
+    // that disappears: `url("https\<FF>://evil/x")` executes as `https://evil/x`, and
+    // headless Chrome fetched it. (!64 review round 9)
+    const FF = '\f';
+    const LF = '\n';
+    const CR = '\r';
+    const continuations: Array<[string, string]> = [
+      ['form feed', FF],
+      ['line feed', LF],
+      ['carriage return', CR],
+      ['crlf', `${CR}${LF}`],
+    ];
+    for (const [name, newline] of continuations) {
+      const html = toSafePanelHtml(
+        `<svg><rect fill='url("https\\${newline}://evil.example/c.svg#x")' width="9" height="9"/></svg>`,
+        'html');
+      expect(html, name).not.toContain('evil.example');
+    }
+
+    // ...and a continuation in the middle of the host, which reassembles just as well.
+    expect(toSafePanelHtml(
+      `<svg><rect fill='url("https://ev\\${FF}il.example/h.svg#x")' width="9" height="9"/></svg>`, 'html'))
+      .not.toContain('evil.example');
+  });
+
+  it('fails safe on a bare form feed, which CSS would treat as a bad string', () => {
+    // Not a fetch in any browser — a raw newline inside a CSS string is a parse error.
+    // Preprocessing makes us read it as the parser would and refuse it anyway, which is
+    // the safe direction to be wrong in.
+    expect(toSafePanelHtml(
+      `<svg><rect fill='url("https:\f//evil.example/bare.svg#x")' width="9" height="9"/></svg>`, 'html'))
+      .not.toContain('evil.example');
+  });
+
   it('does not mangle a legitimate value that merely contains a backslash', () => {
     // Decoding is for the scan only; the attribute the browser gets is untouched.
     expect(toSafePanelHtml(String.raw`<p title="C:\Users\report">x</p>`, 'html'))

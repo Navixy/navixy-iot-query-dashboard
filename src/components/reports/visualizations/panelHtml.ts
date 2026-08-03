@@ -164,46 +164,74 @@ function srcsetIsLocal(value: string): boolean {
  * (`url(#gradient)`) are the legitimate case and survive untouched — they resolve
  * against `document.baseURI`, so `isLocalUrl` already says yes. (!64 review round 7)
  *
- * The scan runs on the value AFTER CSS escapes are resolved — see `decodeCssEscapes`,
- * and read that comment before touching this one. Scanning the raw string means
- * scanning a different language from the one the browser executes. (round 8)
+ * The scan runs on the value AFTER CSS input preprocessing and escape resolution — see
+ * `resolveCssValue`, and read that comment before touching this one. Scanning the raw
+ * string means scanning a different language from the one the browser executes.
+ * (rounds 8 and 9)
  */
 const URL_FUNCTION = /url\(\s*(['"]?)([^'")]*)\1\s*\)/gi;
 
 /**
- * CSS escapes, resolved BEFORE the value is scanned — because the browser resolves them
- * before it fetches, and a scanner reading the raw string is reading a different
- * language from the one that will execute.
+ * Read the value the way the CSS parser will, before scanning it for URLs. A scanner
+ * reading the raw attribute string is reading a different language from the one that
+ * executes, and every evasion found in rounds 8 and 9 lived in that gap.
  *
- * Four measured evasions of the literal scan, every one of which issued a real request
- * in headless Chrome:
+ * TWO stages, in the spec's own order, because doing only the second missed a bypass:
+ *
+ * **1. Input preprocessing (CSS Syntax §3.3).** CR, FF and CRLF all become a single LF;
+ * NULL and surrogates become U+FFFD. This is not cosmetic. The browser applies it
+ * BEFORE tokenizing, so `url("https\<FF>://evil/x")` becomes `url("https\<LF>://evil/x")`
+ * — and a backslash-newline inside a string is a line continuation, deleted outright,
+ * leaving `https://evil/x`. Round 8's decoder treated backslash-FF as a plain escape and
+ * kept a literal FF, so the URL check saw `https<FF>://evil/x`, called it a relative
+ * same-origin path, and let it through. Confirmed fetching in headless Chrome.
+ * The reason only FF got through, and LF/CR did not, is worth writing down: the WHATWG
+ * URL parser strips tab, LF and CR from its input all by itself, so those variants were
+ * already caught by accident rather than by design. FF is not in that list. Aligning
+ * with §3.3 replaces the accident with a rule.
+ *
+ * **2. Escapes (CSS Syntax §4.3.7).** A backslash followed by a newline is a line
+ * CONTINUATION and disappears; followed by 1–6 hex digits and an optional single
+ * whitespace it is that code point; followed by anything else it is that character.
+ * Round 8's four measured evasions, each of which fetched for real:
  *
  * - `u\72l(https://evil/x)`      — escape inside the function NAME; `url(` never appears
  * - `\75 rl(https://evil/x)`     — escape as its FIRST character; same
- * - `url(https\3a //evil/x)`     — escape in the SCHEME; scans fine, and then resolves
- *                                  as a same-origin RELATIVE path, so it passed
+ * - `url(https\3a //evil/x)`     — escape in the SCHEME; scans fine, then resolves as a
+ *                                  same-origin RELATIVE path, so it passed
  * - `url(https\3A//evil/x)`      — the same without the whitespace terminator
  *
- * Grammar (CSS Syntax §4.3.7): a backslash followed by 1–6 hex digits and an optional
- * single whitespace is that code point; a backslash followed by anything else is that
- * character literally. A null or out-of-range code point becomes U+FFFD, which is what
- * the spec says and, conveniently, is not a character any URL can be built from.
- * (!64 review round 8, finding 2)
+ * The result is used for the DECISION only. The attribute the browser receives is never
+ * rewritten, so a `title` holding a Windows path still holds one.
+ *
+ * **On which half is load-bearing, since the mutation sweep is blunt about it:** removing
+ * §3.3 lets the form-feed payload through and fails a test. Making the continuation
+ * branch return the newline instead of deleting it fails NOTHING — because `new URL`
+ * strips LF for us. That coincidence is precisely what hid this bug for two rounds, so
+ * the branch stays: the point is for this function to compute what the browser computes,
+ * not to lean on a second component happening to agree. (!64 review rounds 8 and 9)
  */
-const CSS_ESCAPE = /\\(?:([0-9a-fA-F]{1,6})[ \t\n\f\r]?|([\s\S]))/g;
+const CSS_ESCAPE = /\\(?:(\n)|([0-9a-fA-F]{1,6})[ \t\n]?|([\s\S]))/g;
 
-function decodeCssEscapes(value: string): string {
-  if (!value.includes('\\')) return value;
-  return value.replace(CSS_ESCAPE, (_match, hex: string | undefined, literal: string | undefined) => {
-    if (hex === undefined) return literal ?? '';
-    const code = Number.parseInt(hex, 16);
-    if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return '�';
-    return String.fromCodePoint(code);
-  });
+function resolveCssValue(raw: string): string {
+  // §3.3, in one pass: CRLF and lone CR and FF all collapse to LF.
+  const preprocessed = raw.replace(/\r\n?|\f/g, '\n').replace(/\0/g, '�');
+  if (!preprocessed.includes('\\')) return preprocessed;
+
+  return preprocessed.replace(
+    CSS_ESCAPE,
+    (_match, continuation: string | undefined, hex: string | undefined, literal: string | undefined) => {
+      if (continuation !== undefined) return '';
+      if (hex === undefined) return literal ?? '';
+      const code = Number.parseInt(hex, 16);
+      if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return '�';
+      return String.fromCodePoint(code);
+    },
+  );
 }
 
 function urlFunctionsAreLocal(raw: string): boolean {
-  const value = decodeCssEscapes(raw);
+  const value = resolveCssValue(raw);
   const occurrences = value.toLowerCase().split('url(').length - 1;
   if (occurrences === 0) return true;
 
