@@ -194,6 +194,38 @@ describe('applyDashboard', () => {
     expect(toastError).not.toHaveBeenCalled();
   });
 
+  /**
+   * Once the report exists, no failure may re-enable Apply: the hook has already
+   * toasted "Dashboard created successfully", so the obvious next click would create a
+   * SECOND report of the same dashboard. That is why `navigate` sits outside the try
+   * that catches the mutation. (!64 review round 5, finding 2)
+   */
+  describe('after the report has been created', () => {
+    it('does not navigate — or re-enable Apply — when the response carries no id', async () => {
+      // useCreateReportMutation returns `response.data!`, a non-null assertion over a
+      // payload this code does not control: a 200 with an empty body resolves undefined.
+      const h = harness(vi.fn().mockResolvedValue(undefined));
+      await applyDashboard({ result, ...h });
+
+      expect(h.navigate).not.toHaveBeenCalled();
+      expect(h.onSettled).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalledTimes(1);
+      expect(toastError.mock.calls[0][0]).toContain('AI Dashboards');
+    });
+
+    it('reports a navigation that fails as a report that was saved, not one that was not', async () => {
+      const h = harness();
+      h.navigate.mockImplementation(() => { throw new Error('router gone'); });
+      await applyDashboard({ result, ...h });
+
+      // The old shape ran this through the mutation`s catch: no toast at all (the hook
+      // was assumed to have raised it), Apply re-enabled, one click from a duplicate.
+      expect(h.onSettled).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalledTimes(1);
+      expect(toastError.mock.calls[0][0]).toContain('was created, but could not be opened');
+    });
+  });
+
   it('passes the schema through unchanged — the saved bytes are the previewed bytes', async () => {
     const h = harness();
     await applyDashboard({ result, ...h });

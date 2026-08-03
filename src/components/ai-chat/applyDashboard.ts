@@ -205,6 +205,10 @@ export async function applyDashboard({
     }
   }
 
+  // Declared out here so the navigation below can sit OUTSIDE the try. See the comment
+  // under the catch for why that matters.
+  let report: unknown;
+
   try {
     // Pass an EXPLICIT slug. Without it the backend derives one from the title, and
     // because the agent returns the same title for the same prompt, applying twice
@@ -227,23 +231,57 @@ export async function applyDashboard({
     // that tie is genuinely unordered). Fixing it needs a getReports() round-trip on
     // every Apply, or an epoch-derived value that risks an int4 overflow on a column
     // this repo has no DDL for. Reordering is a drag in the menu editor. (!64 review)
-    const report = await createReportMutation.mutateAsync({
+    report = await createReportMutation.mutateAsync({
       title: result.title,
       slug,
       section_id: sectionId,
       sort_order: 0,
       report_schema: prepareSchemaForSave(result.report_schema),
     });
-
-    navigate(`/app/report/${(report as { id: string }).id}`);
   } catch {
-    // mutateAsync REJECTS on failure and the hook's own onError already toasted.
-    // Swallow here: do not double-toast, do not navigate, and re-enable Apply so the
-    // user can retry. The dashboard they were shown is untouched and still on screen.
+    // ONE call is inside this try, and that is what makes this comment true: mutateAsync
+    // REJECTS on failure and the hook's own onError already toasted. Swallow here: do
+    // not double-toast, do not navigate, and re-enable Apply so the user can retry. The
+    // dashboard they were shown is untouched and still on screen.
     //
     // If createSection succeeded and createReport then failed, an EMPTY section is
     // left in the sidebar. Deliberate and self-healing: the next Apply finds it by
     // name and reuses it.
     onSettled();
+    return;
+  }
+
+  // ===== THE REPORT EXISTS FROM HERE DOWN. NOTHING BELOW MAY CALL onSettled. =====
+  //
+  // Which is why the navigation moved out of the try. Inside it, a throw from the id
+  // read or from `navigate` was indistinguishable from "the report was not created":
+  // the catch above swallowed a success toast the hook had already raised and re-enabled
+  // Apply, so the obvious next click created a SECOND report of the same dashboard.
+  //
+  // The id read is defensive because useCreateReportMutation returns `response.data!` —
+  // a non-null assertion over a payload this code does not control, so a 200 with an
+  // empty body resolves `undefined` here rather than rejecting.
+  //
+  // Apply stays disabled through both failures below, and the toast is what makes that
+  // honest: the work is done, so the useful thing to hand the user is where it landed,
+  // not a button whose only effect would be to duplicate it.
+  const savedButNotOpened = () => toast.error(
+    `"${result.title}" was created, but could not be opened. ` +
+    `Find it in the sidebar under "${SECTION_NAME}".`,
+  );
+
+  const reportId = (report as { id?: string } | null | undefined)?.id;
+  if (!reportId) {
+    savedButNotOpened();
+    return;
+  }
+
+  try {
+    navigate(`/app/report/${reportId}`);
+  } catch {
+    // Caught rather than allowed to escape: a rejection out of this function reaches
+    // ResultCard's backstop, which re-enables Apply — the right answer for every throw
+    // BEFORE the report exists, and the wrong one for this throw.
+    savedButNotOpened();
   }
 }
