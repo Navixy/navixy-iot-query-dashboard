@@ -513,7 +513,21 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // canonicalize/compact on the store every render would re-allocate panel objects
     // each frame mid-edit for no benefit — and compaction is intentionally kept out
     // of the per-edit path so it must not re-run here while the user is dragging.
-    const canonicalized = storeDashboard ?? normalizeDashboardForRender(dashboard);
+    //
+    // `dashboardInitializedRef` is what makes "the store" mean THIS INSTANCE'S store.
+    // The store is a module singleton, so a freshly mounted renderer would otherwise
+    // spend its first render painting — and COUNTING — whatever dashboard the previous
+    // one left behind. The AI preview remounts on purpose when the result changes, and
+    // that first render is exactly where the counts are read: a leftover dashboard with
+    // no SQL panels reports `pending: 0` on the spot, which is a terminal status for a
+    // dashboard that is not on screen and whose queries have not run. Preferring the
+    // prop until this instance has hydrated the store costs one render of already
+    // correct content and removes the window. It is a ref rather than state on purpose:
+    // the effect that flips it also calls `setDashboard`, so `storeDashboard` changes in
+    // the same commit and re-runs this memo.
+    // (!64 review round 8, finding 1)
+    const hydrated = dashboardInitializedRef.current ? storeDashboard : null;
+    const canonicalized = hydrated ?? normalizeDashboardForRender(dashboard);
 
     // Ensure every panel has a unique ID — return new objects instead of mutating
     const withIds = (panels: Panel[]): Panel[] =>

@@ -171,6 +171,52 @@ describe('the preview gate, through the real renderer', () => {
     expect(applyButton().disabled).toBe(false);
   });
 
+  it('does not let a text-only previous dashboard count as the new one finishing', async () => {
+    // The edge the two-SQL-panel cases above cannot reach, because they always leave
+    // the old dashboard PENDING on the first render after a remount.
+    //
+    // The editor store is a module singleton, so a freshly mounted renderer used to
+    // spend its first render on whatever dashboard the previous one left there. If that
+    // one has nothing to execute — a text-only agent result, or blank SQL — its status
+    // is `pending: 0` immediately. That is a TERMINAL status, computed from a dashboard
+    // that is not on screen, and the completion carried the NEW schema's identity, so
+    // the card marked B proved before a single one of B's statements had been sent.
+    // (!64 review round 8, finding 1)
+    const textOnly = {
+      title: 'A', time: { from: 'now-24h', to: 'now' },
+      panels: [{
+        id: 1, type: 'text', title: 'Attention',
+        gridPos: { x: 0, y: 0, w: 24, h: 3 },
+        options: { mode: 'markdown', content: 'AI-generated' },
+      }],
+    };
+    const resultTextOnly: AgentChatResult = { title: 'A', report_schema: textOnly };
+
+    const view = render(tree(resultTextOnly));
+    fireEvent.click(previewButton());
+    // Nothing to run, so this preview is legitimately complete at once.
+    await waitFor(() => expect(applyButton().disabled).toBe(false));
+    expect(executeSQL).not.toHaveBeenCalled();
+
+    // B's queries are held, so B is genuinely unproven for as long as the test wants.
+    const held: Array<(value: unknown) => void> = [];
+    executeSQL.mockImplementation(() =>
+      new Promise((resolve) => { held.push(resolve); }) as never);
+    view.rerender(tree(resultB));
+
+    expect(applyButton().disabled).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(applyButton().disabled).toBe(true);
+    expect(held.length).toBeGreaterThan(0);
+
+    const rows = { data: { columns: [{ name: 'x' }], rows: [{ x: 1 }] } };
+    for (let wave = 0; wave < 10 && applyButton().disabled; wave += 1) {
+      await act(async () => { held.splice(0).forEach((resolve) => resolve(rows)); });
+    }
+    expect(applyButton().disabled).toBe(false);
+    expect(sent()).toContain('SELECT c FROM three');
+  });
+
   it('does not unlock a result that was never previewed, even after another one was', async () => {
     // The same claim from the other side: a card that completes a preview for A and is
     // then handed B must treat B as unproven, not inherit A's proof.
