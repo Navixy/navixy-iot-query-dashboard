@@ -87,6 +87,33 @@ describe('TextPanel', () => {
     expect(container.textContent).toContain('<img src=x onerror="alert(1)">');
   });
 
+  it('contains what the injected markup can lay out, in both modes', () => {
+    // The other half of the sanitizer's policy, and the half that lives here.
+    // `class` survives sanitization, and the app's own compiled stylesheet is then the
+    // panel author's vocabulary: `fixed inset-0 z-50 bg-background` are all in the
+    // bundle because the dialog overlay uses them, so an agent-authored link can paint
+    // a full-viewport phishing layer over the product — in the SAVED report, where no
+    // dialog transform clamps a fixed element. Layout containment makes this wrapper
+    // the containing block for fixed/absolute descendants and a stacking context.
+    //
+    // jsdom performs no layout, so this asserts the CONTROL is in place rather than
+    // its effect. The effect was measured in a real browser against the app's own
+    // compiled stylesheet: without containment the anchor's box is 2056x1147 at (0,0)
+    // — the whole viewport; with it, 298x118 inside its 300x120 panel.
+    // (!64 review round 6, finding 4)
+    for (const mode of ['markdown', 'html'] as const) {
+      const { container } = render(createElement(TextPanel, {
+        panel: panelWith('<a href="/login" class="fixed inset-0 z-50 bg-background">Session expired</a>', mode),
+      }));
+
+      const injected = container.querySelector('[style]') as HTMLElement | null;
+      expect(injected?.style.contain).toBe('layout');
+      // ...and it is the element the HTML actually goes into, not a wrapper beside it.
+      expect(injected?.querySelector('a')).not.toBeNull();
+      cleanup();
+    }
+  });
+
   it('sanitizes once per content/mode, not once per render', () => {
     // renderPanel is a plain function, this component is not memoized, and the
     // renderer re-renders on every setPanelData — so the parse+sanitize ran on every

@@ -76,6 +76,20 @@ export function TextPanel({ panel }: TextPanelProps) {
       return (
         <div
           className="prose prose-sm dark:prose-invert max-w-none"
+          // `contain: layout` is a SECURITY control, not a performance hint, and it is
+          // half of a pair with panelHtml.ts's sanitize config — read them together.
+          // The sanitizer lets `class` through, and the app's own compiled stylesheet
+          // is then the panel author's vocabulary: `fixed inset-0 z-50 bg-background`
+          // are all in the bundle (the dialog overlay uses them), so an agent-authored
+          // link could paint a full-viewport opaque phishing layer over the product —
+          // in the SAVED report, where no dialog transform clamps it. Layout
+          // containment makes THIS div the containing block for fixed and absolute
+          // descendants and a stacking context, so `inset-0` resolves to the panel and
+          // `z-50` cannot climb out of it. An allow-list of class names would be the
+          // brittle alternative: arbitrary values like `z-[9999]` are inert only
+          // because Tailwind never compiled them, which is a fact about our source
+          // tree rather than a policy. (!64 review round 6, finding 4)
+          style={{ contain: 'layout' }}
           dangerouslySetInnerHTML={{ __html: rendered.html }}
         />
       );

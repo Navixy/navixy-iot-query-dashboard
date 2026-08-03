@@ -179,40 +179,109 @@ describe('the injection surface script-blocking alone leaves open', () => {
 });
 
 /**
- * Pinned as an ACCEPTED cost, not as a win. If one of these ever starts being stripped
- * it is a behaviour change legitimate panels would feel, and it should be a decision
- * rather than a surprise — and if the docblock's list ever stops matching the library,
- * this is what says so. (!64 review round 5, finding 3)
+ * A panel that fetches from an origin its author chose reports the viewer's IP,
+ * user-agent and anything in the query string to whoever wrote the panel — on the
+ * SAVED report, on every later open, from content an AI agent produced after reading
+ * rows of the customer's database. Round 5 pinned this as an accepted cost; round 6 was
+ * right that documenting an exposure does not close it. (!64 review round 6, finding 4)
  */
-describe('what it deliberately does not stop', () => {
-  it('lets a remote image load, which beacons the viewer to whoever wrote the panel', () => {
-    // No CSP on the document closes this either: nginx sets only `frame-ancestors *`.
-    expect(toSafePanelHtml('<img src="https://evil.example/track.gif">', 'html'))
-      .toContain('https://evil.example/track.gif');
+describe('remote subresources are refused', () => {
+  const beacon = 'https://evil.example';
+
+  it('drops the src of a remote image, in both modes', () => {
+    expect(toSafePanelHtml(`<img src="${beacon}/track.gif">`, 'html'))
+      .not.toContain('evil.example');
     // Markdown reaches the same place with far less typing.
-    expect(toSafePanelHtml('![x](https://evil.example/track.gif)', 'markdown'))
-      .toContain('https://evil.example/track.gif');
+    expect(toSafePanelHtml(`![x](${beacon}/track.gif)`, 'markdown'))
+      .not.toContain('evil.example');
   });
 
-  it('lets the other remote loaders through too, and blocks the ones the config removes', () => {
-    const survives = [
-      '<video src="https://evil.example/v.mp4"></video>',
-      '<audio src="https://evil.example/a.mp3"></audio>',
-      '<picture><source srcset="https://evil.example/s.png"></picture>',
-      '<track src="https://evil.example/t.vtt">',
+  it('covers every attribute the browser fetches from, not just <img src>', () => {
+    const payloads = [
+      `<video src="${beacon}/v.mp4"></video>`,
+      `<video poster="${beacon}/p.jpg"></video>`,
+      `<audio src="${beacon}/a.mp3"></audio>`,
+      `<picture><source srcset="${beacon}/s.png"></picture>`,
+      `<img src="/ok.png" srcset="/ok.png 1x, ${beacon}/2x.png 2x">`,
+      `<track src="${beacon}/t.vtt">`,
+      `<table background="${beacon}/bg.png"><tr><td>a</td></tr></table>`,
+      // SVG carries its own fetches, and these are NOT in the reviewer's list —
+      // they were found by probing the installed library.
+      `<svg><image href="${beacon}/x.png" width="10" height="10"/></svg>`,
+      `<svg><image xlink:href="${beacon}/x.png" width="10" height="10"/></svg>`,
+      `<svg><feImage href="${beacon}/x.png"/></svg>`,
     ];
-    for (const payload of survives) {
-      expect(toSafePanelHtml(payload, 'html')).toContain('evil.example');
+    for (const payload of payloads) {
+      for (const mode of ['markdown', 'html'] as const) {
+        expect(toSafePanelHtml(payload, mode)).not.toContain('evil.example');
+      }
     }
+  });
 
+  it('keeps the element, dropping only the attribute that fetches', () => {
+    // A broken image with its alt text is visible and honest; deleting the node would
+    // make a panel silently shorter than the one that was previewed.
+    const html = toSafePanelHtml(`<img src="${beacon}/t.gif" alt="chart">`, 'html');
+    expect(html).toContain('<img');
+    expect(html).toContain('alt="chart"');
+    expect(html).not.toContain('src=');
+  });
+
+  it('leaves same-origin and data: URLs alone, which is what real panels use', () => {
+    expect(toSafePanelHtml('<img src="/logo.png">', 'html')).toContain('src="/logo.png"');
+    expect(toSafePanelHtml('<img src="logo.png">', 'html')).toContain('src="logo.png"');
+    expect(toSafePanelHtml('<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">', 'html'))
+      .toContain('data:image/gif');
+    expect(toSafePanelHtml('<img src="/a.png" srcset="/a.png 1x, /b.png 2x">', 'html'))
+      .toContain('srcset=');
+  });
+
+  it('never touches a LINK to another origin — that is navigation, not a fetch', () => {
+    const html = toSafePanelHtml('<a href="https://docs.example.com/runbook">Runbook</a>', 'html');
+    expect(html).toContain('href="https://docs.example.com/runbook"');
+  });
+
+  it('fails closed on a value the URL parser refuses', () => {
+    // A malformed AUTHORITY throws; a malformed scheme does not — `ht!tp://x` is
+    // simply a relative path against our own origin, which is a request to our own
+    // server and therefore not the thing this rule is about.
+    expect(toSafePanelHtml('<img src="https://[">', 'html')).not.toContain('src=');
+    expect(toSafePanelHtml('<img src="ht!tp://x">', 'html')).toContain('src=');
+  });
+
+  it('still refuses the loaders the config removes outright', () => {
     const blocked = [
-      '<link rel="stylesheet" href="https://evil.example/x.css">',
-      '<object data="https://evil.example/o"></object>',
-      '<input type="image" src="https://evil.example/i.png">',
+      `<link rel="stylesheet" href="${beacon}/x.css">`,
+      `<object data="${beacon}/o"></object>`,
+      `<input type="image" src="${beacon}/i.png">`,
     ];
     for (const payload of blocked) {
       expect(toSafePanelHtml(payload, 'html')).not.toContain('evil.example');
     }
+  });
+});
+
+/**
+ * The `class` attribute survives sanitization, and the app's compiled stylesheet is
+ * therefore the panel author's vocabulary. These tests pin the payload; what stops it
+ * is `contain: layout` on TextPanel's injection wrapper, which is asserted in
+ * TextPanel.test.tsx. The two are one control and must not be separated.
+ * (!64 review round 6, finding 4)
+ */
+describe('the compiled-utility overlay this config allows through', () => {
+  const overlay =
+    '<a href="/login" class="fixed inset-0 z-50 bg-background">Session expired</a>';
+
+  it('sanitizes to itself — the sanitizer is NOT what stops it', () => {
+    const html = toSafePanelHtml(overlay, 'html');
+    expect(html).toContain('class="fixed inset-0 z-50 bg-background"');
+  });
+
+  it('keeps `class`, which is the reason the containment exists', () => {
+    // Removing `class` here would break legitimate styling and would still not contain
+    // a payload built from arbitrary values; containment covers both.
+    expect(toSafePanelHtml('<p class="text-lg font-bold">Big</p>', 'html'))
+      .toContain('class="text-lg font-bold"');
   });
 });
 

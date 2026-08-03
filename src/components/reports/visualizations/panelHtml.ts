@@ -64,8 +64,22 @@ const MARKED_OPTIONS = { breaks: true, gfm: true } as const;
  * worries about is `ADD_TAGS`/`USE_PROFILES`/hook customisation widening the allow
  * list, and narrowing cannot widen it. Cost, stated plainly: a text panel can no
  * longer carry its own CSS. Zero of the 19 text panels across the 14 shipped fixtures
- * use `<style>`, a `style` attribute, `target` or a form — and Tailwind utility
- * classes still work, since `class` survives.
+ * use `<style>`, a `style` attribute, `target` or a form.
+ *
+ * **`class` survives, and that is not free.** The app's compiled stylesheet is the
+ * panel author's vocabulary, and it contains `.fixed`, `.inset-0`, `.z-50` and
+ * `.bg-background` — the dialog overlay's own utilities. So
+ * `<a href="https://evil/login" class="fixed inset-0 z-50 bg-background">Session
+ * expired</a>` sanitizes to itself and paints a full-viewport opaque phishing layer
+ * over the application, inside the SAVED report where no dialog transform clamps it.
+ * The answer is not an allow-list of class names — arbitrary values (`z-[9999]`) are
+ * inert only because Tailwind never compiled them, which is a property of our source
+ * tree rather than a policy — it is CONTAINMENT at the injection site: `TextPanel`
+ * gives the wrapper `contain: layout`, which makes it the containing block for fixed
+ * and absolute descendants and a stacking context, so `inset-0` resolves to the panel
+ * and `z-50` cannot rise above it. Keep them together: this config is only safe to
+ * allow `class` through BECAUSE that wrapper contains what it can do.
+ * (!64 review round 6, finding 4)
  */
 const SANITIZE_CONFIG: Config = {
   ADD_ATTR: ['target'],
@@ -89,6 +103,51 @@ let purifier: PurifyInstance | null = null;
  * Hence lower-cased and matched against both. (!64 review round 5, finding 4)
  */
 const TARGET_OPENS_A_WINDOW = new Set(['a', 'area']);
+
+/**
+ * Attributes the browser FETCHES from while the panel renders, rather than when the
+ * user clicks something. Measured against the installed DOMPurify — every one of these
+ * survives the config above, and the list is longer than it looks: `src` (img, video,
+ * audio, source, track), `poster` (video), `background` (table and friends, still
+ * honoured), `srcset` (img, source), and `href`/`xlink:href` on SVG `<image>`,
+ * `<feImage>` and `<use>`.
+ */
+const SUBRESOURCE_ATTRS = ['src', 'poster', 'background'] as const;
+
+/**
+ * Same-origin or `data:`, and nothing else.
+ *
+ * Everything else is a beacon: the panel author chooses the origin AND the path, so a
+ * render sends the viewer's IP and user-agent wherever they like with whatever they
+ * care to put in the query string — on the SAVED report, on every later open, from
+ * content an AI agent wrote after reading rows of the customer's own database. No
+ * malicious user is required, and no CSP downstream stops it (nginx sets only
+ * `frame-ancestors *`).
+ *
+ * Fails closed: an unparseable value is dropped rather than kept. The cost is stated
+ * plainly — a panel can no longer embed a remote image — and it is measured, not
+ * assumed: zero of the 19 text panels across the 14 shipped fixtures load any remote
+ * subresource. `<a href="https://external">` is untouched; a link is navigation the
+ * user chooses, not a fetch the page performs. (!64 review round 6, finding 4)
+ */
+function isLocalUrl(value: string): boolean {
+  try {
+    const url = new URL(value, document.baseURI);
+    return url.protocol === 'data:' || url.origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+/** A candidate list — `a.png 1x, b.png 2x`. One remote entry condemns the attribute:
+ *  a data URL containing commas defeats this parse, and a mis-parsed candidate then
+ *  fails `isLocalUrl`, which is the direction to fail in. */
+function srcsetIsLocal(value: string): boolean {
+  return value.split(',').every((candidate) => {
+    const url = candidate.trim().split(/\s+/)[0];
+    return url === '' || isLocalUrl(url);
+  });
+}
 
 /**
  * A PRIVATE DOMPurify instance, built once and kept here.
@@ -116,9 +175,27 @@ function getPurifier(): PurifyInstance {
   if (instance.isSupported) {
     instance.addHook('afterSanitizeAttributes', (node) => {
       if (!(node instanceof Element)) return;
-      if (!TARGET_OPENS_A_WINDOW.has(node.tagName.toLowerCase())) return;
-      if (node.hasAttribute('target')) {
+      const isLink = TARGET_OPENS_A_WINDOW.has(node.tagName.toLowerCase());
+
+      if (isLink && node.hasAttribute('target')) {
         node.setAttribute('rel', 'noopener noreferrer');
+      }
+
+      for (const attr of SUBRESOURCE_ATTRS) {
+        const value = node.getAttribute(attr);
+        if (value !== null && !isLocalUrl(value)) node.removeAttribute(attr);
+      }
+
+      const srcset = node.getAttribute('srcset');
+      if (srcset !== null && !srcsetIsLocal(srcset)) node.removeAttribute('srcset');
+
+      // On a LINK, `href` is navigation the user chooses and stays untouched. On
+      // anything else that survives the config — SVG `<image>`, `<feImage>`, `<use>` —
+      // it is a fetch the page performs the moment the panel paints.
+      if (isLink) return;
+      for (const attr of ['href', 'xlink:href']) {
+        const value = node.getAttribute(attr);
+        if (value !== null && !isLocalUrl(value)) node.removeAttribute(attr);
       }
     });
   }
@@ -145,23 +222,17 @@ const escapeHtml = (text: string) =>
  * output cannot execute script, navigate to a `javascript:` URL, restyle the
  * application, or collect input. It is not a claim that arbitrary HTML round-trips.
  *
- * **And one thing it deliberately does NOT stop: remote subresource loads.**
- * `<img src="https://evil.example/x.gif">` passes through untouched, and so do
- * `<video>`, `<audio>`, `<source srcset>` and `<track>` (measured; `<link>`, `<object>`
- * and `<input type="image">` do not survive). Every render of the APPLIED report then
- * beacons the viewer's IP and user-agent to that origin, with a path the author chose —
- * enough to carry a row of the customer's own data out in a query string. No malicious
- * user is needed: the agent writes the panel and reads customer rows while doing it.
- *
- * It is listed rather than blocked because blocking it means refusing `<img>`, which
- * legitimate panels use, and because a sanitizer is the wrong layer for it. The control
- * that closes it is a CSP on the DOCUMENT, which this deployment does not have: nginx
- * serves the frontend with `Content-Security-Policy: frame-ancestors *` and nothing
- * else, and the `img-src 'self' data: https:` helmet sets rides on the BACKEND's own
- * responses — it never reaches this page, and would allow any https origin if it did.
- * A follow-up worth filing, and the reason this paragraph exists in the meantime:
- * a threat model that lists only its wins is not a threat model.
- * (!64 review round 5, finding 3)
+ * **Remote subresource loads are refused, not merely documented.** Round 5 listed them
+ * as an accepted cost; round 6 was right that documenting an exposure does not close a
+ * trust boundary. `src`, `srcset`, `poster`, `background` and non-link `href` are now
+ * required to be same-origin or `data:` — see `isLocalUrl`. A CSP on the DOCUMENT would
+ * be the defence-in-depth twin, and this deployment has none (nginx sets only
+ * `frame-ancestors *`; the `img-src 'self' data: https:` helmet sets rides on the
+ * BACKEND's responses, never reaches this page, and would allow any https origin if it
+ * did) — but it cannot REPLACE this hook: a document-level `img-src 'self'` would also
+ * kill Leaflet's map tiles, which are third-party by design. The CSP has to be written
+ * with those origins allow-listed, which is an infrastructure change with its own
+ * blast radius. (!64 review rounds 5 and 6, finding 4)
  *
  * Fails CLOSED. Without a DOM (a non-browser runtime, a test outside jsdom)
  * DOMPurify cannot sanitize and reports `isSupported: false` — in that case the
