@@ -20,7 +20,8 @@ export function AppSidebar() {
    * `fixed top-0 left-0 right-0 z-50` with `width: 100vw` (AppHeader.tsx:23) — it spans
    * the WHOLE viewport, sidebar column included — and only the content column
    * compensates for it (AppLayout.tsx:47). The className lands on the sidebar's
-   * `fixed inset-y-0 z-10` container (sidebar.tsx:65), which starts at y=0, so without
+   * `fixed inset-y-0 z-10` container (sidebar.tsx:193, class string :195, className merged
+   * in at :203), which starts at y=0, so without
    * the offset the sidebar's top 56px sit UNDERNEATH the header: measured, the Home
    * link's own centre returned the header's <h1> from elementFromPoint. It was invisible
    * and unclickable.

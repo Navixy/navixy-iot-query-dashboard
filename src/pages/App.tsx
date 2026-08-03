@@ -36,7 +36,12 @@ const WIZARD_OPTIONS = [
       'Saved into an "AI Dashboards" section in your sidebar',
     ],
     cta: 'Start chatting',
-    variant: 'default' as const,
+    // NOT DO-288's 'default'. This repo's Button is hand-written, not stock shadcn:
+    // VARIANT_STYLES (button.tsx:28-32) is a Partial<> holding only primary/secondary/ghost,
+    // so 'default' — which IS in the ButtonVariant union (:11-17), widened so the shadcn
+    // calendar/pagination primitives typecheck — resolves to `undefined` and paints NO
+    // background at all. Partial<> is exactly why typecheck stayed green. (!65 review)
+    variant: 'primary' as const,
   },
 ];
 
@@ -75,7 +80,13 @@ const AppPage = () => {
     <AppLayout>
       <div className="mx-auto max-w-5xl py-4 md:py-10">
         <div className="text-center space-y-3 mb-10">
-          <div className="inline-flex items-center gap-2 rounded-full bg-accent/10 px-4 py-1.5 text-sm font-medium text-accent">
+          {/* bg-accent-soft, NOT DO-288's bg-accent/10: `accent` resolves to the bare string
+              `var(--accent)` (tailwind.config.ts:57-58) and `--accent` is an opaque hex
+              (tokens.css:188), which Tailwind's withAlphaValue cannot decompose — so the
+              opacity candidate is DROPPED SILENTLY, no CSS and no build error, and the pill
+              renders with no fill. `--accent-soft` exists for exactly this (MenuEditor.tsx:234).
+              Same silent-drop family as the GRID_CLASS warning above. (!65 review) */}
+          <div className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-4 py-1.5 text-sm font-medium text-accent">
             <LayoutGrid className="h-4 w-4" />
             Get started
           </div>
@@ -93,7 +104,7 @@ const AppPage = () => {
             return (
               <Card
                 key={option.path}
-                className="group relative border-2 transition-all hover:border-accent/50 hover:shadow-lg"
+                className="group relative border-2 transition-all hover:border-accent hover:shadow-lg"
               >
                 <CardHeader className="space-y-4 pb-4">
                   <div className="flex items-start gap-4">
@@ -101,11 +112,17 @@ const AppPage = () => {
                       <Icon className="h-7 w-7" />
                     </div>
                     <div className="space-y-1 min-w-0">
-                      <CardTitle className="text-2xl">{option.title}</CardTitle>
+                      {/* `!` on the size overrides, and text-text-secondary rather than the
+                          arbitrary form, because card.tsx composes with clsx — NOT cn/twMerge —
+                          so nothing de-duplicates conflicting utilities and raw CSS source order
+                          decides. CardTitle's own text-lg and CardDescription's text-sm /
+                          text-muted-foreground are all emitted AFTER these, and silently won.
+                          Same reason MenuEditor.tsx:128 uses !h-6 !w-6 !p-0. (!65 review) */}
+                      <CardTitle className="!text-2xl">{option.title}</CardTitle>
                       <p className="text-sm font-medium text-accent">{option.tagline}</p>
                     </div>
                   </div>
-                  <CardDescription className="text-base leading-relaxed text-[var(--text-secondary)]">
+                  <CardDescription className="!text-base leading-relaxed text-text-secondary">
                     {option.description}
                   </CardDescription>
                 </CardHeader>
@@ -122,10 +139,14 @@ const AppPage = () => {
                       </li>
                     ))}
                   </ul>
+                  {/* `size` is accepted but NEVER applied by this Button (button.tsx:43
+                      destructures it as `_size`), and BASE's `h-9 … text-sm` is composed with
+                      clsx, so the page's own h-12/text-base lost on source order. The `!`
+                      prefix makes the intended size actually apply and is order-independent. */}
                   <Button
                     size="lg"
                     variant={option.variant}
-                    className="w-full h-12 text-base group-hover:shadow-md"
+                    className="w-full !h-12 !text-base group-hover:shadow-md"
                     onClick={() => navigate(option.path)}
                   >
                     {option.cta}
