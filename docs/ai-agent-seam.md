@@ -135,9 +135,11 @@ AWS_REGION=eu-central-1
    mistake even against S3.
 4. **ALB idle timeout ≥ `AGENT_TIMEOUT_MS`.** AWS's default is 60 s; `nginx.ecs.conf` has no `/api`
    location (its four are `/nginx-health`, the static-asset pattern, `= /index.html` and `/` —
-   `:31`, `:39`, `:49`, `:60`), so the ALB is the deciding hop. Builds were measured at 35.8 s
-   (**n=1 build turn**), so a 60 s default *probably* survives — raise it to ≥ 180 s and stop
-   thinking about it.
+   `:31`, `:39`, `:49`, `:60`), so the ALB is the deciding hop. Builds were measured at 35.8 s and
+   24.1 s (**n=2 build turns**), so a 60 s default *probably* survives — raise it to ≥ 180 s and
+   stop thinking about it. Note the whole *conversation* is far longer than one turn (four turns
+   before a build, in the one interview measured end to end), but each turn is its own request, so
+   the idle timeout only ever has to cover the slowest single turn.
 5. **The two deadline numbers do different jobs, and only one is a guarantee.**
    - `ctx.signal = AbortSignal.timeout(AGENT_TIMEOUT_MS)`, default 180 s, is minted by the route
      (`routes/agent.ts:39`, `:286`) and forwarded verbatim to both the Bedrock invoke and the S3
@@ -166,10 +168,17 @@ store **and the frontend** are all unaffected (`services/agent/index.ts:30-42`).
 **This question is closed.** It was carried for months as "the unresolved contradiction"; it exits
 at (a): **no streaming, keep the 180 s deadline.**
 
-Measured (**n=1 build turn, n=2 interview turns**): a build turn took **35.8 s**; interview turns
-took **8.0 s** and **6.6 s**. The agent's author, asked directly, confirmed that is the expected
-range. The design doc's 5–30 s figure and a reference implementation's ~50 s action group were both
-measuring something other than this agent.
+Measured across two sessions (**n=2 build turns, n=4 interview turns**): builds took **35.8 s**
+(2026-07-20) and **24.1 s** (2026-08-03); interview turns took **8.0**, **6.6**, **8.3** and
+**14.3 s**. The agent's author, asked directly, confirmed that is the expected range. The design
+doc's 5–30 s figure and a reference implementation's ~50 s action group were both measuring
+something other than this agent.
+
+**What is longer than the plan assumed is the interview, not the turn.** The one conversation
+measured end to end took **four turns** to reach a build, including an explicit *"here's the plan —
+shall I go ahead and build this?"* confirmation step. Every turn is a separate request against a
+separate deadline, so this costs nothing in timeout budget — but any UI or expectation built around
+"one prompt, one dashboard" is wrong, and the composer stays locked for the duration of each turn.
 
 **The answer arrives as one chunk at the very end** — 17 trace events, one action group spanning
 ~23 s, one chunk. There is therefore no incremental token stream to relay and streaming would buy
@@ -339,10 +348,23 @@ introspecting the tenant's `information_schema` on every validation call. `valid
 **Neither knows what columns exist.** The only thing that knows is the database, and the only way to
 ask is to execute.
 
-**The evidence got stronger, not weaker.** A second live build of the same prompt (2026-07-30)
-hallucinated a column in **both** of its SQL panels — `o.employee_id` and `t.driver_id` — verified
-by executing the preview against the real `iotDbUrl`. That is **n=2 prompts**. Do not quote a rate
-from it; do not conclude it is rare.
+**The evidence has got stronger every time anyone has looked.** A second live build of the same
+prompt (2026-07-30) hallucinated a column in **both** of its SQL panels — `o.employee_id` and
+`t.driver_id`. A third (2026-08-03, `AGENT_BACKEND=bedrock`, four-turn interview, artifact fetched
+in 187 ms) produced **the same two columns again**, and the preview reported
+*"0 of 2 panels loaded. 2 panels failed"*: every SQL panel in that dashboard was dead.
+
+**That is three prompts out of three, and five of five SQL panels across the two builds with
+panel-level data.** Both of the failing statements passed `validateSQLQuerySafe` and
+`validateDashboard` in every run.
+
+**Still do not quote this as a rate** — three prompts is three prompts, and all three were the same
+request on the same topic, which is exactly the condition under which a repeated failure tells you
+least about the population. What it does establish, and what a single observation did not, is that
+this is **reproducible rather than incidental**, and that it recurs on the *same identifiers*
+(`o.employee_id`, `t.driver_id`) — i.e. it looks like the agent's schema grounding being wrong about
+driver identity, not like sampling noise. That is a concrete, reportable bug for the agent's author,
+and it is the strongest argument in this document for why the preview gate exists.
 
 ### Preview-before-Apply is the safety mechanism, and it must not be made skippable
 
@@ -511,14 +533,21 @@ Recorded so it is not re-proposed as an oversight, and not re-scoped as a bug.
 
 | Claim | n |
 |---|---|
-| Build turn 35.8 s; one chunk at the end; 17 trace events | 1 build turn |
-| Interview turns 8.0 s / 6.6 s | 2 interview turns |
-| Artifact 5385 bytes in 235 ms | 1 fetch |
-| Bedrock is stateful (dropped a question it had been told) | 2 turns, 1 session |
-| 3 of 3 agent SQL statements passed the guard | 3 statements, 1 prompt, 1 topic |
-| Hallucinated column reaching execution | 2 prompts (1 of 3 panels, then 2 of 2) |
+| Build turn 35.8 s (probe) / 24.1 s (2026-08-03); one chunk at the end; 17 trace events | 2 build turns |
+| Interview turns 8.0 / 6.6 s (probe); 8.3 / 14.3 s (2026-08-03) | 4 interview turns |
+| Artifact 5385 bytes in 235 ms; 4675 bytes in 187 ms | 2 fetches |
+| Bedrock is stateful (dropped a question it had been told; later retained metric + time range across a 4-turn interview) | 2 sessions |
+| Interview length before a build | 2 turns (probe) / **4 turns incl. an explicit "shall I build this?" confirmation** (2026-08-03) |
+| Agent SQL passing the guard *and* `validateDashboard` | 5 of 5 statements — **and 3 of those 5 still failed at the database** |
+| Hallucinated column reaching execution | **3 prompts of 3**: 1 of 3 panels, then 2 of 2, then 2 of 2 — the last two on the *same* identifiers (`o.employee_id`, `t.driver_id`) |
 | Corpus SQL executing against the live `iotDbUrl` | 49 of 49 statements |
 | Repo-wide fixture SQL executing | 209 of 214 statements (97.7 %) |
+
+**One number here is not like the others.** Every row above except the hallucination row is a
+*latency or capacity* measurement, where a small `n` mostly means the value will drift. The
+hallucination row is a *correctness* measurement, and there three-for-three means something
+different: it is no longer plausible that a maintainer will try this feature and not hit it. Read
+the rest of this table as "provisional"; read that row as "expect it".
 
 **Nothing above is a rate.** p99 latency, guard pass rate beyond three statements, hallucination
 rate, behaviour on topics other than vehicle mileage, behaviour in a long (10+ turn) session, and
