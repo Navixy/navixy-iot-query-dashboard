@@ -18,7 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement, useEffect } from 'react';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
 import type { AgentChatResult } from '@/types/agent';
 
@@ -56,12 +56,16 @@ const result: AgentChatResult = {
 
 const globals = [{ label: 'fleet_id', value: '42' }];
 
-function mount(over: Partial<{ result: AgentChatResult }> = {}) {
+function mount(over: Partial<{
+  result: AgentChatResult;
+  onPreviewComplete: (status: PanelLoadStatus) => void;
+}> = {}) {
   return render(createElement(PreviewDialog, {
     result: over.result ?? result,
     open: true,
     onOpenChange: () => {},
     nonce: 1,
+    ...(over.onPreviewComplete ? { onPreviewComplete: over.onPreviewComplete } : {}),
   }));
 }
 
@@ -107,16 +111,8 @@ describe('PreviewDialog', () => {
     expect(rendererProps.calls.at(-1)?.globalVariables).toEqual(globals);
   });
 
-  it('still previews when the globals cannot be read, exactly as the report view does', async () => {
-    getGlobalVariables.mockRejectedValue(new Error('offline'));
-    mount();
-
-    await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
-    expect(rendererProps.calls.at(-1)?.globalVariables).toEqual([]);
-  });
-
-  it('tolerates a payload that is not an array', async () => {
-    getGlobalVariables.mockResolvedValue({ data: undefined });
+  it('treats a successful empty list as globals, because that is what it is', async () => {
+    getGlobalVariables.mockResolvedValue({ data: [] });
     mount();
 
     await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
@@ -154,6 +150,114 @@ describe('PreviewDialog', () => {
 });
 
 /**
+ * A preview that could not run in the user's context has not previewed anything.
+ *
+ * This used to collapse a rejection, an `error` payload and a wrong-shaped body into
+ * `[]` and carry on — copying ReportView's fail-silent shape, which is right for a page
+ * that RENDERS a report and wrong for a dialog that makes a CLAIM about one. ReportView
+ * re-reads globals after Apply and can succeed, so the applied dashboard would bind
+ * values this preview never saw. (!64 review round 6, finding 2)
+ */
+describe('PreviewDialog — when the globals cannot be read', () => {
+  const failures: Array<[string, () => void]> = [
+    ['the request rejects', () => getGlobalVariables.mockRejectedValue(new Error('offline'))],
+    // The API client reports failure in the BODY, not by rejecting — so this path
+    // resolved, and `data` being undefined then read as "no globals".
+    ['the response carries an error', () =>
+      getGlobalVariables.mockResolvedValue({ error: { code: 'DB', message: 'down' } })],
+    ['the payload is not a list', () => getGlobalVariables.mockResolvedValue({ data: undefined })],
+  ];
+
+  for (const [name, arrange] of failures) {
+    it(`executes nothing and says so when ${name}`, async () => {
+      arrange();
+      mount();
+
+      await waitFor(() => {
+        expect(screen.getByText(/global variables could not be read/i)).toBeTruthy();
+      });
+      // The important half: no renderer, so not one statement ran.
+      expect(screen.queryByTestId('renderer')).toBeNull();
+      expect(rendererProps.calls).toHaveLength(0);
+      // ...and no banner beside the message to contradict it with a panel count.
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+  }
+
+  it('never reports a preview as complete, so Apply stays locked', async () => {
+    const onPreviewComplete = vi.fn();
+    getGlobalVariables.mockRejectedValue(new Error('offline'));
+    mount({ onPreviewComplete });
+
+    await waitFor(() => {
+      expect(screen.getByText(/global variables could not be read/i)).toBeTruthy();
+    });
+    expect(onPreviewComplete).not.toHaveBeenCalled();
+  });
+
+  it('retries in place, because the alternative is reopening the dialog', async () => {
+    getGlobalVariables.mockRejectedValueOnce(new Error('offline'));
+    mount();
+    await waitFor(() => {
+      expect(screen.getByText(/global variables could not be read/i)).toBeTruthy();
+    });
+
+    getGlobalVariables.mockResolvedValue({ data: globals });
+    fireEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+    await waitFor(() => expect(screen.queryByTestId('renderer')).not.toBeNull());
+    expect(rendererProps.calls.at(-1)?.globalVariables).toEqual(globals);
+    expect(screen.queryByText(/global variables could not be read/i)).toBeNull();
+  });
+});
+
+/**
+ * What unlocks Apply. The dialog is the feature's only correctness control (R27), so
+ * "the preview finished" has to mean the dashboard was EXECUTED — not that the dialog
+ * was opened. (!64 review round 6, finding 1)
+ */
+describe('PreviewDialog — reporting a finished preview', () => {
+  it('reports the terminal status, and not the pending ones before it', async () => {
+    const onPreviewComplete = vi.fn();
+    rendererProps.status = { total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 };
+    mount({ onPreviewComplete });
+
+    await waitFor(() => expect(onPreviewComplete).toHaveBeenCalledTimes(1));
+    expect(onPreviewComplete).toHaveBeenCalledWith(
+      { total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
+  });
+
+  it('stays silent while panels are still executing', async () => {
+    const onPreviewComplete = vi.fn();
+    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3, unverifiable: 0 };
+    mount({ onPreviewComplete });
+
+    await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
+    expect(onPreviewComplete).not.toHaveBeenCalled();
+  });
+
+  it('reports a dashboard whose panels all failed — an execution IS evidence', async () => {
+    // Failed panels do not block Apply; the user may save 9 of 10 and fix the last in
+    // the layout editor. What the gate requires is that the execution happened.
+    const onPreviewComplete = vi.fn();
+    rendererProps.status = { total: 2, loaded: 0, failed: 2, pending: 0, unverifiable: 0 };
+    mount({ onPreviewComplete });
+
+    await waitFor(() => expect(onPreviewComplete).toHaveBeenCalledTimes(1));
+  });
+
+  it('never reports when the schema could not be read as a dashboard', async () => {
+    const onPreviewComplete = vi.fn();
+    mount({ result: { title: 'Broken', report_schema: { nope: true } }, onPreviewComplete });
+
+    await waitFor(() => {
+      expect(screen.getByText(/could not be read as a dashboard/i)).toBeTruthy();
+    });
+    expect(onPreviewComplete).not.toHaveBeenCalled();
+  });
+});
+
+/**
  * The banner is the reason this dialog exists: a preview the user does not read as
  * "one of these panels is broken" is a preview that did not do its job. Deleting
  * `onPanelStatusChange={handleStatus}` left every other test in the repo green while
@@ -176,7 +280,7 @@ describe('PreviewDialog — the panel banner', () => {
   });
 
   it('names the failure count, and marks it, when a panel does not load', async () => {
-    await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0 });
+    await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
 
     expect(banner().textContent)
       .toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
@@ -184,14 +288,14 @@ describe('PreviewDialog — the panel banner', () => {
   });
 
   it('pluralises the failures, since "1 panel failed" about three is a lie', async () => {
-    await withStatus({ total: 5, loaded: 2, failed: 3, pending: 0 });
+    await withStatus({ total: 5, loaded: 2, failed: 3, pending: 0, unverifiable: 0 });
 
     expect(banner().textContent)
       .toBe('2 of 5 panels loaded. 3 panels failed — check them before applying.');
   });
 
   it('says everything loaded, without the destructive treatment', async () => {
-    await withStatus({ total: 11, loaded: 11, failed: 0, pending: 0 });
+    await withStatus({ total: 11, loaded: 11, failed: 0, pending: 0, unverifiable: 0 });
 
     expect(banner().textContent).toBe('All 11 panels loaded.');
     expect(bannerRow().className).not.toContain('text-destructive');
@@ -201,7 +305,7 @@ describe('PreviewDialog — the panel banner', () => {
     // Every agent dashboard ships a text panel, so the raw schema count and the count
     // of panels that run SQL always differ. The header used to print both, two lines
     // apart: "3 panels, previewed against your data." above "All 2 panels loaded."
-    rendererProps.status = { total: 2, loaded: 2, failed: 0, pending: 0 };
+    rendererProps.status = { total: 2, loaded: 2, failed: 0, pending: 0, unverifiable: 0 };
     mount({
       result: {
         title: 'T',
@@ -217,7 +321,7 @@ describe('PreviewDialog — the panel banner', () => {
   });
 
   it('counts down while panels are still executing', async () => {
-    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3 };
+    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3, unverifiable: 0 };
     mount();
 
     await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
@@ -227,7 +331,7 @@ describe('PreviewDialog — the panel banner', () => {
     // Panels execute sequentially, so the visible sentence changes once per panel.
     // A live region carrying it reads "Loading 11 panels…", "Loading 10 panels…",
     // eleven times over. (!64 review round 4, finding 9)
-    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3 };
+    rendererProps.status = { total: 4, loaded: 1, failed: 0, pending: 3, unverifiable: 0 };
     mount();
 
     await waitFor(() => expect(banner().textContent).toBe('Loading 3 panels…'));
@@ -237,7 +341,7 @@ describe('PreviewDialog — the panel banner', () => {
   it('announces the terminal state through a region that was there all along', async () => {
     // A region only added — or only made polite — at the moment its text changes is
     // not reliably read out.
-    await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0 });
+    await withStatus({ total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
 
     expect(announced()).toBe('1 of 2 panels loaded. 1 panel failed — check it before applying.');
   });

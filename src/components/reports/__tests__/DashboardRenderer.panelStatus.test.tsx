@@ -128,26 +128,30 @@ describe('DashboardRenderer → onPanelStatusChange', () => {
   it('reaches a terminal count that separates the panel that loaded from the one that failed', async () => {
     const seen = mount([sqlPanel(1, 'SELECT 1 AS a'), sqlPanel(2, 'SELECT nope FROM t')]);
 
-    expect(await settled(seen)).toEqual({ total: 2, loaded: 1, failed: 1, pending: 0 });
+    expect(await settled(seen)).toEqual({ total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
   });
 
   it('starts by reporting every SQL panel as pending, so the banner can say so', async () => {
     const seen = mount([sqlPanel(1, 'SELECT 1 AS a')]);
 
-    expect(seen[0]).toEqual({ total: 1, loaded: 0, failed: 0, pending: 1 });
+    expect(seen[0]).toEqual({ total: 1, loaded: 0, failed: 0, pending: 1, unverifiable: 0 });
     await settled(seen);
   });
 
   it('counts only the panels the query loop actually executes', async () => {
-    // The text panel every agent dashboard ships, plus a panel with no statement:
-    // neither is queried, so neither may appear in a count the banner reports.
+    // The text panel every agent dashboard ships, plus a panel with no statement.
+    // Neither is queried — but only the text panel may vanish from the banner's
+    // numbers, because only the text panel is doing what it is supposed to do.
     const seen = mount([
       textPanel(9),
       { id: 8, type: 'table', title: 'No SQL', gridPos: { x: 0, y: 0, w: 12, h: 6 } },
       sqlPanel(1, 'SELECT 1 AS a'),
     ]);
 
-    expect(await settled(seen)).toEqual({ total: 1, loaded: 1, failed: 0, pending: 0 });
+    // The statement-less panel is REPORTED, not dropped: it renders a "No SQL
+    // configured" placeholder and Apply would save it. (round 6, finding 3)
+    expect(await settled(seen))
+      .toEqual({ total: 1, loaded: 1, failed: 0, pending: 0, unverifiable: 1 });
     // ...and the loop agrees: nothing but the one statement was ever sent.
     for (const [body] of executeSQL.mock.calls) {
       expect((body as { sql: string }).sql).toBe('SELECT 1 AS a');
@@ -157,7 +161,7 @@ describe('DashboardRenderer → onPanelStatusChange', () => {
   it('reports every panel failing when every query does', async () => {
     const seen = mount([sqlPanel(1, 'SELECT nope FROM a'), sqlPanel(2, 'SELECT nope FROM b')]);
 
-    expect(await settled(seen)).toEqual({ total: 2, loaded: 0, failed: 2, pending: 0 });
+    expect(await settled(seen)).toEqual({ total: 2, loaded: 0, failed: 2, pending: 0, unverifiable: 0 });
   });
 });
 

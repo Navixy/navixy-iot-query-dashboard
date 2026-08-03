@@ -35,6 +35,20 @@ export interface PanelLoadStatus {
   /** Panels still loading or refreshing. `total - loaded - failed` is not reliable
    *  mid-refresh, when a panel can hold stale data AND be refreshing. */
   pending: number;
+  /**
+   * Non-text panels the query loop will NEVER execute, and which therefore cannot be
+   * counted, failed or waited for — but which a saved dashboard still contains.
+   *
+   * Two sources, both of which used to make a panel vanish from every number here:
+   * a **blank or absent statement** (the backend validator passes it as a warning, and
+   * the renderer paints "No SQL configured"), and a **collapsed row's children**, which
+   * live in `row.panels[]` rather than the top-level list the loop walks.
+   *
+   * They are separated from `failed` because they are not failures — nothing was tried.
+   * They must not fold into `pending` either: nothing is coming, so a consumer that
+   * waits on `pending === 0` would wait forever. (!64 review round 6, finding 3)
+   */
+  unverifiable: number;
 }
 
 /**
@@ -51,10 +65,16 @@ export interface PanelLoadStatus {
  * was not. `canonicalizeRows` does not hoist row children up into it. An EXPANDED
  * row's children were always top-level in the Grafana shape (it empties `row.panels`
  * to match), and a COLLAPSED row's children are moved the other way — down into
- * `row.panels[]` and out of the top-level list. So a collapsed row's children are
- * neither counted here nor queried there, which is the same answer on both sides.
- * Row headers are `type: 'row'` and carry no SQL, so the `hasSql` guard excludes them
- * without a special case. (!64 review round 4, finding 7)
+ * `row.panels[]` and out of the top-level list. (!64 review round 4, finding 7)
+ *
+ * **"The same answer on both sides" is not good enough, which round 4 missed.** Agreeing
+ * with the query loop makes the count HONEST about what ran; it does not make the
+ * PREVIEW honest, because the preview is a claim about the dashboard that will be
+ * SAVED — and a collapsed row's children are saved. Counting them as `unverifiable` is
+ * what stops "All 3 panels loaded." being said over two statements nobody executed.
+ * `toPreviewDashboard` expands rows before mounting, so that arm should be unreachable
+ * from the preview; it is counted anyway, because the day it is not is the day the
+ * banner would go back to lying silently. (!64 review round 6, finding 3)
  */
 export function computePanelLoadStatus(
   panels: Panel[],
@@ -64,12 +84,33 @@ export function computePanelLoadStatus(
   let loaded = 0;
   let failed = 0;
   let pending = 0;
+  let unverifiable = 0;
 
   panels.forEach((panel) => {
+    if (panel.type === 'row') {
+      // Row HEADERS carry no SQL and are not panels in this sense. Their children are:
+      // present here only while the row is collapsed, and never executed.
+      (panel.panels ?? []).forEach((child) => {
+        if (child.type === 'row' || child.type === 'text') return;
+        unverifiable += 1;
+      });
+      return;
+    }
+    if (panel.type === 'text') return;
+
     const navixyConfig = panel['x-navixy'];
     const hasSql = !!navixyConfig?.sql?.statement?.trim();
-    // The same predicate the renderer's query loop uses to decide what to execute.
-    if (panel.type === 'text' || !hasSql) return;
+    // The same predicate the renderer's query loop uses to decide what to execute —
+    // but a data panel it declines to run is now COUNTED rather than dropped. Fixture
+    // 05 ships a "New barchart" with `"statement": ""`, the backend validator passes it
+    // as a warning, and it renders as a "No SQL configured" placeholder. Excluding it
+    // turned a dashboard whose only data panel was blank into "This dashboard has no
+    // data panels." — a sentence about the preview, read as a sentence about the
+    // dashboard being saved.
+    if (!hasSql) {
+      unverifiable += 1;
+      return;
+    }
     total += 1;
 
     const state = panelData[String(panel.id)];
@@ -90,5 +131,5 @@ export function computePanelLoadStatus(
     else pending += 1;
   });
 
-  return { total, loaded, failed, pending };
+  return { total, loaded, failed, pending, unverifiable };
 }
