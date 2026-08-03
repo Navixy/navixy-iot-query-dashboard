@@ -1,8 +1,9 @@
 import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { clsx } from 'clsx';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { useAuth } from '@/contexts/AuthContext';
-import { Button } from '@/components/ui/button';
+import { buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ArrowRight, LayoutGrid, MessageSquareText } from 'lucide-react';
 
@@ -122,7 +123,7 @@ const AppPage = () => {
                       <p className="text-sm font-medium text-accent">{option.tagline}</p>
                     </div>
                   </div>
-                  <CardDescription className="!text-base leading-relaxed text-text-secondary">
+                  <CardDescription className="!text-base leading-relaxed !text-text-secondary">
                     {option.description}
                   </CardDescription>
                 </CardHeader>
@@ -131,7 +132,10 @@ const AppPage = () => {
                     <span className="font-medium text-foreground">Best for:</span>{' '}
                     {option.bestFor}
                   </p>
-                  <ul className="space-y-2 text-sm text-[var(--text-secondary)]">
+                  {/* Token class, not the arbitrary `text-[var(--text-secondary)]` form, matching
+                      the description above. No `!` here: nothing on this element competes, and an
+                      unnecessary important would imply a conflict that does not exist. */}
+                  <ul className="space-y-2 text-sm text-text-secondary">
                     {option.highlights.map((item) => (
                       <li key={item} className="flex gap-2">
                         <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
@@ -139,19 +143,33 @@ const AppPage = () => {
                       </li>
                     ))}
                   </ul>
-                  {/* `size` is accepted but NEVER applied by this Button (button.tsx:43
-                      destructures it as `_size`), and BASE's `h-9 … text-sm` is composed with
-                      clsx, so the page's own h-12/text-base lost on source order. The `!`
-                      prefix makes the intended size actually apply and is order-independent. */}
-                  <Button
-                    size="lg"
-                    variant={option.variant}
-                    className="w-full !h-12 !text-base group-hover:shadow-md"
-                    onClick={() => navigate(option.path)}
+                  {/* A REAL ANCHOR, not a Button with a navigate() handler — the same rule the
+                      sidebar Home item follows, and for the same reason: cmd-click and
+                      middle-click must open a new tab. This is the only route into the feature,
+                      so it is the last control that should swallow them. (!65 review round 2)
+
+                      Why not `<Button asChild>`: this repo's Button has no Slot, and a <button>
+                      inside an <a> is invalid HTML. `buttonVariants()` is exported at
+                      button.tsx:35 for exactly this case — "class string for button-styled
+                      non-<button> elements". clsx, not cn, so the emitted string is identical to
+                      what <Button> composed before; only the element changed.
+
+                      `justify-center` is NEW and load-bearing: BASE brings `inline-flex
+                      items-center` but no justification, and a <button> centred its content via
+                      the UA stylesheet's text-align. An <a> does not.
+
+                      The `!` prefixes stay: BASE's `h-9 … text-sm` is composed with clsx, which
+                      de-duplicates nothing, so without them source order decides and BASE wins. */}
+                  <Link
+                    to={option.path}
+                    className={clsx(
+                      buttonVariants({ variant: option.variant }),
+                      'w-full justify-center !h-12 !text-base group-hover:shadow-md',
+                    )}
                   >
                     {option.cta}
                     <ArrowRight className="ml-2 h-5 w-5 transition-transform group-hover:translate-x-0.5" />
-                  </Button>
+                  </Link>
                 </CardContent>
               </Card>
             );

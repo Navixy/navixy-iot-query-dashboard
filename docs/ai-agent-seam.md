@@ -126,7 +126,8 @@ so the AWS variables go in `.env.docker` and nothing in compose has to change.
    `backend/.env` into `process.env` as the first import of `index.ts` (`backend/src/index.ts:1-2`),
    before any SDK call. In production omit both and the chain falls through to the ECS/EC2 task
    role: no keys on disk, auto-rotating.
-   - **Do not copy `ai-chat-plan.local/probe/probe.mjs`**, which does pass an explicit credentials
+   - **Do not copy `ai-chat-plan.local/probe/probe.mjs`** (a local, git-ignored scratch script —
+     not in the repository), which does pass an explicit credentials
      block. It hand-parses `backend/.env` into a local object and never populates `process.env`; it
      is a standalone script, not the app. The comment at `bedrockAgent.ts:80-83` says so at the
      site.
@@ -431,8 +432,10 @@ house convention, three pre-existing instances of it at `services/database.ts:52
 > Those three line numbers had drifted to `:610` / `:667` / `:730` in earlier source material, and
 > the same stale trio is quoted in `chatStore.ts:27-29`'s own header comment. Re-derive with
 > `grep -n "information_schema" backend/src/services/database.ts`; the comment is a comment, and
-> nothing reads it. **Chat works on every tenant; the pieces below only turn on where they have
-been applied.** Nothing here can 500.
+> nothing reads it.
+
+**Chat works on every tenant; the pieces below only turn on where they have been applied.** Nothing
+here can 500.
 
 Apply **in order**, out of band (DBA / deploy), against each tenant's `userDbUrl`:
 

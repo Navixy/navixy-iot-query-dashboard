@@ -16,7 +16,7 @@ export function AppSidebar() {
   const { pathname } = useLocation();
 
   /*
-   * pt-[--app-header-height] on <Sidebar> is load-bearing, not cosmetic. AppHeader is
+   * pt-[var(--app-header-height)] on <Sidebar> is load-bearing, not cosmetic. AppHeader is
    * `fixed top-0 left-0 right-0 z-50` with `width: 100vw` (AppHeader.tsx:23) — it spans
    * the WHOLE viewport, sidebar column included — and only the content column
    * compensates for it (AppLayout.tsx:47). The className lands on the sidebar's
@@ -29,6 +29,12 @@ export function AppSidebar() {
    * This was already true before this commit — MenuEditor's first rows rendered under the
    * header and had to be scrolled into view — but a pinned affordance cannot be scrolled
    * into view, so the pre-existing quirk had to be fixed rather than inherited.
+   *
+   * DESKTOP ONLY, and that is fine. Below `md` the Sidebar takes its mobile branch
+   * (sidebar.tsx:153-171), which renders a Sheet with a hardcoded className and never
+   * forwards this one — so the offset is simply dropped. Harmless: the Sheet is portalled
+   * and paints above the header, so nothing is occluded. Mobile is out of scope for this
+   * feature either way (docs/ai-agent-seam.md §10).
    */
   return (
     <Sidebar variant="inset" className="pt-[var(--app-header-height)]">
@@ -56,7 +62,9 @@ export function AppSidebar() {
               isActive={pathname === '/app'}
               tooltip="Home"
             >
-              <Link to="/app">
+              {/* aria-current: isActive only yields data-active, which is styling. Assistive
+                  tech needs the semantic signal too. */}
+              <Link to="/app" aria-current={pathname === '/app' ? 'page' : undefined}>
                 <Home className="h-4 w-4 flex-shrink-0" />
                 <span>Home</span>
               </Link>
