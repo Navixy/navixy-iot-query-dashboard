@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCreateReportMutation } from '@/hooks/use-menu-mutations';
 import { useEditorStore } from '@/layout/state/editorStore';
+import type { PanelLoadStatus } from '@/components/reports/panelLoadStatus';
 import type { AgentChatResult } from '@/types/agent';
 import { applyDashboard } from './applyDashboard';
 import { PreviewDialog } from './PreviewDialog';
@@ -44,11 +45,50 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
   const [isApplying, setIsApplying] = useState(false);
 
   // The SCHEMA that has been previewed to completion, not a boolean: a card can be
-  // reused for a different result (the transcript keys bubbles positionally), and an
+  // reused for a different result — `turnToBubble` mints `history-${index}` ids, so a
+  // rehydration that shifts the list hands the same key a different turn — and an
   // "already previewed" flag would carry over and unlock Apply for a dashboard nobody
   // has executed. Comparing identity makes a stale preview worth nothing.
   const [previewedSchema, setPreviewedSchema] = useState<unknown>(null);
   const previewCompleted = previewedSchema === result.report_schema;
+
+  // ...but comparing identity was NOT enough on its own, because the completion could
+  // write the new schema on the old schema's evidence.
+  //
+  // A mounted DashboardRenderer re-emits its CURRENT status whenever the identity of
+  // `onPanelStatusChange` changes (it is in that effect's deps). So when this card was
+  // handed a different result while a preview was open, the renderer — still holding
+  // the previous dashboard, its panelData still terminal — emitted that terminal status
+  // again, and a completion handler closing over the NEW `result` recorded the new
+  // schema as previewed. Worse with agent output than it sounds: artifacts number their
+  // panels 1..N, so the new dashboard's panels find the old dashboard's data by id and
+  // the count looks terminal rather than empty.
+  //
+  // The run is therefore INVALIDATED here, in the same render that sees the new schema,
+  // before any effect can fire: the nonce remounts the renderer (its fresh state counts
+  // every panel as pending) and any completion recorded for the old schema is dropped.
+  // React's documented "adjust state when props change" pattern — it re-renders
+  // immediately, so no committed frame ever shows the stale unlock.
+  // (!64 review round 7, finding 1)
+  const [runSchema, setRunSchema] = useState<unknown>(result.report_schema);
+  if (runSchema !== result.report_schema) {
+    setRunSchema(result.report_schema);
+    setPreviewNonce((n) => n + 1);
+    setPreviewedSchema(null);
+  }
+
+  // Verified rather than assumed, and stable across every render that is NOT a schema
+  // change — which is the contract PreviewDialog's `handleStatus` documents and an
+  // inline arrow quietly broke, re-firing the renderer's status effect on every render
+  // of this card.
+  // `_status` is named and unused deliberately: dropping it makes this take the STATUS
+  // as its first argument, which TypeScript accepts without a murmur (a function of
+  // fewer parameters is assignable) and which silently compares a status object against
+  // a schema, so the gate never opens. Caught by the integration test below, in seconds.
+  const handlePreviewComplete = useCallback((_status: PanelLoadStatus, schema: unknown) => {
+    if (schema !== result.report_schema) return;
+    setPreviewedSchema(schema);
+  }, [result.report_schema]);
 
   // The role is read here for the REASON (a viewer needs different copy from an
   // unresolved session); `canApply` is AiChat's single D15 computation of the same
@@ -149,8 +189,9 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
         // against the user's data and the result was on screen. The dialog fires this
         // on a terminal status and on nothing else, so closing the preview mid-run,
         // an unreadable schema and unreadable globals all leave Apply where it was.
-        // (!64 review round 6, finding 1)
-        onPreviewComplete={() => setPreviewedSchema(result.report_schema)}
+        // It reports WHICH schema the run belongs to; the handler above checks it.
+        // (!64 review round 6, finding 1; round 7, finding 1)
+        onPreviewComplete={handlePreviewComplete}
       />
     </div>
   );

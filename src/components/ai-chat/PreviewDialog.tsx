@@ -39,8 +39,13 @@ interface PreviewDialogProps {
    * end without proving anything all resolve to "never fired": the schema could not be
    * read (no renderer mounts), the globals could not be read (no renderer mounts), or
    * the user closed the dialog mid-execution. (!64 review round 6, finding 1)
+   *
+   * It carries the `report_schema` the run belongs to, because "a preview finished" is
+   * not a useful fact on its own — the caller has to know WHICH dashboard finished, and
+   * cannot infer it from its own props at the moment the call arrives.
+   * (!64 review round 7, finding 1)
    */
-  onPreviewComplete?: (status: PanelLoadStatus) => void;
+  onPreviewComplete?: (status: PanelLoadStatus, schema: unknown) => void;
   /**
    * The card's own Apply control, rendered a second time in the footer so the
    * decision can be taken where the evidence is. One element, two placements —
@@ -98,7 +103,7 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
   result: AgentChatResult;
   nonce: number;
   applyAction?: ReactNode;
-  onPreviewComplete?: (status: PanelLoadStatus) => void;
+  onPreviewComplete?: (status: PanelLoadStatus, schema: unknown) => void;
 }) {
   // null until the renderer reports — NOT {0,0,0,0}, which reads as "this dashboard
   // has no data panels" and would be the first thing every preview says.
@@ -167,8 +172,11 @@ function PreviewBody({ result, nonce, applyAction, onPreviewComplete }: {
     // OPENED rather than on the dashboard having been EXECUTED — which is the same
     // hole in a smaller box. `unverifiable` is not part of the test: a panel with no
     // SQL never resolves, so waiting on it would lock Apply forever.
-    if (next.pending === 0) onPreviewComplete?.(next);
-  }, [onPreviewComplete]);
+    // Reported WITH the schema this dashboard was built from, so the caller checks
+    // rather than assumes. The two move together — the memo below shares this dep — so
+    // a renderer mounted for schema A can never have its status filed under schema B.
+    if (next.pending === 0) onPreviewComplete?.(next, result.report_schema);
+  }, [onPreviewComplete, result.report_schema]);
 
   // Drops the agent's `refresh: "5m"` — a preview is a one-shot validation, not a
   // live dashboard. See previewDashboard.ts for why, and for why this does not

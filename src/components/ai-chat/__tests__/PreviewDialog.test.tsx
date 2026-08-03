@@ -223,8 +223,12 @@ describe('PreviewDialog — reporting a finished preview', () => {
     mount({ onPreviewComplete });
 
     await waitFor(() => expect(onPreviewComplete).toHaveBeenCalledTimes(1));
+    // ...and it says WHICH dashboard finished. The caller cannot infer that from its
+    // own props at the moment the call arrives — that assumption is what let a stale
+    // terminal status unlock a schema nobody had executed. (round 7, finding 1)
     expect(onPreviewComplete).toHaveBeenCalledWith(
-      { total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 });
+      { total: 2, loaded: 1, failed: 1, pending: 0, unverifiable: 0 },
+      result.report_schema);
   });
 
   it('stays silent while panels are still executing', async () => {

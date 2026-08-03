@@ -61,13 +61,17 @@ const previewHooks = vi.hoisted(() => ({ complete: null as null | (() => void) }
 /** Records what the card hands the dialog, and renders the Apply control the
  *  card passed down — the "one element, two placements" claim, checkable. */
 vi.mock('../PreviewDialog', () => ({
-  PreviewDialog: ({ open, nonce, applyAction, onPreviewComplete }: {
-    open: boolean; nonce: number; applyAction?: ReactNode;
-    onPreviewComplete?: (status: unknown) => void;
+  PreviewDialog: ({ open, nonce, result, applyAction, onPreviewComplete }: {
+    open: boolean; nonce: number; result: AgentChatResult; applyAction?: ReactNode;
+    onPreviewComplete?: (status: unknown, schema: unknown) => void;
   }) => {
     dialogReads.onRender.push({ open, dashboard: useEditorStore.getState().dashboard });
+    // Reports the schema it was rendered with, as the real dialog does — the card
+    // checks it, so a stub that omitted it would be testing a contract nobody has.
     previewHooks.complete = onPreviewComplete
-      ? () => onPreviewComplete({ total: 1, loaded: 1, failed: 0, pending: 0, unverifiable: 0 })
+      ? () => onPreviewComplete(
+          { total: 1, loaded: 1, failed: 0, pending: 0, unverifiable: 0 },
+          result.report_schema)
       : null;
     useEffect(() => {
       dialogReads.onEffect.push({ open, dashboard: useEditorStore.getState().dashboard });

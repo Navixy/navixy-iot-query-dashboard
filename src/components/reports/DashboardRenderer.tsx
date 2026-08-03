@@ -550,11 +550,15 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     onPanelStatusChange?.(panelStatus);
     // Keyed on the primitive counts: panelStatus is a fresh object on every panelData
     // change and would re-fire this effect for a status that did not actually change.
+    // EVERY count the payload carries has to be listed, `unverifiable` included — it
+    // was added in round 6 and left out of this array, so a dashboard swap that changed
+    // only the unrunnable panels would have emitted nothing. A dependency array that
+    // omits part of the value it announces re-announces a stale one.
     // (The directive must be the LAST line before the dependency array — the rule
     // reports on that node, so an explanation between them un-suppresses it.)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelStatus.total, panelStatus.loaded, panelStatus.failed, panelStatus.pending,
-      onPanelStatusChange]);
+      panelStatus.unverifiable, onPanelStatusChange]);
 
   const showParameterBar = React.useMemo(() => {
     const hasExplicitParams = !!(dashboard['x-navixy']?.params && dashboard['x-navixy'].params.length > 0);
