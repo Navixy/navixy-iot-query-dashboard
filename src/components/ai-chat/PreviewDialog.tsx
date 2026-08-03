@@ -85,6 +85,17 @@ function PreviewBody({ result, nonce, applyAction }: {
   // applied report fails, if a global masks a bad declared default. Either way the
   // banner would be lying, which is the one thing this dialog exists not to do.
   // Fail-silent to [] exactly as ReportView does. (!64 review round 3)
+  //
+  // Re-read on every open, and that is a choice rather than an oversight. Radix unmounts
+  // closed content, so this effect runs once per preview — and "refine, then re-preview"
+  // is the documented workflow, which puts one small GET on the critical path each time.
+  // Caching it would trade that for a preview binding a global the user edited in
+  // Settings since, which is the round 3 defect again in a slower form: the preview and
+  // the applied report running the same dashboard against different inputs. The dialog
+  // then goes on to execute N statements against a remote Postgres; one round trip for
+  // a guaranteed-current answer is the cheap half. If it ever does need caching, it
+  // needs a query invalidated by the settings screen that writes these, not a memo.
+  // (!64 review round 5, finding 6)
   const [globalVariables, setGlobalVariables] =
     useState<Array<{ label: string; value: string; description?: string }> | null>(null);
 
