@@ -163,10 +163,47 @@ function srcsetIsLocal(value: string): boolean {
  * Hence: any attribute on any element, scanned for `url()` references. Bare fragments
  * (`url(#gradient)`) are the legitimate case and survive untouched — they resolve
  * against `document.baseURI`, so `isLocalUrl` already says yes. (!64 review round 7)
+ *
+ * The scan runs on the value AFTER CSS escapes are resolved — see `decodeCssEscapes`,
+ * and read that comment before touching this one. Scanning the raw string means
+ * scanning a different language from the one the browser executes. (round 8)
  */
 const URL_FUNCTION = /url\(\s*(['"]?)([^'")]*)\1\s*\)/gi;
 
-function urlFunctionsAreLocal(value: string): boolean {
+/**
+ * CSS escapes, resolved BEFORE the value is scanned — because the browser resolves them
+ * before it fetches, and a scanner reading the raw string is reading a different
+ * language from the one that will execute.
+ *
+ * Four measured evasions of the literal scan, every one of which issued a real request
+ * in headless Chrome:
+ *
+ * - `u\72l(https://evil/x)`      — escape inside the function NAME; `url(` never appears
+ * - `\75 rl(https://evil/x)`     — escape as its FIRST character; same
+ * - `url(https\3a //evil/x)`     — escape in the SCHEME; scans fine, and then resolves
+ *                                  as a same-origin RELATIVE path, so it passed
+ * - `url(https\3A//evil/x)`      — the same without the whitespace terminator
+ *
+ * Grammar (CSS Syntax §4.3.7): a backslash followed by 1–6 hex digits and an optional
+ * single whitespace is that code point; a backslash followed by anything else is that
+ * character literally. A null or out-of-range code point becomes U+FFFD, which is what
+ * the spec says and, conveniently, is not a character any URL can be built from.
+ * (!64 review round 8, finding 2)
+ */
+const CSS_ESCAPE = /\\(?:([0-9a-fA-F]{1,6})[ \t\n\f\r]?|([\s\S]))/g;
+
+function decodeCssEscapes(value: string): string {
+  if (!value.includes('\\')) return value;
+  return value.replace(CSS_ESCAPE, (_match, hex: string | undefined, literal: string | undefined) => {
+    if (hex === undefined) return literal ?? '';
+    const code = Number.parseInt(hex, 16);
+    if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return '�';
+    return String.fromCodePoint(code);
+  });
+}
+
+function urlFunctionsAreLocal(raw: string): boolean {
+  const value = decodeCssEscapes(raw);
   const occurrences = value.toLowerCase().split('url(').length - 1;
   if (occurrences === 0) return true;
 

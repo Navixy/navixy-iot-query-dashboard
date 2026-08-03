@@ -282,6 +282,33 @@ describe('remote subresources are refused', () => {
     expect(mixed).not.toContain('evil.example');
   });
 
+  it('resolves CSS escapes before scanning, because the browser does', () => {
+    // Four evasions of a literal scan, every one of which issued a real request in
+    // headless Chrome against a local server. Reading the raw attribute string means
+    // reading a different language from the one that will execute.
+    // (!64 review round 8, finding 2)
+    const escaped = [
+      // escape inside the function name — `url(` never appears in the raw value
+      String.raw`fill="u\72l(${beacon}/name.svg#x)"`,
+      // escape as the first character
+      String.raw`fill="\75 rl(${beacon}/first.svg#x)"`,
+      // escape in the SCHEME: scans fine, then resolves as a same-origin relative path
+      String.raw`fill="url(https\3a //evil.example/scheme.svg#x)"`,
+      // ...and the same without the whitespace terminator
+      String.raw`mask="url(https\3A//evil.example/nospace.svg#x)"`,
+    ];
+    for (const attr of escaped) {
+      const html = toSafePanelHtml(`<svg><rect ${attr} width="9" height="9"/></svg>`, 'html');
+      expect(html, attr).not.toContain('evil.example');
+    }
+  });
+
+  it('does not mangle a legitimate value that merely contains a backslash', () => {
+    // Decoding is for the scan only; the attribute the browser gets is untouched.
+    expect(toSafePanelHtml(String.raw`<p title="C:\Users\report">x</p>`, 'html'))
+      .toContain(String.raw`title="C:\Users\report"`);
+  });
+
   it('keeps the internal references that make SVG work at all', () => {
     // `url(#gradient)` is the legitimate case and by far the common one — it resolves
     // against our own document, so the same rule already says yes.
