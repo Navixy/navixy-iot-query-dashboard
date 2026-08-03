@@ -25,6 +25,13 @@ export function AnnotationComponent({ row, editMode = false, onEdit }: Annotatio
       {visual.options?.text && (
         <div className="prose prose-sm dark:prose-invert max-w-none">
           {visual.options.markdown ? (
+            // UNSANITIZED, and safe today only because this component is dead: its one
+            // importer is RowRenderer, which has no importers of its own. Reviving that
+            // path makes this a live injection sink for anything that can author a
+            // report — which now includes the AI agent (DO-313). Route it through
+            // toSafePanelHtml in visualizations/panelHtml.ts first; that is where the
+            // text-panel seam already does this, and the reasoning is written up there.
+            // (!64 review round 5)
             <div dangerouslySetInnerHTML={{ __html: visual.options.text }} />
           ) : (
             <p>{visual.options.text}</p>

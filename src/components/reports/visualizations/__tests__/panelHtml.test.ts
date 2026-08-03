@@ -178,6 +178,44 @@ describe('the injection surface script-blocking alone leaves open', () => {
   });
 });
 
+/**
+ * Pinned as an ACCEPTED cost, not as a win. If one of these ever starts being stripped
+ * it is a behaviour change legitimate panels would feel, and it should be a decision
+ * rather than a surprise — and if the docblock's list ever stops matching the library,
+ * this is what says so. (!64 review round 5, finding 3)
+ */
+describe('what it deliberately does not stop', () => {
+  it('lets a remote image load, which beacons the viewer to whoever wrote the panel', () => {
+    // No CSP on the document closes this either: nginx sets only `frame-ancestors *`.
+    expect(toSafePanelHtml('<img src="https://evil.example/track.gif">', 'html'))
+      .toContain('https://evil.example/track.gif');
+    // Markdown reaches the same place with far less typing.
+    expect(toSafePanelHtml('![x](https://evil.example/track.gif)', 'markdown'))
+      .toContain('https://evil.example/track.gif');
+  });
+
+  it('lets the other remote loaders through too, and blocks the ones the config removes', () => {
+    const survives = [
+      '<video src="https://evil.example/v.mp4"></video>',
+      '<audio src="https://evil.example/a.mp3"></audio>',
+      '<picture><source srcset="https://evil.example/s.png"></picture>',
+      '<track src="https://evil.example/t.vtt">',
+    ];
+    for (const payload of survives) {
+      expect(toSafePanelHtml(payload, 'html')).toContain('evil.example');
+    }
+
+    const blocked = [
+      '<link rel="stylesheet" href="https://evil.example/x.css">',
+      '<object data="https://evil.example/o"></object>',
+      '<input type="image" src="https://evil.example/i.png">',
+    ];
+    for (const payload of blocked) {
+      expect(toSafePanelHtml(payload, 'html')).not.toContain('evil.example');
+    }
+  });
+});
+
 describe('without a DOM, it fails CLOSED', () => {
   // The docblock cites this branch as the reason the file chose jsdom, and nothing
   // entered it: returning `rendered` instead of escaping kept every other test green.

