@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
-import type { AgentChatResult, ChatBubble } from '@/types/agent';
+import type { ChatBubble } from '@/types/agent';
 import { MarkdownMessage } from './MarkdownMessage';
+import { ResultCard } from './ResultCard';
 import { TypingIndicator } from './TypingIndicator';
 
 interface ChatTranscriptProps {
@@ -12,39 +13,6 @@ interface ChatTranscriptProps {
   /** D15, computed once in AiChat: admin/editor only. Threaded through to
    *  ResultSlot so MR 6 touches one component, not three. */
   canApply: boolean;
-}
-
-/**
- * SEAM FOR MR 6 (commit 12b). MR 6 replaces THIS COMPONENT'S BODY with
- * <ResultCard result={result} canApply={canApply} isPending={isPending} />, imported from
- * src/components/ai-chat/ResultCard.tsx. THE PROPS AND THE CALL SITE DO NOT CHANGE — that
- * is the point of the seam, and it is why MR 6 touches this file and not AiChat.tsx.
- * Do not "improve" this placeholder; it is scaffolding, and its copy names the MR that
- * removes it so it cannot quietly ship.
- */
-function ResultSlot({ result, canApply, isPending }: {
-  result: AgentChatResult; canApply: boolean; isPending: boolean;
-}) {
-  const panels = result.report_schema['panels'];
-  const panelCount = Array.isArray(panels) ? panels.length : 0;
-
-  return (
-    <div
-      className={cn(
-        'mt-2 rounded-md border border-border bg-card px-4 py-3 text-left',
-        isPending && 'opacity-60',
-      )}
-    >
-      <p className="text-sm font-medium text-foreground">{result.title}</p>
-      <p className="text-xs text-muted-foreground">
-        {panelCount === 1 ? '1 panel' : `${panelCount} panels`}
-      </p>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Preview and apply arrive in MR 6.
-        {!canApply && ' Applying will need an editor or admin role.'}
-      </p>
-    </div>
-  );
 }
 
 export function ChatTranscript({ bubbles, isPending, canApply }: ChatTranscriptProps) {
@@ -101,11 +69,11 @@ export function ChatTranscript({ bubbles, isPending, canApply }: ChatTranscriptP
                   <p className="whitespace-pre-wrap">{bubble.text}</p>
                 )}
               </div>
-              {/* Any assistant bubble carrying a result gets a slot — including
+              {/* Any assistant bubble carrying a result gets a card — including
                   rehydrated and earlier ones, the affordance for "refine, then
                   decide". */}
               {bubble.result && (
-                <ResultSlot result={bubble.result} canApply={canApply} isPending={isPending} />
+                <ResultCard result={bubble.result} canApply={canApply} isPending={isPending} />
               )}
             </div>
           </div>

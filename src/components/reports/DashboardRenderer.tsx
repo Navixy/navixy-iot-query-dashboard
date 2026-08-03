@@ -37,6 +37,7 @@ import { createRunGate } from '@/utils/runGate';
 import { filterUsedParameters, dashboardPanelsHaveTemplateParameters } from '@/utils/sqlParameterExtractor';
 import { applyPanelFilters, getActivePanelFilters, resolveBindingExpression } from '@/utils/filterVariables';
 import { PanelFilterIndicator } from './PanelFilterIndicator';
+import { computePanelLoadStatus, type PanelLoadStatus } from './panelLoadStatus';
 import { Canvas } from '@/layout/ui/Canvas';
 import { PanelGrid } from '@/layout/ui/PanelGrid';
 import { useEditorStore } from '@/layout/state/editorStore';
@@ -93,6 +94,31 @@ interface DashboardRendererProps {
    * button on this so it isn't clickable during the null-root window on first load.
    */
   onLoadingChange?: (loading: boolean) => void;
+  /**
+   * Aggregate per-panel query status, emitted whenever it changes.
+   *
+   * Counts SQL-bearing panels only: `text` panels and panels with no
+   * `x-navixy.sql.statement` never execute a query and are excluded from every count
+   * (same predicate the query loop uses).
+   *
+   * Added for the AI chat preview (DO-313). AI-generated SQL passes the SELECT-only
+   * guard and can still fail at execution — a hallucinated column was observed on the
+   * first real agent dashboard (`42703 column o.employee_id does not exist`). Static
+   * validation structurally cannot catch that; only execution can. The preview dialog
+   * uses these counts to make a failed panel impossible to miss.
+   *
+   * IMPORTANT: wrap your handler in `useCallback`. It is emitted from an effect keyed on
+   * the four counts, so an unstable identity re-fires it on every render.
+   */
+  onPanelStatusChange?: (status: PanelLoadStatus) => void;
+  /**
+   * Whether parameter values round-trip through the page's query string. True for a
+   * report at its own URL — that is how a filtered dashboard is shared. FALSE where
+   * the dashboard is a guest on someone else's route (the AI chat preview at
+   * /app/chat), which owns no parameters, never clears them, and would otherwise feed
+   * one preview's time window to the next. (DO-313)
+   */
+  syncParametersToUrl?: boolean;
 }
 
 export interface DashboardRendererRef {
@@ -376,6 +402,8 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
                                                                                              onSave,
                                                                                              globalVariables = [],
                                                                                              onLoadingChange,
+                                                                                             onPanelStatusChange,
+                                                                                             syncParametersToUrl = true,
                                                                                            }, ref) => {
   // The viewer's effective SQL-session zone. Part of the execution cache key
   // below: when it changes — server preferences merging in after the first
@@ -485,7 +513,21 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
     // canonicalize/compact on the store every render would re-allocate panel objects
     // each frame mid-edit for no benefit — and compaction is intentionally kept out
     // of the per-edit path so it must not re-run here while the user is dragging.
-    const canonicalized = storeDashboard ?? normalizeDashboardForRender(dashboard);
+    //
+    // `dashboardInitializedRef` is what makes "the store" mean THIS INSTANCE'S store.
+    // The store is a module singleton, so a freshly mounted renderer would otherwise
+    // spend its first render painting — and COUNTING — whatever dashboard the previous
+    // one left behind. The AI preview remounts on purpose when the result changes, and
+    // that first render is exactly where the counts are read: a leftover dashboard with
+    // no SQL panels reports `pending: 0` on the spot, which is a terminal status for a
+    // dashboard that is not on screen and whose queries have not run. Preferring the
+    // prop until this instance has hydrated the store costs one render of already
+    // correct content and removes the window. It is a ref rather than state on purpose:
+    // the effect that flips it also calls `setDashboard`, so `storeDashboard` changes in
+    // the same commit and re-runs this memo.
+    // (!64 review round 8, finding 1)
+    const hydrated = dashboardInitializedRef.current ? storeDashboard : null;
+    const canonicalized = hydrated ?? normalizeDashboardForRender(dashboard);
 
     // Ensure every panel has a unique ID — return new objects instead of mutating
     const withIds = (panels: Panel[]): Panel[] =>
@@ -502,6 +544,35 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
 
     return { ...canonicalized, panels: withIds(canonicalized.panels) };
   }, [dashboard, storeDashboard]);
+
+  // Mirrors the onLoadingChange emitter above. It cannot sit next to it: the counts
+  // read displayDashboard, which is declared here. Deps on the effect below are the
+  // four primitive counts rather than the object, so a stable-identity consumer is
+  // not re-notified on every panelData mutation (e.g. a refreshing flag flipping).
+  //
+  // DELIBERATELY NOT MEMOIZED on `panelData`. The query loop builds one `newPanelData`
+  // object, sets it, then MUTATES that same object as each query lands and sets it a
+  // second time — so the identity React sees can be unchanged while the contents are
+  // completely different. `useMemo(..., [displayDashboard, panelData])` therefore
+  // returned the status computed from the all-pending snapshot and the banner stuck on
+  // "Loading N panels…" for a dashboard that had finished. Counting is an O(panels)
+  // walk over an already-normalized list; the effect below is what stops consumers
+  // being re-notified. (!64 review round 4, finding 1 — found by the harness it asked
+  // for, in DashboardRenderer.panelStatus.test.tsx.)
+  const panelStatus: PanelLoadStatus = computePanelLoadStatus(displayDashboard.panels, panelData);
+  useEffect(() => {
+    onPanelStatusChange?.(panelStatus);
+    // Keyed on the primitive counts: panelStatus is a fresh object on every panelData
+    // change and would re-fire this effect for a status that did not actually change.
+    // EVERY count the payload carries has to be listed, `unverifiable` included — it
+    // was added in round 6 and left out of this array, so a dashboard swap that changed
+    // only the unrunnable panels would have emitted nothing. A dependency array that
+    // omits part of the value it announces re-announces a stale one.
+    // (The directive must be the LAST line before the dependency array — the rule
+    // reports on that node, so an explanation between them un-suppresses it.)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelStatus.total, panelStatus.loaded, panelStatus.failed, panelStatus.pending,
+      panelStatus.unverifiable, onPanelStatusChange]);
 
   const showParameterBar = React.useMemo(() => {
     const hasExplicitParams = !!(dashboard['x-navixy']?.params && dashboard['x-navixy'].params.length > 0);
@@ -1971,6 +2042,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
               setRefreshTrigger(prev => prev + 1);
             } }
             globalVariables={ globalVariables }
+            syncParametersToUrl={ syncParametersToUrl }
           />
         ) : null }
         <div className="space-y-4">
@@ -2026,6 +2098,7 @@ export const DashboardRenderer = forwardRef<DashboardRendererRef, DashboardRende
             setRefreshTrigger(prev => prev + 1);
           } }
           globalVariables={ globalVariables }
+          syncParametersToUrl={ syncParametersToUrl }
         />
       ) : null }
 
