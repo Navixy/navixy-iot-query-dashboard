@@ -66,14 +66,23 @@ export function ResultCard({ result, canApply, isPending }: ResultCardProps) {
   const handleApply = () => {
     if (!applyEnabled) return;
     setIsApplying(true);
-    // Every failure path re-enables the button; the success path navigates away and
-    // this card unmounts with the page.
+    // Every failure path re-enables the button through onSettled; the success path
+    // navigates away and this card unmounts with the page.
+    //
+    // The .catch is a BACKSTOP, not a failure path — applyDashboard names every failure
+    // it can. It is here because the disabled state is owned HERE: whether the button
+    // comes back must not depend on a helper staying correct. Without it an unexpected
+    // throw is an unhandled rejection, onSettled never runs, and Apply sits disabled
+    // behind "Creating the dashboard..." until the page is reloaded, with nothing on
+    // screen saying why. Silent on purpose — a message here could only guess, and
+    // applyDashboard has already spoken for everything it knows.
+    // (!64 review round 5, finding 1)
     void applyDashboard({
       result,
       createReportMutation,
       navigate,
       onSettled: () => setIsApplying(false),
-    });
+    }).catch(() => setIsApplying(false));
   };
 
   // One element, rendered in two places: here and in the preview dialog's footer, so

@@ -148,6 +148,32 @@ describe('applyDashboard', () => {
     expect(toastError.mock.calls[0][0]).toContain('Demo data is now owned by another tab');
   });
 
+  it('treats a menu payload that is not an array as no sections at all', async () => {
+    // `?? []` only guards null/undefined, so a truthy non-array reached `.find` and
+    // threw — and a throw here is an unhandled rejection, not a failure path: the
+    // toast never fires and Apply never comes back. (!64 review round 5, finding 1)
+    getSections.mockResolvedValue({ data: { sections: [] } as never });
+    const h = harness();
+    await applyDashboard({ result, ...h });
+
+    expect(createSection).toHaveBeenCalledWith('AI Dashboards', 1000);
+    expect(h.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ section_id: 'sec-new' }));
+  });
+
+  it('stops, and says so, when the created section comes back without an id', async () => {
+    // `section_id: null` files the report at the TOP LEVEL of the menu instead — the
+    // user is told to look in "AI Dashboards" and it is not there.
+    getSections.mockResolvedValue({ data: [] });
+    createSection.mockResolvedValue({ data: undefined as never });
+    const h = harness();
+    await applyDashboard({ result, ...h });
+
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(h.mutateAsync).not.toHaveBeenCalled();
+    expect(h.navigate).not.toHaveBeenCalled();
+    expect(h.onSettled).toHaveBeenCalledTimes(1);
+  });
+
   it('raises NO toast of its own when createReport rejects — the hook already did', async () => {
     const h = harness(vi.fn().mockRejectedValue(new Error('Section not found or access denied')));
     await applyDashboard({ result, ...h });

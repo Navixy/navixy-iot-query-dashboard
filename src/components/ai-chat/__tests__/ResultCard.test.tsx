@@ -114,6 +114,10 @@ const applyButton = () => applyButtons()[0];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // `applyDashboard` is `async`, so it ALWAYS returns a promise — a bare vi.fn()
+  // returning undefined is not a faithful stand-in for it, and the card now attaches
+  // its backstop .catch to what comes back.
+  vi.mocked(applyDashboard).mockResolvedValue(undefined);
   useEditorStore.getState().reset();
   dialogReads.onRender.length = 0;
   dialogReads.onEffect.length = 0;
@@ -228,6 +232,22 @@ describe('ResultCard', () => {
 
     args.onSettled();
     await waitFor(() => expect(applyButton().disabled).toBe(false));
+  });
+
+  it('brings Apply back when the apply throws instead of settling', async () => {
+    // onSettled is how every KNOWN failure re-enables the button. An unexpected throw
+    // reaches none of them: without a .catch at the call site the rejection is
+    // unhandled, isApplying stays true, and Apply sits disabled behind "Creating the
+    // dashboard..." until the page is reloaded. (!64 review round 5, finding 1)
+    vi.mocked(applyDashboard).mockRejectedValueOnce(new Error('unexpected'));
+    mount({ role: 'editor' });
+
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(applyButton().disabled).toBe(false));
+
+    // ...and it is a working button again, not merely an enabled one.
+    fireEvent.click(applyButton());
+    expect(applyDashboard).toHaveBeenCalledTimes(2);
   });
 
   it('resets the editor store BEFORE the preview opens', () => {

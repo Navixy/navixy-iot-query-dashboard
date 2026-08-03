@@ -151,7 +151,14 @@ export async function applyDashboard({
     return;
   }
 
-  const existing = (sections.data as Array<{ id: string; name: string; sort_order?: number }> | undefined) ?? [];
+  // Array.isArray, not `?? []`: a truthy non-array payload passed the nullish check and
+  // then threw on `.find` — and a throw HERE is not a failure path, it is an unhandled
+  // rejection that leaves Apply disabled forever (see ResultCard's catch). Every read of
+  // a response body in this function is defensive for that reason; none of them is
+  // reachable from a healthy server. (!64 review round 5, finding 1)
+  const existing = Array.isArray(sections.data)
+    ? (sections.data as Array<{ id: string; name: string; sort_order?: number }>)
+    : [];
   // Matched loosely on purpose: an exact comparison means renaming the section in the
   // menu editor — or a stray trailing space — makes the next Apply create a duplicate
   // beside it. (Self-healing after that: every later Apply finds and reuses the new
@@ -187,7 +194,15 @@ export async function applyDashboard({
       onSettled();
       return;
     }
-    sectionId = (created.data as { id: string }).id;
+    sectionId = (created.data as { id?: string } | null | undefined)?.id ?? null;
+    if (!sectionId) {
+      // A 200 carrying no id. Nothing to file the report under, and `section_id: null`
+      // would silently put it at the top level of the menu instead — a dashboard the
+      // user then cannot find where they were told to look.
+      toast.error(`Could not create the "${SECTION_NAME}" section: the server returned no id.`);
+      onSettled();
+      return;
+    }
   }
 
   try {
