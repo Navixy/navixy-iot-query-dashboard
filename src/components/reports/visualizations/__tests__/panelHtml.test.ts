@@ -249,6 +249,54 @@ describe('remote subresources are refused', () => {
     expect(toSafePanelHtml('<img src="ht!tp://x">', 'html')).toContain('src=');
   });
 
+  it('covers SVG`s url() references, which are fetches wearing presentation clothes', () => {
+    // Round 6 filtered attribute NAMES and these walked past it: all eight survive the
+    // config, and a real browser issues a GET for each — measured against a local
+    // server, six requests for the six that paint. (!64 review round 7, finding 2)
+    const attrs = ['fill', 'stroke', 'mask', 'clip-path', 'filter',
+                   'marker-start', 'marker-mid', 'marker-end'];
+    for (const attr of attrs) {
+      for (const ref of [`url(${beacon}/l.svg#x)`, `url('${beacon}/l.svg#x')`,
+                         `url( "${beacon}/l.svg" )`]) {
+        const html = toSafePanelHtml(`<svg><rect ${attr}="${ref}" width="9" height="9"/></svg>`, 'html');
+        expect(html, `${attr} leaked`).not.toContain('evil.example');
+        // The element survives; only the reference is cut.
+        expect(html).toContain('<rect');
+      }
+    }
+  });
+
+  it('fails closed on a url() it cannot parse, rather than assuming it is fine', () => {
+    // An unbalanced quote matches no reference at all, so an "any match is remote"
+    // rule would find nothing to object to and keep the attribute. Found by a typo in
+    // the test above, which is a better provenance than it sounds: the rule now
+    // requires every `url(` to parse AND resolve locally.
+    const html = toSafePanelHtml(
+      `<svg><rect fill="url('${beacon}/l.svg#x)" width="9" height="9"/></svg>`, 'html');
+    expect(html).not.toContain('evil.example');
+
+    // ...and one good reference does not launder a bad one beside it.
+    const mixed = toSafePanelHtml(
+      `<svg><rect fill="url(#g)" filter="url(#f) url(${beacon}/l.svg)" width="9" height="9"/></svg>`, 'html');
+    expect(mixed).toContain('fill="url(#g)"');
+    expect(mixed).not.toContain('evil.example');
+  });
+
+  it('keeps the internal references that make SVG work at all', () => {
+    // `url(#gradient)` is the legitimate case and by far the common one — it resolves
+    // against our own document, so the same rule already says yes.
+    const html = toSafePanelHtml(
+      '<svg><defs><linearGradient id="g"></linearGradient></defs>'
+      + '<rect fill="url(#g)" clip-path="url(#c)" width="9" height="9"/></svg>', 'html');
+    expect(html).toContain('fill="url(#g)"');
+    expect(html).toContain('clip-path="url(#c)"');
+  });
+
+  it('leaves a plain colour alone, url() or not', () => {
+    expect(toSafePanelHtml('<svg><rect fill="#ff0000" width="9" height="9"/></svg>', 'html'))
+      .toContain('fill="#ff0000"');
+  });
+
   it('still refuses the loaders the config removes outright', () => {
     const blocked = [
       `<link rel="stylesheet" href="${beacon}/x.css">`,

@@ -150,6 +150,42 @@ function srcsetIsLocal(value: string): boolean {
 }
 
 /**
+ * `url(...)` inside an attribute VALUE, which is how SVG fetches.
+ *
+ * The named-attribute list above is not enough on its own, and the gap was measured
+ * rather than reasoned about: `fill`, `stroke`, `mask`, `clip-path`, `filter`,
+ * `marker-start`, `marker-mid` and `marker-end` all survive `SANITIZE_CONFIG` carrying
+ * `url(https://evil.example/leak.svg#x)`, and a real browser issues a GET for every one
+ * of them — verified against a local server, six requests for six attributes. So the
+ * subresource rule cannot be a list of attribute NAMES; SVG's paint servers, masks,
+ * clips, filters and markers are all fetches wearing presentation-attribute clothes.
+ *
+ * Hence: any attribute on any element, scanned for `url()` references. Bare fragments
+ * (`url(#gradient)`) are the legitimate case and survive untouched — they resolve
+ * against `document.baseURI`, so `isLocalUrl` already says yes. (!64 review round 7)
+ */
+const URL_FUNCTION = /url\(\s*(['"]?)([^'")]*)\1\s*\)/gi;
+
+function urlFunctionsAreLocal(value: string): boolean {
+  const occurrences = value.toLowerCase().split('url(').length - 1;
+  if (occurrences === 0) return true;
+
+  const matches = [...value.matchAll(URL_FUNCTION)];
+  // Every `url(` must PARSE as well as resolve locally. Without this the function
+  // failed open on a malformed reference — `url('https://evil/x)` (unbalanced quote)
+  // matched nothing, so the loop below had nothing to reject and the attribute was
+  // kept. Whether a browser would fetch that particular string is not the point: a
+  // sanitizer that returns "safe" for input it could not read is answering a question
+  // it did not understand. Found by a typo in this rule's own test.
+  if (matches.length !== occurrences) return false;
+
+  return matches.every((match) => {
+    const target = match[2].trim();
+    return target === '' || isLocalUrl(target);
+  });
+}
+
+/**
  * A PRIVATE DOMPurify instance, built once and kept here.
  *
  * Hooks live on the instance, so installing the `rel` hook on the shared default
@@ -189,6 +225,14 @@ function getPurifier(): PurifyInstance {
       const srcset = node.getAttribute('srcset');
       if (srcset !== null && !srcsetIsLocal(srcset)) node.removeAttribute('srcset');
 
+      // Any attribute at all whose value REFERENCES a URL — see `urlFunctionsAreLocal`.
+      // Named lists cannot cover this: SVG spells a fetch `fill="url(...)"`.
+      // Collected before removing, because `attributes` is live.
+      const referencing = [...node.attributes]
+        .filter((attr) => !urlFunctionsAreLocal(attr.value))
+        .map((attr) => attr.name);
+      for (const name of referencing) node.removeAttribute(name);
+
       // On a LINK, `href` is navigation the user chooses and stays untouched. On
       // anything else that survives the config — SVG `<image>`, `<feImage>`, `<use>` —
       // it is a fetch the page performs the moment the panel paints.
@@ -225,7 +269,11 @@ const escapeHtml = (text: string) =>
  * **Remote subresource loads are refused, not merely documented.** Round 5 listed them
  * as an accepted cost; round 6 was right that documenting an exposure does not close a
  * trust boundary. `src`, `srcset`, `poster`, `background` and non-link `href` are now
- * required to be same-origin or `data:` — see `isLocalUrl`. A CSP on the DOCUMENT would
+ * required to be same-origin or `data:` — see `isLocalUrl` — **and so is every `url()`
+ * reference in any attribute value**, which round 7 found round 6's named list walking
+ * straight past: `fill="url(https://evil/leak.svg#x)"` is a fetch, and so are `stroke`,
+ * `mask`, `clip-path`, `filter` and `marker-*`. Six attributes, six GETs in a real
+ * browser. A list of attribute names is the wrong shape for this rule. A CSP on the DOCUMENT would
  * be the defence-in-depth twin, and this deployment has none (nginx sets only
  * `frame-ancestors *`; the `img-src 'self' data: https:` helmet sets rides on the
  * BACKEND's responses, never reaches this page, and would allow any https origin if it
