@@ -104,7 +104,14 @@ AWS_REGION=eu-central-1
 > configuration rather than as constants is what keeps that a one-line env change.
 
 **`docker-compose.yml` needs no change.** `:23` mounts `backend/.env.docker` as the container's
-`.env` and is the entire env channel — there is no `env_file:` and no `~/.aws` mount.
+`.env` and is the entire **file-based** env channel — there is no `env_file:` and no `~/.aws` mount,
+so the AWS variables go in `.env.docker` and nothing in compose has to change.
+
+> One caveat if you ever need to change `NODE_ENV` or `PORT` rather than add a variable: compose
+> *also* sets those two inline (`docker-compose.yml:19-21`), `.env.docker:2-3` sets the same two,
+> and `env.ts:9` calls `dotenv.config()` **without `override`** — so the inline compose values win
+> and edits to those two keys in `.env.docker` are silently ignored. It does not affect the Bedrock
+> variables, which exist only in `.env.docker`.
 
 ### The checklist
 
@@ -261,7 +268,10 @@ a perfectly good clarifying question.
 
 **The honest statement: this class of failure is caught by users, not by us.** There is no ground
 truth to compare a single turn against. What is detectable is a *shift* in the question/result
-ratio, which is why every turn logs `{turnType, hadS3Uri, messageLength, via}`.
+ratio, which is why every turn logs
+`{sessionId, classifiedAs, urlFound, promptLength, via, ms}` (`bedrockAgent.ts:401-408`). To watch
+for that shift, group by `classifiedAs` over time; `via` tells you whether the trailer (§5) has
+started arriving.
 
 ### The trailer — asked for, NOT agreed
 
@@ -308,12 +318,12 @@ Three reasons, in order of weight:
    `jobs/<job-id>/report_schema.json` is never rewritten. Preview and Apply must operate on the
    exact bytes validated at turn time, or the thing the user approves is not the thing they
    reviewed — which quietly voids the entire preview-before-Apply argument in §7.
-3. **Latency and blast radius.** 235 ms per preview click (**n=1 fetch**, 5385 bytes), an AWS
+3. **Latency and blast radius.** 187–235 ms per preview click (**n=2 fetches**, 4675 and 5385 bytes), an AWS
    dependency on a pure UI interaction, and an S3 outage that would break re-previewing
    conversations completed days ago.
 
-**Size budget: ~5–50 KB per result turn in `jsonb`** (observed artifact: 5385 bytes, **n=1**). This
-is the intended use of the column.
+**Size budget: ~5–50 KB per result turn in `jsonb`** (observed artifacts: 4675 and 5385 bytes,
+**n=2**). This is the intended use of the column.
 
 **A `NoSuchKey` at preview time is a bug in the mitigation, and should be alarming, not routine.** A
 `NoSuchKey` *at turn time* is a different and more interesting bug — it means the agent returned a
@@ -354,9 +364,9 @@ prompt (2026-07-30) hallucinated a column in **both** of its SQL panels — `o.e
 in 187 ms) produced **the same two columns again**, and the preview reported
 *"0 of 2 panels loaded. 2 panels failed"*: every SQL panel in that dashboard was dead.
 
-**That is three prompts out of three, and five of five SQL panels across the two builds with
-panel-level data.** Both of the failing statements passed `validateSQLQuerySafe` and
-`validateDashboard` in every run.
+**That is three prompts out of three, and five of seven SQL panels across the three builds** — 1 of
+3, then 2 of 2, then 2 of 2. Every one of those seven statements passed `validateSQLQuerySafe` and
+`validateDashboard`; five of them still failed at the database.
 
 **Still do not quote this as a rate** — three prompts is three prompts, and all three were the same
 request on the same topic, which is exactly the condition under which a repeated failure tells you
@@ -538,20 +548,31 @@ Recorded so it is not re-proposed as an oversight, and not re-scoped as a bug.
 | Artifact 5385 bytes in 235 ms; 4675 bytes in 187 ms | 2 fetches |
 | Bedrock is stateful (dropped a question it had been told; later retained metric + time range across a 4-turn interview) | 2 sessions |
 | Interview length before a build | 2 turns (probe) / **4 turns incl. an explicit "shall I build this?" confirmation** (2026-08-03) |
-| Agent SQL passing the guard *and* `validateDashboard` | 5 of 5 statements — **and 3 of those 5 still failed at the database** |
+| Agent SQL passing the guard *and* `validateDashboard` | 7 of 7 statements — **and 5 of those 7 still failed at the database** |
 | Hallucinated column reaching execution | **3 prompts of 3**: 1 of 3 panels, then 2 of 2, then 2 of 2 — the last two on the *same* identifiers (`o.employee_id`, `t.driver_id`) |
 | Corpus SQL executing against the live `iotDbUrl` | 49 of 49 statements |
 | Repo-wide fixture SQL executing | 209 of 214 statements (97.7 %) |
 
-**One number here is not like the others.** Every row above except the hallucination row is a
-*latency or capacity* measurement, where a small `n` mostly means the value will drift. The
-hallucination row is a *correctness* measurement, and there three-for-three means something
-different: it is no longer plausible that a maintainer will try this feature and not hit it. Read
-the rest of this table as "provisional"; read that row as "expect it".
+**A small `n` does not mean the same thing in every row here.** Read the table in three groups:
+
+- **Latency and capacity** (build/interview turn times, artifact sizes and fetch times, interview
+  length) — small `n`, and what a small `n` buys you is that **the values will drift**. Treat them
+  as provisional; they are good enough to size a timeout and nothing more.
+- **Behaviour** (Bedrock statefulness) — n=2 sessions, but this one is a *mechanism*, not a
+  distribution: the agent either keys memory on `sessionId` or it does not, and two sessions
+  agreeing with the vendor's documented behaviour is reasonable evidence.
+- **Correctness** — the guard/validator row, the hallucination row, and the two corpus rows
+  (49 of 49, 209 of 214). These are **not** provisional in the same way, and the two corpus rows in
+  particular rest on n=49 and n=214, which is not a small sample at all.
+
+**The row to actually change your behaviour over is the hallucination row.** Three prompts for
+three, five of seven panels: it is no longer plausible that a maintainer will try this feature and
+not hit it. That is the one to read as "expect it" rather than "provisional".
 
 **Nothing above is a rate.** p99 latency, guard pass rate beyond three statements, hallucination
 rate, behaviour on topics other than vehicle mileage, behaviour in a long (10+ turn) session, and
 `inputText` size limits are all **unmeasured**. The discipline that keeps this honest is the one
 this table exists for: **every number carried forward gets its `n` written next to it**, and the
-first week of real Bedrock traffic — turn duration, `sessionId`, retry-occurred, turn type +
-`hadS3Uri` + `via`, guard rejections, `GetObject` outcome — is the decision record that replaces it.
+first week of real Bedrock traffic — `ms`, `sessionId`, retry-occurred, `classifiedAs` + `urlFound`
++ `via` (`bedrockAgent.ts:401-408`), guard rejections, `GetObject` outcome — is the decision record
+that replaces it.

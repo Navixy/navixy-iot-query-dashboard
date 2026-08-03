@@ -50,7 +50,7 @@ Express layered stack. Entry: `backend/src/index.ts`. Routes mounted under `/api
 Auth middleware (`middleware/auth.ts`) validates JWTs and rehydrates the user's DB URLs onto `req.user` — handlers expect that shape (`AuthenticatedRequest`).
 
 ### Frontend (`src/`)
-- **`pages/`** — route components. Routes (see `src/App.tsx`): `/`, `/login`, `/app`, `/app/report/:reportId`, `/app/settings`, `/app/sql-editor`, `/app/composite-report/:id[/edit]`. `ReportView.tsx` is the page wired into the router.
+- **`pages/`** — route components. Routes (see `src/App.tsx`): `/`, `/login`, `/app`, `/app/chat`, `/app/report/:reportId`, `/app/settings`, `/app/sql-editor`, `/app/composite-report/new`, `/app/composite-report/:id[/edit]`. `ReportView.tsx` is the page wired into the router.
 - **`layout/`** — the dashboard editor (separate from `components/layout/`, which is app shell). This is the core complexity:
   - `geometry/` — pure functions for the 24-column Grafana grid: `collisions.ts`, `autopack.ts`, `grid.ts` (snapping), `rows.ts`, `move.ts`, `resize.ts`, `add.ts`, `tidyUp.ts`. These are the unit-tested algorithms.
   - `state/editorStore.ts` — Zustand store holding `dashboard`, `selectedPanelId`, `isEditingLayout`, plus a history stack for undo/redo.
