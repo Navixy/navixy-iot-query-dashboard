@@ -11,12 +11,16 @@
  * returning the all-pending snapshot and the banner never left "Loading N panels…".
  * Every other test stayed green. (!64 review round 4, finding 1)
  *
- * The renderer mounts for real here — only the network, the datetime prefs and
- * `ParameterBar` are stubbed — which is why it can catch that at all.
+ * The renderer mounts for real here — only the network, the datetime prefs,
+ * `ParameterBar` and `Canvas` are stubbed — which is why it can catch that at all.
+ *
+ * The renderer has TWO ParameterBar call sites, one per top-level branch, and both are
+ * mounted below: covering only the one the preview happens to use left the other free
+ * to lose the prop silently. (round 5, finding 5)
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { useEditorStore } from '@/layout/state/editorStore';
 import type { PanelLoadStatus } from '../panelLoadStatus';
@@ -31,6 +35,12 @@ vi.mock('@/components/reports/ParameterBar', () => ({
 }));
 
 vi.mock('@/services/api', () => ({ apiService: { executeSQL: vi.fn() } }));
+
+/** Only so the layout-editor branch has something cheap to render; @dnd-kit and the
+ *  whole editor are someone else's suite. */
+vi.mock('@/layout/ui/Canvas', () => ({
+  Canvas: () => createElement('div', { 'data-testid': 'layout-canvas' }),
+}));
 
 vi.mock('@/contexts/DatetimePrefsContext', () => ({
   useDatetimePrefs: () => ({
@@ -80,14 +90,16 @@ const dashboardWith = (panels: unknown[]) => ({
   panels,
 });
 
-function mount(panels: unknown[], syncParametersToUrl?: boolean) {
+function mount(panels: unknown[], over: {
+  syncParametersToUrl?: boolean; editMode?: boolean;
+} = {}) {
   const seen: PanelLoadStatus[] = [];
   render(createElement(MemoryRouter, null,
     createElement(DashboardRenderer, {
       dashboard: dashboardWith(panels),
       globalVariables: GLOBALS,
       onPanelStatusChange: (status: PanelLoadStatus) => seen.push(status),
-      ...(syncParametersToUrl === undefined ? {} : { syncParametersToUrl }),
+      ...over,
     } as never)));
   return seen;
 }
@@ -151,7 +163,7 @@ describe('DashboardRenderer → onPanelStatusChange', () => {
 
 describe('DashboardRenderer → ParameterBar', () => {
   it('forwards syncParametersToUrl=false, so a preview cannot write to the page URL', async () => {
-    const seen = mount([sqlPanel(1, 'SELECT 1 AS a')], false);
+    const seen = mount([sqlPanel(1, 'SELECT 1 AS a')], { syncParametersToUrl: false });
     await settled(seen);
 
     expect(bar.props.length).toBeGreaterThan(0);
@@ -164,5 +176,23 @@ describe('DashboardRenderer → ParameterBar', () => {
 
     expect(bar.props.length).toBeGreaterThan(0);
     expect(bar.props.every((props) => props.syncParametersToUrl === true)).toBe(true);
+  });
+
+  it('forwards it from the LAYOUT EDITOR branch too, which renders its own bar', async () => {
+    // There are two ParameterBar call sites — the Canvas branch and the grid branch —
+    // and the view-mode tests above only ever reach the second, so deleting the prop
+    // from the first left the whole suite green. Inert today (edit mode is only
+    // reachable at a report's own URL, where the default is already true), which is
+    // exactly why nothing else would notice it going missing.
+    // (!64 review round 5, finding 5)
+    useEditorStore.getState().setIsEditingLayout(true);
+    const seen = mount([sqlPanel(1, 'SELECT 1 AS a')], {
+      editMode: true, syncParametersToUrl: false,
+    });
+    await settled(seen);
+
+    expect(screen.getByTestId('layout-canvas')).toBeTruthy();
+    expect(bar.props.length).toBeGreaterThan(0);
+    expect(bar.props.every((props) => props.syncParametersToUrl === false)).toBe(true);
   });
 });
