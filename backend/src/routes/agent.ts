@@ -241,26 +241,32 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     { rejectWhenTurnActive: true, activeTurnTtlMs: ACTIVE_TURN_TTL_MS },
   );
   if (started === 'busy') {
-    // 409, not 429: this is a state conflict on the session, not rate limiting.
-    // This request wrote nothing either way — the guard rolls back before any
-    // INSERT. What happens NEXT depends on which 'busy' this is, and !65 rounds 9
-    // and 10 were both spent because this comment asserted only the first:
+    // 409, not 429: a state conflict on the session, not rate limiting. This
+    // request wrote nothing — the guard rolls back before any INSERT.
     //
-    //   - A NEW client_turn_id refused because another turn really is running.
-    //     Retryable the moment that reply lands, and the reconciler finds no turn
-    //     matching this id, classifies it never delivered and hands the draft back.
-    //     The message below is true.
+    // DO NOT describe what the client does next as a case list. !65 rounds 9, 10
+    // and 11 each went on a version of that, and each list was incomplete. Two
+    // separate questions are answered elsewhere:
     //
-    //   - A RETRY of an ORPHANED turn (see 'unavailable' below). No reply is
-    //     running and none ever will, so "wait for the reply" is false. The client
-    //     does NOT get its draft back either: it classifies from GET /session and
-    //     /turn-status, not from this response, and both show the earlier persisted
-    //     user row with its 'received' receipt — so it locks the composer instead.
-    //     Once the active-turn TTL lapses the same id returns 'duplicate'.
+    //   IS A REPLY ACTUALLY COMING? The message below assumes so. True whenever a
+    //   turn really is in flight — a new id while another runs, a same-id retry of
+    //   a turn still running, or an already-ANSWERED id refused because some OTHER
+    //   id is active (pgHasActiveTurn is probed before pgTurnIdSeen, so 'busy'
+    //   outranks 'duplicate'). FALSE when the "active" turn is an orphan (see
+    //   'unavailable' below): nothing is running, nothing will land, and after the
+    //   TTL the same id turns into 'duplicate'.
     //
-    // Do not re-collapse these into one claim about "the draft in front of the
-    // user": whether the draft comes back is decided by SERVER state, which the
-    // orphan has poisoned, not by what this branch did.
+    //   DOES THE DRAFT COME BACK? Only on an AUTHORITATIVE confirmed-lost: session
+    //   reads that succeeded and, on the id path, a SUPPORTED receipt reading
+    //   'unknown' inside the retention window. Everything else is 'uncertain' —
+    //   the mutation is kept, the composer LOCKS, no draft. That covers a failed
+    //   read, an unavailable or expired receipt, and notably the MEMORY/DEMO
+    //   tenant, which reports supportsTurnIds TRUE while getTurnStatus answers
+    //   supported:false, so the id path is taken and cannot conclude. See
+    //   turnDelivery.ts — reconcileReceiptOutcome, locksComposerAwaitingReply.
+    //
+    // In short: this branch knows it wrote nothing. It does not know what the user
+    // will see, and every attempt to say so from here has been wrong.
     throw new CustomError(
       'Another message in this chat is still being answered. Wait for the reply before sending again.',
       409,

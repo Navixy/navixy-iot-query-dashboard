@@ -4,15 +4,25 @@
  * Three properties define this file:
  *
  * 1. IT NEVER THROWS AND NEVER 500s. Missing tables, revoked grants, a settings DB
- *    briefly routed to a read-only standby — every failure is caught, logger.warn'ed
- *    once, and degraded to the bounded in-memory path. The memory path is a
- *    WRITE-BEHIND BUFFER (MR !61 review): the next healthy Postgres touch replays
- *    it into the resolved session, so a mid-dialogue outage no longer forfeits the
- *    turns it swallowed — a tenant whose DBA has not applied
- *    002_add_chat_tables.sql still gets a working chat, and the transcript now
- *    survives INTO Postgres once the DDL lands. DEMO identities are the exception
- *    (review !62 round 2): they live in their own memory namespace, never reach
- *    Postgres and never join the replay — see ChatIdentity.demo.
+ *    briefly routed to a read-only standby — every failure is caught and
+ *    logger.warn'ed once.
+ *
+ *    For READS and for UNGUARDED appends (the assistant result) that means degrading
+ *    to the bounded in-memory path, which is a WRITE-BEHIND BUFFER (MR !61 review):
+ *    the next healthy Postgres touch replays it into the resolved session, so a
+ *    mid-dialogue outage no longer forfeits the turns it swallowed — a tenant whose
+ *    DBA has not applied 002_add_chat_tables.sql still gets a working chat, and the
+ *    transcript survives INTO Postgres once the DDL lands.
+ *
+ *    A GUARDED append (rejectWhenTurnActive — the user turn) does NOT always degrade,
+ *    and saying "every failure degrades" here was wrong (!65 round 11). It FAILS
+ *    CLOSED with 'unavailable', buffering nothing, from BOTH of its origins: an
+ *    unresolved capability probe, and a write failure on a tenant known to have
+ *    receipts. Not throwing is not the same as not refusing. See AppendOutcome.
+ *
+ *    DEMO identities are a further exception (review !62 round 2): they live in their
+ *    own memory namespace, never reach Postgres and never join the replay — see
+ *    ChatIdentity.demo.
  *
  * 2. IT IS DISPLAY-ONLY. The transcript is (a) what GET /api/agent/session rehydrates
  *    into the UI and (b) the mock's turn counter. It is NEVER sent to Bedrock: under
@@ -84,11 +94,19 @@ export interface ChatStoreResult {
  *                   the stateful agent and leave the guard blind, since the
  *                   receipt insert's ON CONFLICT DO NOTHING means no NEW 'received'
  *                   row would ever appear for it.
- * - 'unavailable' — the tenant is known to support receipts, so the guard is
- *                   supposed to be authoritative, but the Postgres write failed
- *                   and we cannot say whether it ran. FAIL CLOSED: degrading to
- *                   the memory buffer here would admit a turn that bypassed the
- *                   lock entirely.
+ * - 'unavailable' — GUARDED appends only, and it has TWO origins (!65 round 11
+ *                   found this entry describing just the second):
+ *                     (a) the capability probe did not resolve, so we cannot tell
+ *                         whether this tenant's guard is authoritative. NOTHING was
+ *                         written — no INSERT was attempted.
+ *                     (b) the tenant is known to support receipts and the Postgres
+ *                         write FAILED. Whether it ran is unknown: an in-doubt
+ *                         COMMIT may have persisted the turn and its 'received'
+ *                         receipt, and nothing will ever replay it (see §7 of
+ *                         docs/ai-agent-seam.md — the orphaned turn).
+ *                   Either way FAIL CLOSED and buffer NOTHING: degrading to the
+ *                   memory buffer would admit a turn that bypassed the lock, since
+ *                   memory cannot see a receipt another replica may hold.
  */
 export type AppendOutcome = 'appended' | 'busy' | 'duplicate' | 'unavailable';
 
@@ -1206,9 +1224,16 @@ async function pgAppendTurns(
   schema: ChatSchema, options?: AppendOptions,
 ): Promise<AppendOutcome> {
   const { userId } = ident;
-  // A WRITE — deliberately NOT wrapped in withTransientRetry: the failure path
-  // (buffer, then replay on the next healthy touch) already delivers the turn
-  // exactly once, which an inline retry could only approximate.
+  // A WRITE — deliberately NOT wrapped in withTransientRetry. For an UNGUARDED
+  // append the failure path (buffer, then replay on the next healthy touch)
+  // already delivers the turn exactly once, which an inline retry could only
+  // approximate.
+  //
+  // That reasoning does NOT extend to a guarded append (!65 round 11): on a
+  // receipts-capable tenant a failure here returns 'unavailable' and buffers
+  // nothing, so there is no replay to be exactly-once about. Not retrying is
+  // still right — an inline retry after an in-doubt COMMIT would re-run a
+  // transaction that may already have applied — but the reason is different.
   //
   // ONE transaction covers the buffered replay, the new turns and the session
   // touch (MR !61 review): it lands whole or not at all, so memory and Postgres
