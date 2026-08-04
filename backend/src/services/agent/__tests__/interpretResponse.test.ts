@@ -1,8 +1,11 @@
 import { describe, it, expect } from '@jest/globals';
 import {
+  DROPPED_QUESTIONS_PREVIEW_CHARS,
+  droppedQuestionsTelemetry,
   interpretAgentResponse,
   looksLikeDroppedQuestions,
   looksLikeMissedResult,
+  type AgentIntent,
 } from '../interpretResponse.js';
 
 /**
@@ -239,11 +242,19 @@ describe('interpretAgentResponse — trailer (§3.4.4, proposed and NOT agreed)'
  * 6 of 6 real defects caught, 0 false positives, 0 missed.
  *
  * ONLY THE ENGLISH CAPTURES ARE INLINED. This repository is English-only and mirrors
- * publicly, so the five non-English captures live in DO-380 rather than here. Nothing
- * is lost: the rule tests for a question mark and a list marker, so it has no language
- * dependency to pin — and the defect is NOT language-specific, which is precisely what
- * the English control below establishes. (An earlier report claimed it was; the larger
- * sample disproved that.)
+ * publicly, so the five non-English captures stay in the DO-380 investigation rather
+ * than here. The defect is NOT language-specific, which is what the English control
+ * below establishes. (An earlier report claimed it was; the larger sample disproved
+ * that.)
+ *
+ * The RULE, however, was language-dependent, and that was a defect in it (MR !67 review).
+ * `includes('?')` over an English markdown list scored a Chinese, Arabic, `+`-bulleted or
+ * `•`-bulleted interview reply as a failure. Since the numerator is this MR's whole
+ * deliverable, those false positives argued for expensive upstream work on evidence that
+ * was not real. Both families are now widened; `describe('multilingual and list-marker
+ * families')` below pins them, using constructed strings rather than captures because the
+ * corpus has no CJK or RTL turn to quote. Every widening moves one way — fewer flags —
+ * so the lower bound stays a bound.
  *
  * The healthy cases matter more than the broken ones. Each defeats a rule that looks
  * reasonable and is wrong:
@@ -276,10 +287,10 @@ describe('looksLikeDroppedQuestions (DO-380)', () => {
     expect(looksLikeDroppedQuestions(reply)).toBe(false);
   });
 
-  it('is not ASCII-dependent: a non-English sign-off with no question still flags', () => {
-    // Stands in for the five non-English captures in DO-380. Multi-byte characters
-    // and emoji must not perturb either test — the failure rate on the non-English
-    // path measured ~4x the English one, so this path carries most of the volume.
+  it('still flags a non-English sign-off, and clears a non-English question', () => {
+    // Stands in for the five non-English captures. Multi-byte characters and emoji must
+    // not perturb either test — the failure rate on the non-English path measured ~4x
+    // the English one, so this path carries most of the volume.
     expect(looksLikeDroppedQuestions('Ich warte auf Ihre Antworten — dann baue ich es! 🚗📊')).toBe(true);
     expect(looksLikeDroppedQuestions('Was möchten Sie auf dem Dashboard sehen?')).toBe(false);
   });
@@ -311,20 +322,174 @@ describe('looksLikeDroppedQuestions (DO-380)', () => {
     expect(looksLikeDroppedQuestions('   \n  ')).toBe(true);
   });
 
-  it('overlaps looksLikeMissedResult, which is why the caller excludes it', () => {
+  it('overlaps looksLikeMissedResult, which is why the gate excludes it', () => {
     // A build reply that lost its URL asks nothing, so it scores true on BOTH — yet it
     // is POSSIBLE_MISSED_RESULT, a different defect. The predicates cannot tell them
-    // apart and are not meant to: the CALLER records a verdict only when
-    // `type === 'question' && !looksLikeMissedResult(prose)`, so this turn leaves both
-    // sides of the rate. Drop that gate and the numerator silently absorbs reworded
-    // build replies.
+    // apart and are not meant to; droppedQuestionsTelemetry owns that gate, and the
+    // suite below proves such a turn leaves BOTH sides of the rate.
     const missedBuild = 'Your dashboard has been built and is being uploaded now.';
     expect(looksLikeMissedResult(missedBuild)).toBe(true);
     expect(looksLikeDroppedQuestions(missedBuild)).toBe(true);
 
-    // The genuine defect carries no build marker, so the caller's gate lets it through.
+    // The genuine defect carries no build marker, so the gate lets it through.
     const droppedInterview = "I'm ready to build as soon as I have those details!";
     expect(looksLikeMissedResult(droppedInterview)).toBe(false);
     expect(looksLikeDroppedQuestions(droppedInterview)).toBe(true);
+  });
+});
+
+/**
+ * MR !67 review — the rule must not read "asks nothing" as "is not English markdown".
+ *
+ * On the reviewed SHA `looksLikeDroppedQuestions` tested `raw.includes('?')` against a
+ * list regex accepting only `-`, `*` and ASCII `1.`/`1)`. Every reply in this suite is a
+ * HEALTHY interview turn, and every one of them scored as a failure. That direction is
+ * the expensive one: the numerator is what this MR exists to produce, and inflating it
+ * with healthy replies argues for upstream work the traffic may not justify.
+ *
+ * Constructed, not captured — the 72-turn corpus is English and Russian only, so it has
+ * no CJK or RTL turn to quote. What IS from the corpus is the shape: `**1. …**` is this
+ * agent's dominant numbered form (20 of the 72 healthy replies carry no marker the old
+ * regex could see and were cleared by their `?` alone), and it bullets question lines
+ * with 👉 / 🔹 / ❓ in four more. Re-scored on that corpus after these widenings: still
+ * 6 of 6 caught, 0 false positives, 0 missed.
+ */
+describe('looksLikeDroppedQuestions — multilingual and list-marker families (!67)', () => {
+  it.each([
+    // The four the review reproduced against the exported function on the reviewed SHA.
+    ['`+` bullets — CommonMark\'s third marker', 'Provide:\n+ metric\n+ range'],
+    ['`•` bullets — a rendered list', 'Provide:\n• metric\n• range'],
+    ['fullwidth question mark U+FF1F (CJK)', '需要哪些指标？'],
+    ['Arabic question mark U+061F', 'ما الذي تريد تتبعه؟'],
+  ])('does NOT flag a healthy reply: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(false);
+  });
+
+  it.each([
+    ['Armenian U+055E', 'Ի՞նչ եք ուզում տեսնել'],
+    ['Ethiopic U+1367', 'ምን ማየት ይፈልጋሉ፧'],
+    ['Spanish opener alone U+00BF', '¿Qué desea ver en el panel'],
+    ['question ornament U+2753 — this agent bullets with it', 'Tell me what to track ❓'],
+    ['small form U+FE56', '追跡したいのは﹖'],
+  ])('does NOT flag a question in another script: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(false);
+  });
+
+  it.each([
+    ['fullwidth digits + U+FF0E, no space (CJK typography)', '请告诉我：\n１．指标\n２．时间范围'],
+    ['ideographic comma U+3001, no space', '教えてください：\n1、指標\n2、期間'],
+    ['circled numerals U+2460', 'Tell me:\n① the metric\n② the range'],
+    ['Arabic-Indic digits', 'Provide:\n١. metric\n٢. range'],
+    ['`**1. …**` — this agent\'s dominant numbered form', 'Great!\n\n**1. What to track**\nMileage.\n\n**2. Which vehicles**'],
+    ['`**1.** …` — emphasis closing before the space', "Let's start:\n**1.** the metric\n**2.** the range"],
+    ['em-dash bullets U+2014', 'Provide:\n— the metric\n— the range'],
+    ['emoji bullets — observed on 4 of the 72 turns', 'Here they are:\n👉 the metric\n👉 the range'],
+    ['indented bullets', 'Provide:\n  - the metric\n  - the range'],
+  ])('does NOT flag an imperative list written as: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(false);
+  });
+
+  it.each([
+    // The widening must not swallow the defect. Each of these asks nothing.
+    ['a decimal is not item 1', 'You have 1.5 million records ready to plot.'],
+    ['a horizontal rule is not a bullet', 'All set.\n---\nBuilding now!'],
+    ['a hash-number is not a marker', 'Report #1 is on its way.'],
+    ['bold prose is not a list', '**Great news** — building it now.'],
+    ['a leading emoji is decoration, not a bullet', '🚀 Ready as soon as you send those details!'],
+    ['a trailing emoji is decoration', 'I am waiting for your answers, then I build it! 🚀📊'],
+  ])('STILL flags: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(true);
+  });
+});
+
+/**
+ * MR !67 review — the logging contract, executable.
+ *
+ * `bedrockAgent.ts` reaches AWS, so by this suite's stated policy it has no test and the
+ * wiring was verified only by hand against the live agent. The DECISION behind the two
+ * log lines does not need AWS, so it lives here as a pure function and is pinned below:
+ * which turns contribute to the rate, which are omitted entirely, and what the warn
+ * carries. What is still out of reach without a mock is that `logger.info` and
+ * `logger.warn` are the calls actually made — the helper returns payloads and never
+ * touches the intent, so it cannot alter the turn the user receives.
+ */
+describe('droppedQuestionsTelemetry (DO-380 logging contract)', () => {
+  const question = (message: string): AgentIntent => ({
+    type: 'question',
+    message,
+    via: 'heuristic',
+  });
+
+  it('an eligible healthy turn records the DENOMINATOR: false plus a length', () => {
+    // The whole reason the verdict rides the every-turn info line. Without a `false`
+    // here a query yields a count of failures over an unknown total — which is the
+    // question the agent's author asked us to answer.
+    // The 47-char healthy control from the corpus — the one that defeats every length
+    // threshold. It has to land in the denominator, not be dropped as "too short".
+    const prose = 'What would you like to track on your dashboard?';
+    expect(droppedQuestionsTelemetry(question(prose), prose)).toEqual({
+      info: { questionsDropped: false, replyChars: 47 },
+      warn: null,
+    });
+  });
+
+  it('an eligible failing turn records the NUMERATOR and one bounded warn', () => {
+    // Shorter than the 400-char bound, so the preview is the reply whole — which is the
+    // point of the low bound: this defect's signature is a short reply.
+    const prose = "I'm ready to build as soon as I have those details!";
+    expect(droppedQuestionsTelemetry(question(prose), prose)).toEqual({
+      info: { questionsDropped: true, replyChars: 51 },
+      warn: { replyChars: 51, rawPreview: prose },
+    });
+  });
+
+  it('OMITS the fields on a result turn rather than recording false', () => {
+    // A build turn legitimately asks nothing. Recording `false` would put it in the
+    // denominator and understate the rate; recording `true` would invent a failure.
+    const prose = 'Your dashboard is ready: s3://bucket/report_schema.json';
+    const intent = interpretAgentResponse(prose);
+    expect(intent.type).toBe('result');
+    expect(droppedQuestionsTelemetry(intent, prose)).toEqual({ info: {}, warn: null });
+  });
+
+  it('OMITS the fields on a POSSIBLE_MISSED_RESULT turn — a different defect', () => {
+    // Classifies as 'question' and asks nothing, so it would score true on the rule.
+    // It is a build reply that lost its URL: counting it contaminates the numerator of
+    // the very rate the fix will be sized from. Delete this gate and that happens
+    // silently, which is why the assertion is on {} and not on questionsDropped.
+    const prose = 'Your dashboard has been built and is being uploaded now.';
+    const intent = interpretAgentResponse(prose);
+    expect(intent.type).toBe('question');
+    expect(looksLikeDroppedQuestions(prose)).toBe(true);
+    expect(droppedQuestionsTelemetry(intent, prose)).toEqual({ info: {}, warn: null });
+  });
+
+  it('caps the preview and measures the DELIVERED reply, not the raw prose', () => {
+    // `message` is what the user saw; `prose` is what arrived. Identical under today's
+    // heuristic, so a trailer intent is constructed here to force them apart — the day
+    // §3.4.4 lands, replyChars must not count machinery bytes and the preview must not
+    // leak them.
+    const message = 'x'.repeat(DROPPED_QUESTIONS_PREVIEW_CHARS + 250);
+    const prose = `${message}\n\`\`\`json\n{"type":"question"}\n\`\`\``;
+    const telemetry = droppedQuestionsTelemetry(
+      { type: 'question', message, via: 'trailer' },
+      prose,
+    );
+    expect(telemetry.info).toEqual({
+      questionsDropped: true,
+      replyChars: DROPPED_QUESTIONS_PREVIEW_CHARS + 250,
+    });
+    expect(telemetry.warn?.rawPreview).toHaveLength(DROPPED_QUESTIONS_PREVIEW_CHARS);
+    expect(telemetry.warn?.replyChars).toBe(DROPPED_QUESTIONS_PREVIEW_CHARS + 250);
+    expect(telemetry.warn?.rawPreview).not.toContain('```');
+  });
+
+  it('is total: an empty reply produces a verdict rather than throwing', () => {
+    // Not a reachable state — collectCompletion throws EmptyCompletion on a
+    // whitespace-only drain — but nothing in the signature says the caller pre-filters.
+    expect(droppedQuestionsTelemetry(question(''), '')).toEqual({
+      info: { questionsDropped: true, replyChars: 0 },
+      warn: { replyChars: 0, rawPreview: '' },
+    });
   });
 });

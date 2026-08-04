@@ -1,10 +1,13 @@
 /**
- * Classification of the Bedrock agent's raw prose response (DO-342, §3.4.2-§3.4.4).
+ * Classification of the Bedrock agent's raw prose response (DO-342, §3.4.2-§3.4.4),
+ * and the diagnostic verdicts derived from it (DO-380).
  *
- * PURE — string in, AgentIntent out. No AWS import of any kind, no logger, no
- * side effects: that is what makes the single most fragile decision in this
- * feature testable with no client, no mock and no DI seam. The caller
- * (bedrockAgent.ts) owns every log line and every S3 byte.
+ * PURE — text in, decisions out. No AWS import of any kind, no logger, no side
+ * effects: that is what makes the most fragile decisions in this feature testable
+ * with no client, no mock and no DI seam. Everything here DECIDES; the caller
+ * (bedrockAgent.ts) owns every log line and every S3 byte. Log payloads are built
+ * here (`droppedQuestionsTelemetry`) precisely so that what gets logged, and on
+ * which turns, is covered by this module's tests rather than by nothing at all.
  *
  * Strategy: trailer-first, heuristic-as-fallback, from day one. fromTrailer
  * returns null against every response the agent emits today — that is the
@@ -175,8 +178,82 @@ export function looksLikeMissedResult(raw: string): boolean {
   return MISSED_RESULT_MARKERS.some((marker) => haystack.includes(marker));
 }
 
-/** A markdown list item: `1.` / `1)` / `-` / `*` at the start of any line. */
-const LIST_ITEM = /^\s*(?:\d+[.)]|[-*])\s+/m;
+/**
+ * A question mark in ANY script. Every codepoint here terminates — or, for the
+ * Spanish opener, introduces — an interrogative and has no second role, so widening
+ * this family can only REMOVE false positives from the DO-380 rate, never add one.
+ *
+ *   U+003F  ASCII       Latin, Cyrillic, Hebrew, Thai, Devanagari, Greek as typed
+ *   U+FF1F  fullwidth   Chinese, Japanese, Korean
+ *   U+FE56  small form  CJK compatibility
+ *   U+061F  Arabic      Arabic, Persian, Urdu, Pashto
+ *   U+055E  Armenian
+ *   U+1367  Ethiopic    Amharic, Tigrinya
+ *   U+037E  Greek       the dedicated codepoint only — see the gap below
+ *   U+00BF  inverted    Spanish/Asturian opener
+ *   U+2047  U+2048  U+2049  U+203D  U+2E2E   doubled, mixed, interrobang, reversed
+ *   U+2753  U+2754  emoji ornaments — OBSERVED in this agent's own output, which
+ *                   bullets its question lines with U+2753
+ *
+ * KNOWN GAP — modern Greek types U+003B SEMICOLON, not U+037E. U+003B cannot go in
+ * here: an ordinary semicolon anywhere in a reply would clear it, a far larger hole
+ * than the one it closes. Greek interrogatives rely on the list test alone. Same
+ * lower-bound direction as the rest of the rule.
+ */
+const QUESTION_MARK = /[?¿;՞؟፧⁇⁈⁉‽⸮❓❔﹖？]/u;
+
+/**
+ * A numbered list item at the start of a line, in any script's digits.
+ *
+ *   `[*_#>]{0,3}`  optional markdown emphasis / quote / heading run BEFORE the
+ *                  marker. Not cosmetic: `**1. What to track?**` is this agent's
+ *                  DOMINANT numbered form. 20 of the 72 measured healthy replies
+ *                  carry no marker the pre-DO-380 regex could see and were cleared
+ *                  by their `?` alone — so in any script whose question mark that
+ *                  regex also missed, all 20 were false positives.
+ *   `\p{Nd}+[.)]`  ASCII-style. The trailing space is MANDATORY, so that
+ *                  "1.5 million records" is not read as item 1. `[*_]{0,2}` ahead of
+ *                  it admits `**1.** item`, where emphasis closes before the space.
+ *   `\p{Nd}+…`     CJK-style, terminated by U+FF0E U+FF09 U+3001 U+3002. No space
+ *                  required: CJK typography does not put one after the marker, which
+ *                  is exactly why demanding `\s` misread a fullwidth numbered list
+ *                  as prose.
+ *   `\p{No}`       circled and parenthesised numerals (U+2460…, U+2474…), which carry
+ *                  their own terminator.
+ */
+const NUMBERED_ITEM =
+  /^[^\S\n]*[*_#>]{0,3}[^\S\n]*(?:\p{Nd}+[.)][*_]{0,2}[^\S\n]|\p{Nd}+[．）、。]|\p{No})/mu;
+
+/**
+ * A bulleted list item at the start of a line. CommonMark's three (`-` `*` `+`) —
+ * `+` was missing and is as ordinary as the other two — plus the typographic bullets
+ * a rendered list uses (U+00B7 U+2022 U+2023 U+2043 U+2219 U+25A0 U+25A1 U+25AA
+ * U+25AB U+25CB U+25CF U+25E6 U+203B) and the dashes European typography uses as
+ * bullets (U+2013 U+2014).
+ *
+ * The trailing `[^\S\n]` is space-or-tab, NOT `\s`: a marker followed by a newline is
+ * a stray character rather than an item, and `---` has to stay a horizontal rule.
+ */
+const BULLET_ITEM = /^[^\S\n]*[*_#>]{0,3}[^\S\n]*[-*+·–—•‣⁃∙■□▪▫○●◦※][^\S\n]/mu;
+
+/**
+ * An emoji used as a bullet — observed: this agent bullets its questions with U+1F449
+ * and U+1F539 in 4 of the 72 measured replies. A trailing variation selector or
+ * skin-tone modifier is consumed so the space after it still reads as the separator.
+ *
+ * Gated on a PRECEDING line (leading `\n`, where the other two anchor with `/m`), and
+ * the asymmetry is deliberate. A typographic bullet has no second role; an emoji does.
+ * A rocket on a sign-off — "<emoji> Ready when you have those details!" — is decoration,
+ * and that IS the defect, so requiring a line above keeps it flagged: every measured
+ * truncation is a single line, and every measured emoji list has an intro above it.
+ */
+const EMOJI_ITEM =
+  /\n[^\S\n]*\p{Extended_Pictographic}(?:\uFE0F|[\u{1F3FB}-\u{1F3FF}])*[^\S\n]/u;
+
+/** Any of the three item shapes above. */
+function containsListItem(raw: string): boolean {
+  return NUMBERED_ITEM.test(raw) || BULLET_ITEM.test(raw) || EMOJI_ITEM.test(raw);
+}
 
 /**
  * The agent sometimes composes an interview reply — intro, numbered questions,
@@ -198,7 +275,16 @@ const LIST_ITEM = /^\s*(?:\d+[.)]|[-*])\s+/m;
  *     hardest on correct behaviour.
  *
  * This rule caught 6 of 6 real defects with 0 false positives across 18 dialogues /
- * 72 live turns.
+ * 72 live turns. Both families above were widened after review (MR !67) and re-scored
+ * on that same corpus: unchanged at 6 of 6, 0 false positives, 0 missed.
+ *
+ * WHY THE FAMILIES ARE WIDE. The first cut tested `raw.includes('?')` against a single
+ * `-`/`*`/digit list marker, which is a rule about ENGLISH MARKDOWN, not about asking.
+ * A Chinese or Arabic interview reply carries its own question mark and scored as a
+ * failure; so did a `+` or a `•` bullet. Those are false positives, and a false positive
+ * here is worse than a miss: the numerator is the deliverable, and inflating it argues
+ * for expensive upstream work that the traffic may not justify. Both widenings move
+ * strictly one way — fewer flags — so the lower bound below stays a bound.
  *
  * KNOWN UNDER-COUNT — the rate this produces is a LOWER BOUND and must be reported as
  * one. What survives truncation is a closing line, and a closing line is exactly the
@@ -207,14 +293,78 @@ const LIST_ITEM = /^\s*(?:\d+[.)]|[-*])\s+/m;
  * pinned in the tests so it stays a known limit rather than a discovered one. 0 missed
  * across the 72 measured turns is real evidence the gap is small, not that it is empty.
  *
- * Caller must gate on `type === 'question'` AND on `!looksLikeMissedResult` — a build
- * turn legitimately asks nothing, and a build reply that merely LOST its URL is a
- * different defect that would otherwise land in this rate. `type` is a safer exclusion
- * than re-testing for an `s3://` URL that `stripArtifactUrls` may already have removed.
+ * Callers should not invoke this directly — use `droppedQuestionsTelemetry`, which owns
+ * the eligibility gate that keeps build turns and reworded build replies out of the rate.
  *
  * Changes no behaviour. It exists to put a denominator under a rate nobody has yet:
  * our 8.3 % is from a script that pushes back on purpose, not from traffic.
  */
 export function looksLikeDroppedQuestions(raw: string): boolean {
-  return !raw.includes('?') && !LIST_ITEM.test(raw);
+  return !QUESTION_MARK.test(raw) && !containsListItem(raw);
+}
+
+/** Bound on the diagnostic preview. The defect's whole signature is a SHORT reply —
+ *  47 to 168 chars across every measured instance — so this captures it whole with
+ *  room to spare, at a fifth of POSSIBLE_MISSED_RESULT's 2000. */
+export const DROPPED_QUESTIONS_PREVIEW_CHARS = 400;
+
+/** What the DO-380 verdict contributes to the per-turn info line — or nothing at all,
+ *  on a turn that was never eligible. */
+export type DroppedQuestionsInfo =
+  | { questionsDropped: boolean; replyChars: number }
+  | Record<string, never>;
+
+export interface DroppedQuestionsTelemetry {
+  /** Spread onto the existing `[Agent] Agent turn classified` info line. */
+  info: DroppedQuestionsInfo;
+  /** Payload for the INTERVIEW_QUESTIONS_DROPPED warn, or null when not warranted. */
+  warn: { replyChars: number; rawPreview: string } | null;
+}
+
+/**
+ * The whole DO-380 logging decision for one turn, as data. (DO-380)
+ *
+ * Pure and total, so the logging CONTRACT is testable without an AWS mock — the reason
+ * it is a helper rather than three conditions inline in `bedrockAgent.ts`, where nothing
+ * in the suite can reach it. It returns payloads only and never touches the intent, so
+ * it structurally cannot alter the turn the user receives.
+ *
+ * DENOMINATOR, NOT JUST A NUMERATOR. `info` rides the line that already fires for every
+ * turn, so a rate falls out of one query. A warn-only log would give a count of failures
+ * over an unknown total, which is exactly the question the agent's author is trying to
+ * answer — he needs the frequency to choose between an in-band error and rebuilding his
+ * orchestration.
+ *
+ * `info` is EMPTY — the keys omitted, not recorded as `false` — on turns that were never
+ * eligible, so both sides of the rate hold only real interview turns:
+ *
+ *   - result turns: a build turn legitimately asks nothing.
+ *   - POSSIBLE_MISSED_RESULT turns: a build reply that lost its URL classifies as
+ *     'question' and asks nothing, so it scores `true` on the rule while being a
+ *     DIFFERENT defect. Counting it would contaminate the numerator of the very rate
+ *     the agent's author will use to size his fix.
+ *
+ * The verdict reads `intent.message`, because the defect is defined by what the USER
+ * received. Identical today (the heuristic sets message = raw); the day §3.4.4 lands, the
+ * trailer is machinery the user never sees and `replyChars` must not count its bytes.
+ * `prose` is passed separately and deliberately: the missed-result exclusion asks whether
+ * the agent sent a URL WE failed to see, a question about the text exactly as it arrived.
+ */
+export function droppedQuestionsTelemetry(
+  intent: AgentIntent,
+  prose: string,
+): DroppedQuestionsTelemetry {
+  if (intent.type !== 'question' || looksLikeMissedResult(prose)) {
+    return { info: {}, warn: null };
+  }
+
+  const replyChars = intent.message.length;
+  const questionsDropped = looksLikeDroppedQuestions(intent.message);
+
+  return {
+    info: { questionsDropped, replyChars },
+    warn: questionsDropped
+      ? { replyChars, rawPreview: intent.message.slice(0, DROPPED_QUESTIONS_PREVIEW_CHARS) }
+      : null,
+  };
 }
