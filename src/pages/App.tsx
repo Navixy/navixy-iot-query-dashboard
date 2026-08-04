@@ -42,8 +42,10 @@ const WIZARD_OPTIONS = [
     // may have landed in BOTH stores. docs/ai-agent-seam.md §7 holds the full case table;
     // this copy asserts only what is true on every one of them.
     //
-    // If you are about to reword this: four attempts were made here, and the three that
-    // failed all began "always" or "never". Change the table in §7, not this sentence.
+    // If you are about to reword this: the claim behind it has been got wrong FOUR times
+    // (§7 tracks each). Three were a sentence beginning "always" or "never"; the fourth
+    // was a table — which read as more rigorous and was incomplete in a new way.
+    // Change the table in §7, not this sentence.
     description:
       'Describe what you want to monitor in plain language. The assistant asks a few clarifying questions, then builds a full SQL-backed dashboard you can preview against your own data before it is added to your reports.',
     bestFor: 'You know what you want to see but not which tables or queries it takes to get there.',

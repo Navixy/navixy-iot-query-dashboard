@@ -399,47 +399,62 @@ becomes visible.
 > anything. That is §6's persist-never-refetch rule doing exactly what it is supposed to do: the
 > artifact is copied out of S3 once so a reloaded conversation outlives the object's expiry.
 >
-> **The conditions, stated once because three rounds of review were spent getting this sentence
-> wrong.** `appendTurns` (`chatStore.ts`) attempts Postgres only when the session is **not** a demo
-> session and the tenant has **`002`** applied. What the outcomes actually mean:
+> **The conditions, stated once because four rounds of review were spent getting this right.** Scope
+> first, because the previous version of this table had none and !65 round 7 went on the gap: this is
+> **the assistant result append** — `appendTurns(pool, ident, sessionId, [assistantTurn])`, the
+> **unguarded** call `POST /chat` makes once the agent has replied. The guarded *user* append that
+> opens the turn (`rejectWhenTurnActive`) has three further outcomes that are **decisions, not
+> storage results** — `busy`, `duplicate` and `unavailable` — and `unavailable` writes nothing,
+> buffers nothing, and says so to the client. It is not a fallback and it is not in this table.
 >
-> | Path | Reached the tenant DB? |
-> |---|---|
-> | **Demo session** | **No — structurally.** The route passes `pool = null` (`routes/agent.ts`) *and* the store independently refuses on `ident.demo`. Two layers, because `userDbUrl` is the customer's real settings DB and the banner promises nothing is saved to it. |
-> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). |
-> | **Postgres failed before `COMMIT` applied** | **No.** Rolled back, degraded to `memoryAppend`. |
-> | **In-doubt `COMMIT`** | **Possibly yes — and this is the one that breaks every absolute.** `COMMIT` can return an error *after* the server applied the transaction (`chatStore.ts`, the `COMMIT` inside `pgAppendTurns`'s try). The catch degrades to the write-behind buffer, so the turn now sits in **both** stores until replay reconciles. Store-minted ids plus `ON CONFLICT (id) DO NOTHING` make that replay idempotent — pinned by `chatStore.replay.test.ts` ("an in-doubt `COMMIT` cannot duplicate a turn"). |
+> Three questions, not one, because "did it reach the database" was never the whole state:
 >
-> So the fallback means **"the write was not durably confirmed and the turn is retained for
-> replay"** — *not* "nothing was written". The no-DB-write guarantee is absolute only for the demo
-> and known-missing-schema rows above.
+> | Path | In `chat_messages`? | Buffered? | Replayed to Postgres later? |
+> |---|---|---|---|
+> | **Demo session** | **No — structurally.** The route passes `pool = null` *and* the store independently refuses on `ident.demo` (the `pool && !ident.demo` guard in `appendTurns`). Two layers, because `userDbUrl` is the customer's real settings DB and the banner promises nothing is saved to it. | Yes — in the **`demo:`** namespace. | **Never.** Both replay sites sit behind `pool && !ident.demo`, and `bufferKeyFor` prefixes the key, so no live touch can even address a demo buffer. Demo memory is a dead end by construction, not a pending write. |
+> | **Live, `pool = null`** | **No.** | Yes (`live:`). | Yes, on the next healthy touch. Contract-level rather than a live route path: `appendTurns` takes `Pool \| null` and the route writes `req.settingsPool ?? null`, but `authenticateToken` always attaches a pool and 401s otherwise. |
+> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). | Yes. | Yes — the probe is cached for only 60 s, so applying the DDL heals the tenant within a minute, no restart. |
+> | **Error before `COMMIT` was issued** | **No.** Rolled back. | Yes. | Yes. |
+> | **`COMMIT` returned success** | **Yes — and this is the common path.** | No. | n/a. |
+> | **`COMMIT` itself returned an error** | **Unknown — possibly yes.** `COMMIT` can fail *after* the server applied the transaction — the `COMMIT` inside `pgAppendTurns`'s try, whose catch rolls back (a no-op by then) and rethrows. | Yes — **definitely**, whichever way the commit went. | Yes, idempotently. Store-minted ids plus `ON CONFLICT (id) DO NOTHING` make a replay of an already-applied turn a no-op — pinned by `chatStore.replay.test.ts` ("an in-doubt `COMMIT` cannot duplicate a turn"). |
+>
+> So a fallback means **the write was not durably confirmed** — not "nothing was written", and not
+> "the turn is safe". Buffering is best-effort and bounded: 100 turns and 8 MiB per session, 64 MiB
+> and `MAX_SESSIONS` globally, a 2 h idle sweep, and process memory. An entry can be evicted before
+> any healthy Postgres touch arrives, and a restart takes every one of them.
 >
 > Round 4's *"on every tenant that has `002` applied"* was wrong because it contradicted the demo
-> guarantee and §8's graceful degradation. Round 5's replacement — *"otherwise nothing reaches the
-> tenant database at all"* — was wrong because it contradicts the tested recovery protocol. **A demo
-> user on a fully-migrated tenant persists nothing; a user whose `COMMIT` was in doubt may well have
-> persisted everything.**
+> guarantee. Round 5's replacement — *"otherwise nothing reaches the tenant database at all"* — was
+> wrong because it contradicts the tested recovery protocol. Round 6's table was wrong in the other
+> direction: it read every fallback as a pending write, which is precisely what demo memory is not,
+> and it left out the case that actually happens most — a commit that simply succeeded. **A demo
+> user on a fully-migrated tenant persists nothing and never will; a user whose `COMMIT` was in
+> doubt may well have persisted everything already.**
 >
 > **What Apply gates is report creation, not storage.** That is the one statement true on **every**
-> path above, which is why it is the only one the `/app` copy makes: "nothing is added to your
-> reports until you apply it". The original phrasing ("before anything is written to
-> `dashboard_studio_meta_data`") was a false persistence guarantee, and it contradicted §6 nine
-> hundred words earlier in the same file.
+> path above, which is why it is the only claim the `/app` copy makes — verbatim, *"preview against
+> your own data before it is added to your reports"*. The original phrasing ("before anything is
+> written to `dashboard_studio_meta_data`") was a false persistence guarantee, and it contradicted §6
+> nine hundred words earlier in the same file.
 >
 > Note the shape of that mistake, because the next two paragraphs are about the same failure mode:
 > **a rule asserted in prose and contradicted elsewhere in the same document.** It happened here, in
-> the section that exists to warn about it, and then **three more times** — each fix an absolute in
-> a new direction, each caught by the next round:
+> the section that exists to warn about it, and then **four more times** — three of them a fresh
+> absolute in a new direction, the fourth a table with a hole in it, each caught by the next round:
 >
 > | Round | Claim | Disproved by |
 > |---|---|---|
 > | original | nothing is saved before preview | `appendTurns` persists the full `report_schema` at turn time |
-> | 4 | saved on every tenant with `002` | demo sessions; missing schema; Postgres failure |
+> | 4 | saved on every tenant with `002` | a demo user on a fully-migrated tenant; a write that failed or was left in doubt. **Not** by a tenant missing `002` — that is outside the claim's premise, and citing it here was a second error the same round (!65 round 7) |
 > | 5 | otherwise nothing reaches the tenant DB | the in-doubt `COMMIT` path and its replay test |
+> | 6 | a table of failure paths, each "retained for replay" | demo memory is **never** replayed; the in-doubt row is only *possibly* in Postgres, though certainly buffered; and the table had no row for the commit that succeeds, which is the usual outcome |
 >
-> **Four attempts, three of them a confidently-worded absolute.** The one that survived is a table of
-> cases plus a single invariant. If a later change makes this section wrong again, the fix is another
-> row — not another sentence that begins "always" or "never".
+> **Five attempts. Three were a confidently-worded absolute; the fourth was a table, and a table
+> failed differently** — by omission and by an unqualified cell, which reads as more rigorous than
+> the prose it replaced while being just as wrong. If a later change makes this section wrong again:
+> add a row, never a sentence beginning "always" or "never" — and before you call it correct, check
+> that the **success** path is a row too, and that no cell states a certainty the code only reaches
+> sometimes.
 
 **This is enforced in code, not merely recommended.** `resultCardState`
 (`src/components/ai-chat/resultCardState.ts`) refuses Apply until a mounted renderer has reported a

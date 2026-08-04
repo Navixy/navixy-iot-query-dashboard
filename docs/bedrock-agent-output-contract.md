@@ -308,10 +308,13 @@ class is schema grounding on the agent's side.
 > gates is **report creation**, not storage.
 >
 > Round 5 then corrected the correction: persistence is **conditional**, not universal. A demo
-> session never touches the tenant database, and a tenant without migration `002` — or with Postgres
-> unavailable — keeps the turn in an in-memory / write-behind store. `docs/ai-agent-seam.md` §7
-> states the conditions once; the only claim true on every path is that **nothing becomes a report
-> until Apply**.
+> session never touches the tenant database and its transcript is **never** replayed into one. A
+> live session on a tenant without migration `002` — or with Postgres unavailable — keeps the turn
+> in a write-behind buffer that the next healthy touch drains, and a `COMMIT` that returns an error
+> may have applied anyway, leaving the turn buffered *and* possibly already stored. Those are not
+> the same fallback: one is a dead end, the others are pending writes. `docs/ai-agent-seam.md` §7
+> tabulates every case; the only claim true on all of them is that **nothing becomes a report until
+> Apply**.
 
 ---
 
