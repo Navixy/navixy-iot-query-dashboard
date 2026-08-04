@@ -38,11 +38,12 @@ const WIZARD_OPTIONS = [
     // guarantee. (!65 review round 4)
     //
     // Deliberately says nothing about WHETHER the turn was persisted, because that varies
-    // and the wording must hold in every case — demo sessions never touch the tenant DB at
-    // all, and a tenant without migration 002 or with Postgres down keeps the turn in the
-    // in-memory/write-behind store. docs/ai-agent-seam.md §7 states the conditions once;
-    // this copy asserts only the part that is true on ALL of those paths. Round 4 replaced
-    // an absolute claim with the opposite absolute claim; round 5 caught that too.
+    // per path — demo, missing migration 002, a failed write, and an in-doubt COMMIT that
+    // may have landed in BOTH stores. docs/ai-agent-seam.md §7 holds the full case table;
+    // this copy asserts only what is true on every one of them.
+    //
+    // If you are about to reword this: four attempts were made here, and the three that
+    // failed all began "always" or "never". Change the table in §7, not this sentence.
     description:
       'Describe what you want to monitor in plain language. The assistant asks a few clarifying questions, then builds a full SQL-backed dashboard you can preview against your own data before it is added to your reports.',
     bestFor: 'You know what you want to see but not which tables or queries it takes to get there.',

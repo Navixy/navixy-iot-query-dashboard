@@ -399,19 +399,26 @@ becomes visible.
 > anything. That is §6's persist-never-refetch rule doing exactly what it is supposed to do: the
 > artifact is copied out of S3 once so a reloaded conversation outlives the object's expiry.
 >
-> **The conditions, stated once because two rounds of review were spent getting this sentence
-> wrong.** `appendTurns` (`chatStore.ts`) reaches Postgres only when **all** of these hold:
+> **The conditions, stated once because three rounds of review were spent getting this sentence
+> wrong.** `appendTurns` (`chatStore.ts`) attempts Postgres only when the session is **not** a demo
+> session and the tenant has **`002`** applied. What the outcomes actually mean:
 >
-> | | |
+> | Path | Reached the tenant DB? |
 > |---|---|
-> | the session is **not** a demo session | the route passes `pool = null` for demo (`routes/agent.ts`), and the store independently refuses on `ident.demo` — two layers, because a demo transcript reaching the customer's real settings DB would break the banner's promise that nothing is saved |
-> | the tenant has **`002`** applied | `probeChatSchema` reads `information_schema`; there is no migration runner (§8) |
-> | the write **succeeds** | any Postgres failure is caught and degrades |
+> | **Demo session** | **No — structurally.** The route passes `pool = null` (`routes/agent.ts`) *and* the store independently refuses on `ident.demo`. Two layers, because `userDbUrl` is the customer's real settings DB and the banner promises nothing is saved to it. |
+> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). |
+> | **Postgres failed before `COMMIT` applied** | **No.** Rolled back, degraded to `memoryAppend`. |
+> | **In-doubt `COMMIT`** | **Possibly yes — and this is the one that breaks every absolute.** `COMMIT` can return an error *after* the server applied the transaction (`chatStore.ts`, the `COMMIT` inside `pgAppendTurns`'s try). The catch degrades to the write-behind buffer, so the turn now sits in **both** stores until replay reconciles. Store-minted ids plus `ON CONFLICT (id) DO NOTHING` make that replay idempotent — pinned by `chatStore.replay.test.ts` ("an in-doubt `COMMIT` cannot duplicate a turn"). |
 >
-> Otherwise the turn goes to `memoryAppend` — the per-process in-memory / write-behind store — and
-> **nothing reaches the tenant database at all.** So "on every tenant that has `002` applied", which
-> is what this paragraph said after round 4, is still wrong: it contradicts both the demo guarantee
-> and §8's graceful-degradation design. A demo user on a fully-migrated tenant persists nothing.
+> So the fallback means **"the write was not durably confirmed and the turn is retained for
+> replay"** — *not* "nothing was written". The no-DB-write guarantee is absolute only for the demo
+> and known-missing-schema rows above.
+>
+> Round 4's *"on every tenant that has `002` applied"* was wrong because it contradicted the demo
+> guarantee and §8's graceful degradation. Round 5's replacement — *"otherwise nothing reaches the
+> tenant database at all"* — was wrong because it contradicts the tested recovery protocol. **A demo
+> user on a fully-migrated tenant persists nothing; a user whose `COMMIT` was in doubt may well have
+> persisted everything.**
 >
 > **What Apply gates is report creation, not storage.** That is the one statement true on **every**
 > path above, which is why it is the only one the `/app` copy makes: "nothing is added to your
@@ -420,11 +427,19 @@ becomes visible.
 > hundred words earlier in the same file.
 >
 > Note the shape of that mistake, because the next two paragraphs are about the same failure mode:
-> **a rule asserted in prose and contradicted elsewhere in the same document.** It happened again,
-> here, in the section that exists to warn about it — and then a *second* time, when round 4's fix
-> replaced one absolute claim with the opposite absolute claim and round 5 had to catch that too.
-> **The reliable move is not a better absolute; it is naming the conditions and then saying only
-> what survives all of them.**
+> **a rule asserted in prose and contradicted elsewhere in the same document.** It happened here, in
+> the section that exists to warn about it, and then **three more times** — each fix an absolute in
+> a new direction, each caught by the next round:
+>
+> | Round | Claim | Disproved by |
+> |---|---|---|
+> | original | nothing is saved before preview | `appendTurns` persists the full `report_schema` at turn time |
+> | 4 | saved on every tenant with `002` | demo sessions; missing schema; Postgres failure |
+> | 5 | otherwise nothing reaches the tenant DB | the in-doubt `COMMIT` path and its replay test |
+>
+> **Four attempts, three of them a confidently-worded absolute.** The one that survived is a table of
+> cases plus a single invariant. If a later change makes this section wrong again, the fix is another
+> row — not another sentence that begins "always" or "never".
 
 **This is enforced in code, not merely recommended.** `resultCardState`
 (`src/components/ai-chat/resultCardState.ts`) refuses Apply until a mounted renderer has reported a
