@@ -413,10 +413,29 @@ becomes visible.
 > (`!schema.known`) or `pgAppendTurns` threw. But when receipts are known present, the throw can be
 > an in-doubt `COMMIT`, and then **the user turn and its receipt may already be in Postgres while
 > the route answers 503**. `appendTurns` returns `unavailable` from that catch *without* calling
-> `memoryAppend`, so the no-buffer half holds and the no-write half does not. The system stays
-> consistent on retry rather than double-sending — a retry carrying the same `client_turn_id` finds
-> the receipt via `pgTurnIdSeen` and is refused `duplicate` (409) — but the 503's "try again" is
-> reassuring about durability in a way the code cannot back.
+> `memoryAppend`, so the no-buffer half holds and the no-write half does not.
+>
+> **KNOWN LIMITATION — an in-doubt guarded `COMMIT` can orphan a user turn, and retrying does not
+> recover it.** Round 8 claimed the opposite right here (*"a retry finds the receipt and is refused
+> `duplicate`, so the system stays consistent"*); !65 round 9 disproved it, and the truth is worse
+> than the claim it replaced:
+>
+> 1. `appendTurns` returns `unavailable` at the guarded append in `POST /chat`, which is **before**
+>    `agentService.chat`. **The agent was never invoked, so no reply exists or ever will.**
+> 2. If the in-doubt `COMMIT` applied, the user turn is persisted with a **`'received'`** receipt.
+> 3. A retry is refused **`busy`**, not `duplicate` — `pgAppendTurns` probes `pgHasActiveTurn`
+>    *before* `pgTurnIdSeen`, and the live `'received'` receipt satisfies the first. Pinned by
+>    `chatStore.replay.test.ts` (*"refuses a replayed id even while its receipt is still
+>    received"*). Once the active-turn TTL lapses it becomes `duplicate` instead. **Neither
+>    outcome dispatches the agent.**
+> 4. The client reads the receipt as delivered: it locks the composer and renders *"Your message
+>    was delivered — the reply may appear the next time you open this page."* For this turn that
+>    sentence is false, and the draft is not handed back.
+>
+> Rare — it needs a receipts-capable tenant and a `COMMIT` that applies and then errors. But it is
+> silent and user-visible, and **recovering it needs resumable dispatch** (on a `'received'` receipt
+> with no assistant turn, re-enter the agent call rather than re-appending the user turn), which
+> does not exist. Do not call retry a recovery path until it does.
 >
 > Three questions, not one, because "did it reach the database" was never the whole state:
 >
@@ -550,8 +569,15 @@ guard is also off.
 ### Verifying, and no restart is required
 
 Send any chat turn, then `GET /api/agent/session` and read `persisted`. **`true` means `002` is
-live.** The probe cache expires within 60 s, so a freshly applied migration is picked up on its own
-— **do not restart the backend** and do not conclude anything from the first request after applying.
+live.** **Do not restart the backend**, and do not conclude anything from the first request after
+applying — a cached "absent" answer can still be serving.
+
+**Nothing picks the migration up on its own.** `probeChatSchema` is request-driven: there is no
+timer and no background replay. Once the cached absence is at least 60 s old, **the next chat or
+session request re-probes** and the tenant heals from there. An idle tenant stays unhealed for as
+long as it stays idle, so verify by *sending a request*, not by waiting. (This paragraph promised
+automatic recovery until !65 round 9 — the same claim was corrected in §7's table and at
+`PROBE_TTL_MS` a round earlier, and this third copy was missed.)
 
 **Before applying `002`, confirm one thing:** that its `user_id` type matches the live
 `dashboard_studio_meta_data.users.id`. This repo contains no DDL for the existing schema. It was

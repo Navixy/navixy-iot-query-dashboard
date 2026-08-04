@@ -243,8 +243,13 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   if (started === 'busy') {
     // 409, not 429: this is a state conflict on the session, not rate limiting —
     // and it is retryable the moment the previous reply lands. Nothing was
-    // persisted, so the client's reconciler correctly classifies the turn as
-    // never delivered and hands the draft back.
+    // persisted BY THIS REQUEST, so the client's reconciler correctly classifies
+    // it as never delivered and hands the draft back.
+    //
+    // Scoped to this request on purpose: 'busy' is also what a retry gets after an
+    // orphaned turn (see the 'unavailable' branch below), and there the reply the
+    // message promises is never coming. This branch is still right about the draft
+    // in front of the user; it says nothing about the earlier turn.
     throw new CustomError(
       'Another message in this chat is still being answered. Wait for the reply before sending again.',
       409,
@@ -264,13 +269,22 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     // authoritative (round 11, Important 2). Refusing is deliberate: admitting the
     // turn would bypass the lock entirely.
     //
-    // 503 says "try again", and retrying IS correct — but do not read it as "nothing
-    // was persisted" (!65 round 8; that absolute used to be on this line). The store
-    // returns 'unavailable' from a catch that an in-doubt COMMIT can reach, so on a
-    // receipts-capable tenant this turn and its receipt may ALREADY be in Postgres.
-    // Retrying is still safe: the same client_turn_id finds the receipt and comes
-    // back 409 'duplicate' rather than sending twice. What 'unavailable' guarantees
-    // is that nothing was BUFFERED — appendTurns skips memoryAppend on this path.
+    // What 'unavailable' guarantees is that nothing was BUFFERED — appendTurns skips
+    // memoryAppend on this path. It does NOT guarantee nothing was written (!65 round
+    // 8): the store returns it from a catch an in-doubt COMMIT can reach, so on a
+    // receipts-capable tenant this turn and its 'received' receipt may ALREADY be in
+    // Postgres.
+    //
+    // KNOWN LIMITATION, and do not re-add the reassurance this replaced (!65 round 9
+    // — round 8's "retrying is safe, the same id comes back 'duplicate'" was wrong in
+    // both halves). We return 503 BEFORE agentService.chat below, so the agent never
+    // ran and no reply will ever arrive. A retry hits pgHasActiveTurn — which is
+    // probed BEFORE pgTurnIdSeen — and the live 'received' receipt makes it 'busy',
+    // then 'duplicate' once the TTL lapses; neither dispatches the agent. The client
+    // meanwhile reads the receipt as delivered, locks the composer and tells the user
+    // the reply may appear later. It will not. Recovering the turn needs resumable
+    // dispatch (re-enter the agent call for a 'received' receipt with no assistant
+    // turn), which does not exist yet. See docs/ai-agent-seam.md §7.
     throw new CustomError(
       'The chat is temporarily unavailable. Please try again in a moment.',
       503,
