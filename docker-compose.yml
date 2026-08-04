@@ -4,7 +4,9 @@ services:
     image: redis:7-alpine
     container_name: sql-report-redis
     ports:
-      - "6379:6379"
+      # Host-side ports are overridable from the git-ignored .env so several projects can
+      # run at once; container-side ports never change. Defaults preserve the old values.
+      - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     networks:
@@ -22,7 +24,7 @@ services:
     volumes:
       - ./backend/.env.docker:/app/.env:ro
     ports:
-      - "3001:3001"
+      - "${BACKEND_PORT:-3001}:3001"
     depends_on:
       - redis
     networks:
@@ -37,7 +39,7 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: sql-report-frontend
     ports:
-      - "8080:80"
+      - "${NGINX_HOST_PORT:-8080}:80"
     depends_on:
       - backend
     networks:
@@ -55,8 +57,11 @@ services:
     environment:
       PYTHONPATH: /app
       ANALYTICS_PORT: 8001
+      # main.py hardcodes :8080/:3000/:8081 as default origins; this is additive, so the
+      # Vite dev server is still allowed once it moves off 8080.
+      CORS_ALLOWED_ORIGINS: "http://localhost:${DEV_PORT:-8080},http://127.0.0.1:${DEV_PORT:-8080}"
     ports:
-      - "8001:8001"
+      - "${ANALYTICS_HOST_PORT:-8001}:8001"
     volumes:
       - ./analytics:/app
     networks:
