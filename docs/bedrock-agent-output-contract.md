@@ -1,7 +1,13 @@
 # Bedrock agent output contract — DO-313 / DO-342
 
-**Audience:** the author of the dashboard-builder Bedrock agent (`QGH3AFBVJU`, alias
-`M47RMSEEA7`, `eu-central-1`).
+**Audience:** the author of the dashboard-builder Bedrock agent (`eu-central-1`).
+
+> **Identifiers are not pinned here.** The measurements in §1 were taken on 2026-07-20 against
+> `QGH3AFBVJU` / alias `M47RMSEEA7`, recorded as the historical context for those numbers.
+> **Both have since rotated and neither is valid today** — they changed three times in the ten days
+> after that probe. **The source of truth is `backend/.env` (local) or the deployment's environment,
+> never this document.** (`docs/ai-agent-seam.md` §2 says the same; this header named them as the
+> current agent until !65 round 5.)
 **Written by:** the Navixy IoT Query Dashboard team — the backend of this repository is the only
 consumer of the agent's output.
 **Status:** descriptive where it quotes measurements; a request where it says so. Nothing in our
@@ -296,10 +302,16 @@ class is schema grounding on the agent's side.
 > Two corrections to this paragraph, both made in !65 round 4. It said *"the one real build"* and
 > *"one still failed"*, which was written after the first build and never updated when the second
 > and third landed — the stale figures made the argument **weaker** than the evidence supports.
-> And it said the preview runs *"before anything is saved"*, which is **false**: the assistant turn,
-> including the complete `report_schema`, is persisted to
-> `dashboard_studio_meta_data.chat_messages.result` at turn time, before the user previews anything.
-> What Apply gates is **report creation**, not storage. See `docs/ai-agent-seam.md` §7.
+> And it said the preview runs *"before anything is saved"*, which is **false**: on the common path
+> the assistant turn, including the complete `report_schema`, is already in
+> `dashboard_studio_meta_data.chat_messages.result` before the user previews anything. What Apply
+> gates is **report creation**, not storage.
+>
+> Round 5 then corrected the correction: persistence is **conditional**, not universal. A demo
+> session never touches the tenant database, and a tenant without migration `002` — or with Postgres
+> unavailable — keeps the turn in an in-memory / write-behind store. `docs/ai-agent-seam.md` §7
+> states the conditions once; the only claim true on every path is that **nothing becomes a report
+> until Apply**.
 
 ---
 

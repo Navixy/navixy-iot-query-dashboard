@@ -31,13 +31,18 @@ const WIZARD_OPTIONS = [
     title: 'AI Assistant',
     tagline: 'From a plain-language description to a working dashboard',
     // "before it is added to your reports", NOT "before anything is saved" — and the
-    // distinction is a real one, not pedantry. The assistant turn, INCLUDING the complete
-    // report_schema, is written to dashboard_studio_meta_data.chat_messages.result at turn
-    // time, before the user has previewed anything, on every tenant that has migration 002
-    // applied (docs/ai-agent-seam.md §6 — the artifact is copied out of S3 once so a
-    // reloaded conversation outlives the object's expiry). What Apply gates is REPORT
-    // CREATION — POST /api/reports — not storage. Promising "nothing is saved" would be a
-    // false persistence guarantee. (!65 review round 4)
+    // distinction is a real one, not pedantry. What Apply gates is REPORT CREATION
+    // (POST /api/reports), never storage: on the common path the assistant turn, INCLUDING
+    // the complete report_schema, is already in chat_messages.result before the user has
+    // previewed anything. Promising "nothing is saved" would be a false persistence
+    // guarantee. (!65 review round 4)
+    //
+    // Deliberately says nothing about WHETHER the turn was persisted, because that varies
+    // and the wording must hold in every case — demo sessions never touch the tenant DB at
+    // all, and a tenant without migration 002 or with Postgres down keeps the turn in the
+    // in-memory/write-behind store. docs/ai-agent-seam.md §7 states the conditions once;
+    // this copy asserts only the part that is true on ALL of those paths. Round 4 replaced
+    // an absolute claim with the opposite absolute claim; round 5 caught that too.
     description:
       'Describe what you want to monitor in plain language. The assistant asks a few clarifying questions, then builds a full SQL-backed dashboard you can preview against your own data before it is added to your reports.',
     bestFor: 'You know what you want to see but not which tables or queries it takes to get there.',

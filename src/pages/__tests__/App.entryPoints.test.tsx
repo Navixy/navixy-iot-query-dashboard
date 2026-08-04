@@ -13,10 +13,21 @@
  * the only affordance for it that is on screen while a report is open, which is
  * where a user actually needs it.
  *
- * So: the primary navigation affordances, not the only references. Break either
- * and the feature is reachable from the URL bar alone, with a green typecheck, a
- * green lint and every other test still passing — nothing else in the repo would
- * notice, which is what makes these assertions worth their cost.
+ * So: the primary navigation affordances, not the only references.
+ *
+ * The two failure modes are NOT the same, which round 5 pointed out after round 4's
+ * fix flattened them into one sentence:
+ *
+ *   - **break the CTA** and `/app/chat` is reachable from the URL bar alone. It is
+ *     the single clickable route in.
+ *   - **break Home** and the assistant is still reachable — a login or auth
+ *     redirect lands on `/app`, where the CTA is waiting. What is lost is getting
+ *     BACK to `/app` from an open report without the browser's back button, which
+ *     is the ordinary case rather than a dead end.
+ *
+ * Either way it happens with a green typecheck, a green lint and every other test
+ * passing — nothing else in the repo would notice, which is what makes these
+ * assertions worth their cost.
  *
  * Both cases pin the load-bearing DETAIL rather than mere presence, because in
  * this file every regression so far has been of the shape "the element is there

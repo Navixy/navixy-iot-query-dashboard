@@ -393,20 +393,38 @@ and before it appears in anyone's sidebar. It is the only stage at which a hallu
 becomes visible.
 
 > **Do not read that as "nothing is persisted before preview".** It is not true, and this document
-> said so in two places at once until !65 round 4 caught it. The assistant turn — **including the
-> complete `report_schema`** — is written to `dashboard_studio_meta_data.chat_messages.result` at
-> turn time, before the user has previewed anything, on every tenant that has `002` applied. That is
-> §6's persist-never-refetch rule doing exactly what it is supposed to do: the artifact is copied out
-> of S3 once so a reloaded conversation outlives the object's expiry.
+> said so in two places at once until !65 round 4 caught it. On the common path the assistant turn —
+> **including the complete `report_schema`** — is written to
+> `dashboard_studio_meta_data.chat_messages.result` at turn time, before the user has previewed
+> anything. That is §6's persist-never-refetch rule doing exactly what it is supposed to do: the
+> artifact is copied out of S3 once so a reloaded conversation outlives the object's expiry.
 >
-> **What Apply gates is report creation, not storage.** The honest guarantee is "nothing is added to
-> your reports until you apply it" — which is what the `/app` copy now says. The earlier phrasing
-> ("before anything is written to `dashboard_studio_meta_data`") was a false persistence guarantee,
-> and it contradicted §6 nine hundred words earlier in the same file.
+> **The conditions, stated once because two rounds of review were spent getting this sentence
+> wrong.** `appendTurns` (`chatStore.ts`) reaches Postgres only when **all** of these hold:
+>
+> | | |
+> |---|---|
+> | the session is **not** a demo session | the route passes `pool = null` for demo (`routes/agent.ts`), and the store independently refuses on `ident.demo` — two layers, because a demo transcript reaching the customer's real settings DB would break the banner's promise that nothing is saved |
+> | the tenant has **`002`** applied | `probeChatSchema` reads `information_schema`; there is no migration runner (§8) |
+> | the write **succeeds** | any Postgres failure is caught and degrades |
+>
+> Otherwise the turn goes to `memoryAppend` — the per-process in-memory / write-behind store — and
+> **nothing reaches the tenant database at all.** So "on every tenant that has `002` applied", which
+> is what this paragraph said after round 4, is still wrong: it contradicts both the demo guarantee
+> and §8's graceful-degradation design. A demo user on a fully-migrated tenant persists nothing.
+>
+> **What Apply gates is report creation, not storage.** That is the one statement true on **every**
+> path above, which is why it is the only one the `/app` copy makes: "nothing is added to your
+> reports until you apply it". The original phrasing ("before anything is written to
+> `dashboard_studio_meta_data`") was a false persistence guarantee, and it contradicted §6 nine
+> hundred words earlier in the same file.
 >
 > Note the shape of that mistake, because the next two paragraphs are about the same failure mode:
 > **a rule asserted in prose and contradicted elsewhere in the same document.** It happened again,
-> here, in the section that exists to warn about it.
+> here, in the section that exists to warn about it — and then a *second* time, when round 4's fix
+> replaced one absolute claim with the opposite absolute claim and round 5 had to catch that too.
+> **The reliable move is not a better absolute; it is naming the conditions and then saying only
+> what survives all of them.**
 
 **This is enforced in code, not merely recommended.** `resultCardState`
 (`src/components/ai-chat/resultCardState.ts`) refuses Apply until a mounted renderer has reported a
