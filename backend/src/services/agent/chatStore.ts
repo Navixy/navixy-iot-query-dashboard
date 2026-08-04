@@ -211,9 +211,13 @@ const MAX_SESSION_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 h
 
-/** Probe cache TTL: short enough that a DBA applying the DDL sees history go live
- *  within a minute with no restart, long enough that it is not a per-request
- *  round trip. */
+/** Probe cache TTL: short enough that a DBA applying the DDL is not locked out by a
+ *  cached "absent" for long, long enough that it is not a per-request round trip.
+ *
+ *  It bounds STALENESS, not recovery time (!65 round 8 — this comment used to promise
+ *  "live within a minute", and the doc inherited the overstatement). Nothing polls and
+ *  nothing replays in the background: the tenant heals on the first touch AFTER the
+ *  cached absence expires. On an idle tenant that can be arbitrarily later. */
 const PROBE_TTL_MS = 60_000;
 
 /** Fallback for AppendOptions.activeTurnTtlMs. The route passes its own value

@@ -262,8 +262,15 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
   if (started === 'unavailable') {
     // The guard could not be evaluated on a tenant whose lock is supposed to be
     // authoritative (round 11, Important 2). Refusing is deliberate: admitting the
-    // turn would bypass the lock entirely. 503 says "try again", which is true —
-    // nothing was persisted.
+    // turn would bypass the lock entirely.
+    //
+    // 503 says "try again", and retrying IS correct — but do not read it as "nothing
+    // was persisted" (!65 round 8; that absolute used to be on this line). The store
+    // returns 'unavailable' from a catch that an in-doubt COMMIT can reach, so on a
+    // receipts-capable tenant this turn and its receipt may ALREADY be in Postgres.
+    // Retrying is still safe: the same client_turn_id finds the receipt and comes
+    // back 409 'duplicate' rather than sending twice. What 'unavailable' guarantees
+    // is that nothing was BUFFERED — appendTurns skips memoryAppend on this path.
     throw new CustomError(
       'The chat is temporarily unavailable. Please try again in a moment.',
       503,

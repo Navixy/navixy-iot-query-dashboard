@@ -404,16 +404,27 @@ becomes visible.
 > **the assistant result append** — `appendTurns(pool, ident, sessionId, [assistantTurn])`, the
 > **unguarded** call `POST /chat` makes once the agent has replied. The guarded *user* append that
 > opens the turn (`rejectWhenTurnActive`) has three further outcomes that are **decisions, not
-> storage results** — `busy`, `duplicate` and `unavailable` — and `unavailable` writes nothing,
-> buffers nothing, and says so to the client. It is not a fallback and it is not in this table.
+> storage results** — `busy`, `duplicate` and `unavailable` — and none of them is a fallback, so
+> none is in this table.
+>
+> **`unavailable` buffers nothing. It does *not* guarantee nothing was written** — !65 round 8, and
+> the same in-doubt `COMMIT` that broke the row below, asserted about a different code path without
+> re-deriving it. Normally it fires before any write: either the probe never resolved
+> (`!schema.known`) or `pgAppendTurns` threw. But when receipts are known present, the throw can be
+> an in-doubt `COMMIT`, and then **the user turn and its receipt may already be in Postgres while
+> the route answers 503**. `appendTurns` returns `unavailable` from that catch *without* calling
+> `memoryAppend`, so the no-buffer half holds and the no-write half does not. The system stays
+> consistent on retry rather than double-sending — a retry carrying the same `client_turn_id` finds
+> the receipt via `pgTurnIdSeen` and is refused `duplicate` (409) — but the 503's "try again" is
+> reassuring about durability in a way the code cannot back.
 >
 > Three questions, not one, because "did it reach the database" was never the whole state:
 >
 > | Path | In `chat_messages`? | Buffered? | Replayed to Postgres later? |
 > |---|---|---|---|
-> | **Demo session** | **No — structurally.** The route passes `pool = null` *and* the store independently refuses on `ident.demo` (the `pool && !ident.demo` guard in `appendTurns`). Two layers, because `userDbUrl` is the customer's real settings DB and the banner promises nothing is saved to it. | Yes — in the **`demo:`** namespace. | **Never.** Both replay sites sit behind `pool && !ident.demo`, and `bufferKeyFor` prefixes the key, so no live touch can even address a demo buffer. Demo memory is a dead end by construction, not a pending write. |
+> | **Demo session** | **No — structurally.** The route passes `pool = null` *and* the store independently refuses on `ident.demo` (the `pool && !ident.demo` guard in `appendTurns`). Two layers, because `userDbUrl` is the customer's real settings DB and the banner promises nothing is saved to it. | Yes — in the **`demo:`** namespace. | **Never.** Both replay sites sit behind `pool && !ident.demo`, and `memKey` prefixes the key, so no live touch can even address a demo buffer. Demo memory is a dead end by construction, not a pending write. |
 > | **Live, `pool = null`** | **No.** | Yes (`live:`). | Yes, on the next healthy touch. Contract-level rather than a live route path: `appendTurns` takes `Pool \| null` and the route writes `req.settingsPool ?? null`, but `authenticateToken` always attaches a pool and 401s otherwise. |
-> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). | Yes. | Yes — the probe is cached for only 60 s, so applying the DDL heals the tenant within a minute, no restart. |
+> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). | Yes. | Yes, but **on the next touch, not on a timer**. Nothing polls and nothing replays in the background; the 60 s probe TTL only bounds how stale a cached *absent* answer may be when a request does arrive. Applying the DDL to an idle tenant heals nothing until someone uses the chat again. |
 > | **Error before `COMMIT` was issued** | **No.** Rolled back. | Yes. | Yes. |
 > | **`COMMIT` returned success** | **Yes — and this is the common path.** | No. | n/a. |
 > | **`COMMIT` itself returned an error** | **Unknown — possibly yes.** `COMMIT` can fail *after* the server applied the transaction — the `COMMIT` inside `pgAppendTurns`'s try, whose catch rolls back (a no-op by then) and rethrows. | Yes — **definitely**, whichever way the commit went. | Yes, idempotently. Store-minted ids plus `ON CONFLICT (id) DO NOTHING` make a replay of an already-applied turn a no-op — pinned by `chatStore.replay.test.ts` ("an in-doubt `COMMIT` cannot duplicate a turn"). |
