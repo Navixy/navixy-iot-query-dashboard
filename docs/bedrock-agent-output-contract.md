@@ -259,9 +259,10 @@ raises `MULTI_STATEMENT` (`:138-143`); one trailing `;` is tolerated (`:232-235`
   then runs unbounded and `database.ts:2004-2010` ✅ re-tests the original, finds no `LIMIT`, and
   throws `Query returned too many rows: N > 10000`.
 
-**Necessary, and demonstrably not sufficient.** The real agent scored **3 of 3 on the guard** and
-**2 of 3 on execution** ✅ (n=1 dashboard). The list governs the guard, and on this sample the
-guard was never the problem. It prevents a class of turn that would 422 at the execute endpoint and
+**Necessary, and demonstrably not sufficient.** The real agent scored **7 of 7 on the guard** and
+**2 of 7 on execution** ✅ (**n=3 dashboards**; the first alone was 3 of 3 and 2 of 3, which is what
+this line said until !65 round 4). The list governs the guard, and on this sample the guard was
+never the problem. It prevents a class of turn that would 422 at the execute endpoint and
 encodes rules nobody would guess — and it says nothing about whether the referenced columns exist.
 **Do not let a clean guard pass be read, by us or by the agent's author, as evidence the SQL is
 correct.** The complement is schema grounding on the agent's side and execution on ours.
@@ -283,13 +284,22 @@ correct.** The complement is schema grounding on the agent's side and execution 
   five-item list well is **our** work.
 
 **Calibration, said out loud.** The §4 constraint list is *necessary* — it prevents a class of
-turn that fails our execute endpoint with a 422 — and *not sufficient*. In the one real build we
-measured, all three generated statements passed our SELECT-only guard and one still failed at the
-database: **`42703 column o.employee_id does not exist`** ✅. The agent hallucinated a column, and
-no static validation on our side can catch that — the guard never touches a database. The only
-stage that catches it is executing the SQL against the user's data, which is exactly what our
-preview does before anything is saved. What would actually reduce this failure class is schema
-grounding on the agent's side.
+turn that fails our execute endpoint with a 422 — and *not sufficient*. Across the three real
+builds we have now measured, **all seven** generated statements passed our SELECT-only guard and
+**five** still failed at the database, the first of them
+**`42703 column o.employee_id does not exist`** ✅. The agent hallucinated a column, and no static
+validation on our side can catch that — the guard never touches a database. The only stage that
+catches it is executing the SQL against the user's data, which is exactly what our preview does —
+**before the dashboard is added to the user's reports**. What would actually reduce this failure
+class is schema grounding on the agent's side.
+
+> Two corrections to this paragraph, both made in !65 round 4. It said *"the one real build"* and
+> *"one still failed"*, which was written after the first build and never updated when the second
+> and third landed — the stale figures made the argument **weaker** than the evidence supports.
+> And it said the preview runs *"before anything is saved"*, which is **false**: the assistant turn,
+> including the complete `report_schema`, is persisted to
+> `dashboard_studio_meta_data.chat_messages.result` at turn time, before the user previews anything.
+> What Apply gates is **report creation**, not storage. See `docs/ai-agent-seam.md` §7.
 
 ---
 
