@@ -241,15 +241,26 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     { rejectWhenTurnActive: true, activeTurnTtlMs: ACTIVE_TURN_TTL_MS },
   );
   if (started === 'busy') {
-    // 409, not 429: this is a state conflict on the session, not rate limiting —
-    // and it is retryable the moment the previous reply lands. Nothing was
-    // persisted BY THIS REQUEST, so the client's reconciler correctly classifies
-    // it as never delivered and hands the draft back.
+    // 409, not 429: this is a state conflict on the session, not rate limiting.
+    // This request wrote nothing either way — the guard rolls back before any
+    // INSERT. What happens NEXT depends on which 'busy' this is, and !65 rounds 9
+    // and 10 were both spent because this comment asserted only the first:
     //
-    // Scoped to this request on purpose: 'busy' is also what a retry gets after an
-    // orphaned turn (see the 'unavailable' branch below), and there the reply the
-    // message promises is never coming. This branch is still right about the draft
-    // in front of the user; it says nothing about the earlier turn.
+    //   - A NEW client_turn_id refused because another turn really is running.
+    //     Retryable the moment that reply lands, and the reconciler finds no turn
+    //     matching this id, classifies it never delivered and hands the draft back.
+    //     The message below is true.
+    //
+    //   - A RETRY of an ORPHANED turn (see 'unavailable' below). No reply is
+    //     running and none ever will, so "wait for the reply" is false. The client
+    //     does NOT get its draft back either: it classifies from GET /session and
+    //     /turn-status, not from this response, and both show the earlier persisted
+    //     user row with its 'received' receipt — so it locks the composer instead.
+    //     Once the active-turn TTL lapses the same id returns 'duplicate'.
+    //
+    // Do not re-collapse these into one claim about "the draft in front of the
+    // user": whether the draft comes back is decided by SERVER state, which the
+    // orphan has poisoned, not by what this branch did.
     throw new CustomError(
       'Another message in this chat is still being answered. Wait for the reply before sending again.',
       409,

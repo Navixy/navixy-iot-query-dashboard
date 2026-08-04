@@ -250,10 +250,15 @@ interface StoredTurn {
 
 interface MemorySession {
   sessionId: string;
-  /** For a pooled tenant this doubles as the WRITE-BEHIND BUFFER: by construction
-   *  every entry here is absent from Postgres (a turn is buffered only when its
-   *  Postgres write failed or the tables are missing), which is the invariant that
-   *  makes blind replay safe. Bounded by MAX_TURNS and MAX_SESSION_BYTES — an
+  /** For a pooled tenant this doubles as the WRITE-BEHIND BUFFER: a turn lands here
+   *  when its Postgres write failed or the tables are missing, so an entry is
+   *  USUALLY absent from Postgres — but not always, and replay does not rely on it
+   *  (!65 round 10; this said "by construction every entry here is absent", and
+   *  called that the invariant). An in-doubt COMMIT — applied server-side, errored
+   *  client-side — leaves the SAME turn in Postgres and here, until a replay
+   *  reconciles them. **What actually makes blind replay safe is store-minted ids
+   *  plus ON CONFLICT (id) DO NOTHING**, which is a property of the write, not of
+   *  the buffer's contents. Bounded by MAX_TURNS and MAX_SESSION_BYTES — an
    *  outage longer than those loses oldest turns, the same bound the pure-memory
    *  tenant already lives with. */
   entries: StoredTurn[];
@@ -1207,7 +1212,13 @@ async function pgAppendTurns(
   //
   // ONE transaction covers the buffered replay, the new turns and the session
   // touch (MR !61 review): it lands whole or not at all, so memory and Postgres
-  // can never hold overlapping halves of a request.
+  // can never hold overlapping HALVES of a request.
+  //
+  // That is atomicity, not exclusivity (!65 round 10 — this used to claim the two
+  // stores can never overlap at all). An in-doubt COMMIT applies the whole
+  // transaction and still reports failure, after which the caller buffers the
+  // whole thing too: both stores, one complete copy each, until replay clears it.
+  // Never a torn half, which is what this guarantee is for.
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1327,12 +1338,21 @@ export async function loadHistory(
  * A NoSuchKey at preview time after this rule is in force is A BUG IN THE
  * MITIGATION, and should be alarming, not routine.
  *
- * NEVER rejects: any Postgres failure (including a read-only standby refusing the
- * INSERT) degrades to the in-memory path — which since MR !61's review is a
+ * NEVER THROWS. For the UNGUARDED append — the assistant result, which is what this
+ * rule is about — any Postgres failure (including a read-only standby refusing the
+ * INSERT) degrades to the in-memory path, which since MR !61's review is a
  * WRITE-BEHIND BUFFER, not a dead end: the next healthy Postgres touch (load or
  * append) transactionally replays buffered turns into the resolved session, so a
  * partial failure can never orphan an assistant result, and the turn itself
  * already reached the user in the HTTP response.
+ *
+ * A GUARDED append (rejectWhenTurnActive — the user turn) does NOT always degrade,
+ * and saying "any Postgres failure degrades" here was wrong (!65 round 10). On a
+ * receipts-capable tenant it FAILS CLOSED and returns 'unavailable', buffering
+ * nothing, because the memory path cannot see a receipt another replica may hold.
+ * That is deliberate, and it is also how a user turn gets orphaned when the failure
+ * was an in-doubt COMMIT — see docs/ai-agent-seam.md §7 and the 'unavailable'
+ * branch in routes/agent.ts.
  */
 export async function appendTurns(
   pool: Pool | null, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
