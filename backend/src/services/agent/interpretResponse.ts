@@ -174,3 +174,47 @@ export function looksLikeMissedResult(raw: string): boolean {
   const haystack = raw.toLowerCase();
   return MISSED_RESULT_MARKERS.some((marker) => haystack.includes(marker));
 }
+
+/** A markdown list item: `1.` / `1)` / `-` / `*` at the start of any line. */
+const LIST_ITEM = /^\s*(?:\d+[.)]|[-*])\s+/m;
+
+/**
+ * The agent sometimes composes an interview reply — intro, numbered questions,
+ * closing line — and delivers ONLY the closing line. The user gets "answer these
+ * four questions and I'll build it" with nothing above it, and since Bedrock keeps
+ * the reply it MEANT to send in server-side memory, it insists it already asked.
+ * The dialogue deadlocks. Proven agent-side from its own trace: `rationale` commits
+ * to four questions while `observation.finalResponse` is a 63-character sign-off,
+ * and we receive exactly those 63 characters. (DO-380)
+ *
+ * A question turn that asks nothing is the whole signature. Deliberately NOT:
+ *
+ *   - **a length threshold.** Measured: a VALID English reply of 47 chars ("What
+ *     would you like to track on your dashboard?" — the agent de-escalating to one
+ *     question at a time) against a real failure of 54. The shorter one was healthy.
+ *   - **requiring a full set of four questions.** Scored 40 % precision on the same
+ *     sample: 9 of 15 firings were healthy, 6 of those the agent correctly asking
+ *     one question after the user complained it couldn't see the list. It fires
+ *     hardest on correct behaviour.
+ *
+ * This rule caught 6 of 6 real defects with 0 false positives across 18 dialogues /
+ * 72 live turns.
+ *
+ * KNOWN UNDER-COUNT — the rate this produces is a LOWER BOUND and must be reported as
+ * one. What survives truncation is a closing line, and a closing line is exactly the
+ * sentence most likely to be phrased as a question ("Could you answer the four
+ * questions above so I can build it?"). Such a turn reads as healthy here; the case is
+ * pinned in the tests so it stays a known limit rather than a discovered one. 0 missed
+ * across the 72 measured turns is real evidence the gap is small, not that it is empty.
+ *
+ * Caller must gate on `type === 'question'` AND on `!looksLikeMissedResult` — a build
+ * turn legitimately asks nothing, and a build reply that merely LOST its URL is a
+ * different defect that would otherwise land in this rate. `type` is a safer exclusion
+ * than re-testing for an `s3://` URL that `stripArtifactUrls` may already have removed.
+ *
+ * Changes no behaviour. It exists to put a denominator under a rate nobody has yet:
+ * our 8.3 % is from a script that pushes back on purpose, not from traffic.
+ */
+export function looksLikeDroppedQuestions(raw: string): boolean {
+  return !raw.includes('?') && !LIST_ITEM.test(raw);
+}

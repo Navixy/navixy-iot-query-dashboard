@@ -21,6 +21,7 @@ import { CustomError } from '../../middleware/errorHandler.js';
 import { logger } from '../../utils/logger.js';
 import {
   interpretAgentResponse,
+  looksLikeDroppedQuestions,
   looksLikeMissedResult,
   type AgentIntent,
 } from './interpretResponse.js';
@@ -398,6 +399,33 @@ export const bedrockAgentService: AgentService = {
       const prose = await collectCompletion(res.completion, ctx.sessionId);
 
       intent = interpretAgentResponse(prose);
+
+      // Asked of the RAW prose deliberately: this diagnostic is "did the agent send a
+      // URL we failed to see", which is a question about the text exactly as it arrived.
+      const missedResult = looksLikeMissedResult(prose);
+
+      // DENOMINATOR, not just a numerator (DO-380). The verdict rides the line that
+      // already fires for EVERY turn, so a rate falls out of one query. A warn-only
+      // log would give a count of failures over an unknown total, which is exactly
+      // the question the agent's author is trying to answer — he needs the frequency
+      // to choose between an in-band error and rebuilding his orchestration.
+      //
+      // Omitted entirely — not recorded as `false` — on turns that were never eligible,
+      // so BOTH sides of the rate hold only real interview turns:
+      //   - result turns: a build turn legitimately asks nothing.
+      //   - POSSIBLE_MISSED_RESULT turns: a build reply that lost its URL classifies as
+      //     'question' and asks nothing, so it scores `true` on this rule while being a
+      //     DIFFERENT defect. Counting it would contaminate the numerator of the very
+      //     rate the agent's author will use to size his fix.
+      //
+      // Measured on `intent.message`, not `prose`, because the defect is defined by what
+      // the USER received. Identical today (the heuristic sets message = raw); the day
+      // §3.4.4 lands, the trailer is machinery the user never sees and `replyChars` must
+      // not count its bytes.
+      const questionsDropped = intent.type === 'question' && !missedResult
+        ? looksLikeDroppedQuestions(intent.message)
+        : undefined;
+
       logger.info('[Agent] Agent turn classified', {
         sessionId: ctx.sessionId,
         classifiedAs: intent.type,
@@ -405,13 +433,32 @@ export const bedrockAgentService: AgentService = {
         promptLength: input.message.length,
         via: intent.via,
         ms: Date.now() - t0,
+        ...(questionsDropped === undefined
+          ? {}
+          : { questionsDropped, replyChars: intent.message.length }),
       });
 
       if (intent.type === 'question') {
-        if (looksLikeMissedResult(prose)) {
+        if (missedResult) {
           logger.warn('[Agent] POSSIBLE_MISSED_RESULT', {
             sessionId: ctx.sessionId,
             rawPreview: prose.slice(0, 2000),
+          });
+        }
+        if (questionsDropped) {
+          // The preview is bounded at 400 rather than POSSIBLE_MISSED_RESULT's 2000
+          // because this defect's whole signature is a SHORT reply — 47 to 168 chars
+          // across every measured instance — so 400 captures it whole with room to
+          // spare. It is here at all, rather than the bare verdict the agent's author
+          // asked for, because without it a positive cannot be told from a false
+          // positive and the rate becomes unfalsifiable. Agent prose, which may quote
+          // the user's request back — the same exposure POSSIBLE_MISSED_RESULT already
+          // carries at 2000 chars, on a more common condition. `rawPreview` keeps the
+          // house key name so one query spans both warns; it slices the delivered reply.
+          logger.warn('[Agent] INTERVIEW_QUESTIONS_DROPPED', {
+            sessionId: ctx.sessionId,
+            replyChars: intent.message.length,
+            rawPreview: intent.message.slice(0, 400),
           });
         }
         return { type: 'question', message: intent.message, result: null };

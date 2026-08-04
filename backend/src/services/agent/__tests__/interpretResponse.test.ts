@@ -1,5 +1,9 @@
 import { describe, it, expect } from '@jest/globals';
-import { interpretAgentResponse, looksLikeMissedResult } from '../interpretResponse.js';
+import {
+  interpretAgentResponse,
+  looksLikeDroppedQuestions,
+  looksLikeMissedResult,
+} from '../interpretResponse.js';
 
 /**
  * RECONSTRUCTED — NOT a verbatim capture.
@@ -223,5 +227,104 @@ describe('interpretAgentResponse — trailer (§3.4.4, proposed and NOT agreed)'
       'Saved to s3://bucket/jobs/a/report_schema.json\n```json\n{broken\n```',
     );
     expect(mixed).toMatchObject({ type: 'result', via: 'heuristic' });
+  });
+});
+
+/**
+ * DO-380 — the truncated-interview-reply detector.
+ *
+ * Every string below is a VERBATIM delivered reply captured from the live agent
+ * (`agent TWLIGJKDJ2 / alias 7QMZDGXBUM / eu-central-1`, 2026-08-03) across 18
+ * dialogues / 72 turns. They are the ground truth this rule was measured against:
+ * 6 of 6 real defects caught, 0 false positives, 0 missed.
+ *
+ * ONLY THE ENGLISH CAPTURES ARE INLINED. This repository is English-only and mirrors
+ * publicly, so the five non-English captures live in DO-380 rather than here. Nothing
+ * is lost: the rule tests for a question mark and a list marker, so it has no language
+ * dependency to pin — and the defect is NOT language-specific, which is precisely what
+ * the English control below establishes. (An earlier report claimed it was; the larger
+ * sample disproved that.)
+ *
+ * The healthy cases matter more than the broken ones. Each defeats a rule that looks
+ * reasonable and is wrong:
+ *
+ *   - the 47-char reply defeats every length threshold. The shortest MEASURED failure
+ *     was 54 chars — longer than this healthy one — so no cut-off separates them.
+ *   - the "one at a time" replies defeat "must contain questions 1-4", the rule the
+ *     agent's author proposed. It scores 40 % precision on this sample and fires
+ *     hardest on the agent CORRECTLY de-escalating after a user complains.
+ *
+ * Delete one of these and the suite stays green while the detector rots back into a
+ * rule we already measured as wrong.
+ */
+describe('looksLikeDroppedQuestions (DO-380)', () => {
+  it('flags the delivered-sign-off-only failure (EN control, 93 chars)', () => {
+    // The reasoning committed to asking questions; this sign-off is all that arrived.
+    const reply =
+      "Please go ahead and answer the above — I'm ready to build as soon as I have those details! 😊";
+    expect(looksLikeDroppedQuestions(reply)).toBe(true);
+    // The caller only consults this on question turns; confirm this is typed so.
+    expect(interpretAgentResponse(reply).type).toBe('question');
+  });
+
+  it.each([
+    ['47ch — shorter than the 54ch shortest failure, and healthy', 'What would you like to track on your dashboard?'],
+    ['de-escalation to one question', 'Sure! Here they are, one by one:\n\n**What metrics do you want to track on your dashboard?**'],
+    ['apology then a single question', 'I apologize! Here is my question:\n\n**What do you want to track on your dashboard?**'],
+    ['acknowledgement then a single question', "You're right, I apologize! Here are my questions:\n\n**What do you want to track on your dashboard?**"],
+  ])('does NOT flag a healthy reply that asks something: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(false);
+  });
+
+  it('is not ASCII-dependent: a non-English sign-off with no question still flags', () => {
+    // Stands in for the five non-English captures in DO-380. Multi-byte characters
+    // and emoji must not perturb either test — the failure rate on the non-English
+    // path measured ~4x the English one, so this path carries most of the volume.
+    expect(looksLikeDroppedQuestions('Ich warte auf Ihre Antworten — dann baue ich es! 🚗📊')).toBe(true);
+    expect(looksLikeDroppedQuestions('Was möchten Sie auf dem Dashboard sehen?')).toBe(false);
+  });
+
+  it('does not flag a numbered list even if the items carry no question mark', () => {
+    // The full interview arrived; the questions are simply phrased as imperatives.
+    // A list IS the thing the failure is missing, so its presence clears the turn.
+    expect(looksLikeDroppedQuestions('Tell me:\n1. the metric\n2. the time range')).toBe(false);
+    expect(looksLikeDroppedQuestions('Tell me:\n- the metric\n- the time range')).toBe(false);
+  });
+
+  it('KNOWN UNDER-COUNT: a sign-off phrased as a question reads as healthy', () => {
+    // The rule's one blind spot, pinned so it stays a known limit. What survives the
+    // truncation is a closing line, and a closing line is the sentence most likely to
+    // carry a question mark — so the rate this feeds is a LOWER BOUND and has to be
+    // reported as one. Flip this expectation and you have re-derived "any short reply
+    // is broken", which the 47-char healthy control above already disproves.
+    expect(
+      looksLikeDroppedQuestions('Could you answer the four questions above so I can build it?'),
+    ).toBe(false);
+  });
+
+  it('is total: empty and whitespace-only prose do not throw', () => {
+    // Contract test for a pure predicate, NOT a reachable state: collectCompletion
+    // throws EmptyCompletion on a whitespace-only drain, so an empty reply fails the
+    // turn in band and never reaches this rule. Totality is still worth pinning —
+    // nothing in the signature says the caller must pre-filter.
+    expect(looksLikeDroppedQuestions('')).toBe(true);
+    expect(looksLikeDroppedQuestions('   \n  ')).toBe(true);
+  });
+
+  it('overlaps looksLikeMissedResult, which is why the caller excludes it', () => {
+    // A build reply that lost its URL asks nothing, so it scores true on BOTH — yet it
+    // is POSSIBLE_MISSED_RESULT, a different defect. The predicates cannot tell them
+    // apart and are not meant to: the CALLER records a verdict only when
+    // `type === 'question' && !looksLikeMissedResult(prose)`, so this turn leaves both
+    // sides of the rate. Drop that gate and the numerator silently absorbs reworded
+    // build replies.
+    const missedBuild = 'Your dashboard has been built and is being uploaded now.';
+    expect(looksLikeMissedResult(missedBuild)).toBe(true);
+    expect(looksLikeDroppedQuestions(missedBuild)).toBe(true);
+
+    // The genuine defect carries no build marker, so the caller's gate lets it through.
+    const droppedInterview = "I'm ready to build as soon as I have those details!";
+    expect(looksLikeMissedResult(droppedInterview)).toBe(false);
+    expect(looksLikeDroppedQuestions(droppedInterview)).toBe(true);
   });
 });
