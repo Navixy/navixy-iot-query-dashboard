@@ -61,8 +61,12 @@ failing for everyone with an error naming a directory nobody has heard of. The `
 - Any other value **throws at boot** (`index.ts:20-28`). A deployment typo like `bedrok` must refuse
   to start rather than serve plausible fixture dashboards while everyone believes Bedrock is live.
 
-Both implementations are storage-free pure functions of `(input, ctx)` behind one interface
-(`types.ts`, `AgentService`). Everything the service deliberately does not own — request validation,
+Both implementations are **storage-free**: `(input, ctx) → turn` behind one interface (`types.ts`,
+`AgentService`), owning no session, no transcript and no database handle. **Not *pure*** —
+`bedrockAgent` reads the environment, memoises an SDK client, calls the network, reads the clock and
+logs. Storage-free is the property the seam actually rests on; purity was never true of the Bedrock
+arm and claiming it here would misdescribe what a reader can safely assume. Everything the service
+deliberately does not own — request validation,
 `session_id`, the transcript, the wall-clock deadline, the per-user rate limit, the
 `validateDashboard` gate and the HTTP status taxonomy — lives in `routes/agent.ts:1-20`.
 
@@ -108,10 +112,14 @@ AWS_REGION=eu-central-1
 so the AWS variables go in `.env.docker` and nothing in compose has to change.
 
 > One caveat if you ever need to change `NODE_ENV` or `PORT` rather than add a variable: compose
-> *also* sets those two inline (`docker-compose.yml:19-21`), `.env.docker:2-3` sets the same two,
-> and `env.ts:9` calls `dotenv.config()` **without `override`** — so the inline compose values win
-> and edits to those two keys in `.env.docker` are silently ignored. It does not affect the Bedrock
-> variables, which exist only in `.env.docker`.
+> *also* sets those two inline (`docker-compose.yml:19-21`), and `env.ts:9` calls `dotenv.config()`
+> **without `override`** — so the inline compose values win and edits to those two keys in
+> `.env.docker` are silently ignored. It does not affect the Bedrock variables, which exist only in
+> `.env.docker`.
+>
+> `backend/.env.docker` is **git-ignored** (`.gitignore:34`) and absent from a clean checkout, so
+> nothing in this document can cite a line number inside it — check your own copy for whether it
+> sets those two keys. Every other citation here resolves against the tracked tree.
 
 ### The checklist
 
@@ -379,9 +387,26 @@ and it is the strongest argument in this document for why the preview gate exist
 
 ### Preview-before-Apply is the safety mechanism, and it must not be made skippable
 
-The preview executes every panel's SQL against the user's real `iotDbUrl`, **before anything is
-written** to `dashboard_studio_meta_data`. It is the only stage at which a hallucinated column
+The preview executes every panel's SQL against the user's real `iotDbUrl`, **before the dashboard
+becomes a report** — before `POST /api/reports` creates a row in `dashboard_studio_meta_data.reports`
+and before it appears in anyone's sidebar. It is the only stage at which a hallucinated column
 becomes visible.
+
+> **Do not read that as "nothing is persisted before preview".** It is not true, and this document
+> said so in two places at once until !65 round 4 caught it. The assistant turn — **including the
+> complete `report_schema`** — is written to `dashboard_studio_meta_data.chat_messages.result` at
+> turn time, before the user has previewed anything, on every tenant that has `002` applied. That is
+> §6's persist-never-refetch rule doing exactly what it is supposed to do: the artifact is copied out
+> of S3 once so a reloaded conversation outlives the object's expiry.
+>
+> **What Apply gates is report creation, not storage.** The honest guarantee is "nothing is added to
+> your reports until you apply it" — which is what the `/app` copy now says. The earlier phrasing
+> ("before anything is written to `dashboard_studio_meta_data`") was a false persistence guarantee,
+> and it contradicted §6 nine hundred words earlier in the same file.
+>
+> Note the shape of that mistake, because the next two paragraphs are about the same failure mode:
+> **a rule asserted in prose and contradicted elsewhere in the same document.** It happened again,
+> here, in the section that exists to warn about it.
 
 **This is enforced in code, not merely recommended.** `resultCardState`
 (`src/components/ai-chat/resultCardState.ts`) refuses Apply until a mounted renderer has reported a
@@ -398,8 +423,10 @@ contradicted by a spec table is a constraint that does not exist** — which is 
 pure function a test can interrogate.
 
 **Any future "Apply directly", "remember my choice" or auto-apply request is refused with a pointer
-to this section.** On the one real sample we have, that path would have saved a dashboard with a
-dead panel.
+to this section.** On **all three** real builds we have, that path would have saved a dashboard with
+at least one dead panel — five of seven panels failed across the three (§7 above). This sentence
+said "the one real sample we have" until !65 round 4; it was written after the first build and never
+updated when the second and third landed, which made the argument weaker than the evidence.
 
 Two supporting facts, both about the preview surface rather than the SQL:
 
@@ -510,7 +537,7 @@ Recorded so it is not re-proposed as an oversight, and not re-scoped as a bug.
 |---|---|
 | **DO-313 scenarios 3 and 4** | Out of v1 by decision (D4). The design does not foreclose them. |
 | **Update a dashboard in place from the chat** | v1 **creates only**. Apply resolves-or-creates the "AI Dashboards" section (`src/components/ai-chat/applyDashboard.ts:21`) and calls `createReport`. Updating an existing report is the obvious next request and is deliberately not built. |
-| **Surfacing `details.issues` from a guard rejection** | **A prerequisite for the Bedrock flip**, not a nice-to-have. A guard rejection is a 422 whose per-issue detail is buried in `details.issues` and surfaces to the user as the bare *"SQL query validation failed"*. The probe measured 3 of 3 agent statements passing the guard (**n=3 statements, one prompt, one topic**) — which makes a rejection a *rare* event, and rare events are exactly the ones you cannot debug without the detail. |
+| **Surfacing `details.issues` from a guard rejection** | **A prerequisite for the Bedrock flip**, not a nice-to-have. A guard rejection is a 422 whose per-issue detail is buried in `details.issues` and surfaces to the user as the bare *"SQL query validation failed"*. Across every real build we have, **7 of 7** agent statements passed the guard (**n=7 statements, three prompts, one topic** — the probe's 3 of 3 plus the two later builds) — which makes a rejection a *rare* event, and rare events are exactly the ones you cannot debug without the detail. |
 | **Stripping the agent's disclaimer panel on Apply** | Implemented and unit-tested, shipped **off** behind `STRIP_DISCLAIMER_ON_APPLY = false`. It is a deliberate divergence from what the agent emits and must be agreed with its author first. The caution ships as preview chrome unconditionally, so the intent is served either way. |
 | **Wiring `src/utils/dashboardValidator.ts` into anything** | **Never do this.** It is dead and wrong: run over the 14 shipped fixtures it marks two of them INVALID, and its `sql-uses-parameters` rule (`src/utils/dashboardValidator.ts:356`) is `if (sql && !sql.includes(':'))` (`:365`), advising a `:parameter_name` syntax **this binder rejects** — the binder takes `${var}` only. The backend `validateDashboard` in §7 is the purpose-built one. |
 | **A frontend mock of the agent** | Refused by design. It would ship a second agent into the browser bundle and guarantee frontend churn on swap day. The seam is server-side for exactly this reason. |
@@ -546,7 +573,8 @@ Recorded so it is not re-proposed as an oversight, and not re-scoped as a bug.
 
 | Claim | n |
 |---|---|
-| Build turn 35.8 s (probe) / 24.1 s (2026-08-03); one chunk at the end; 17 trace events | 2 build turns |
+| Build turn 35.8 s (probe) / 24.1 s (2026-08-03) | 2 build turns |
+| One chunk at the very end; 17 trace events; one action group spanning ~23 s | **1 build turn** (the probe) — split out of the row above in !65 round 4, which spotted a chunk/trace observation from a single turn carrying the latency row's `n=2` |
 | Interview turns 8.0 / 6.6 s (probe); 8.3 / 14.3 s (2026-08-03) | 4 interview turns |
 | Artifact 5385 bytes in 235 ms; 4675 bytes in 187 ms | 2 fetches |
 | Bedrock is stateful (dropped a question it had been told; later retained metric + time range across a 4-turn interview) | 2 sessions |
@@ -572,7 +600,9 @@ Recorded so it is not re-proposed as an oversight, and not re-scoped as a bug.
 three, five of seven panels: it is no longer plausible that a maintainer will try this feature and
 not hit it. That is the one to read as "expect it" rather than "provisional".
 
-**Nothing above is a rate.** p99 latency, guard pass rate beyond three statements, hallucination
+**Nothing above is a rate.** p99 latency, guard pass rate beyond the seven statements recorded here
+(the "three" this sentence used to say was the probe's alone, and went stale when the later builds
+landed — !65 round 4), hallucination
 rate, behaviour on topics other than vehicle mileage, behaviour in a long (10+ turn) session, and
 `inputText` size limits are all **unmeasured**. The discipline that keeps this honest is the one
 this table exists for: **every number carried forward gets its `n` written next to it**, and the

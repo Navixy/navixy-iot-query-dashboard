@@ -30,12 +30,20 @@ const WIZARD_OPTIONS = [
     icon: MessageSquareText,
     title: 'AI Assistant',
     tagline: 'From a plain-language description to a working dashboard',
+    // "before it is added to your reports", NOT "before anything is saved" — and the
+    // distinction is a real one, not pedantry. The assistant turn, INCLUDING the complete
+    // report_schema, is written to dashboard_studio_meta_data.chat_messages.result at turn
+    // time, before the user has previewed anything, on every tenant that has migration 002
+    // applied (docs/ai-agent-seam.md §6 — the artifact is copied out of S3 once so a
+    // reloaded conversation outlives the object's expiry). What Apply gates is REPORT
+    // CREATION — POST /api/reports — not storage. Promising "nothing is saved" would be a
+    // false persistence guarantee. (!65 review round 4)
     description:
-      'Describe what you want to monitor in plain language. The assistant asks a few clarifying questions, then builds a full SQL-backed dashboard you can preview against your own data before anything is saved.',
+      'Describe what you want to monitor in plain language. The assistant asks a few clarifying questions, then builds a full SQL-backed dashboard you can preview against your own data before it is added to your reports.',
     bestFor: 'You know what you want to see but not which tables or queries it takes to get there.',
     highlights: [
       'Plain-language interview — refine the result by continuing the conversation',
-      'Preview every panel against your real data before saving',
+      'Preview every panel against your real data before it becomes a report',
       'Saved into an "AI Dashboards" section in your sidebar',
     ],
     cta: 'Start chatting',

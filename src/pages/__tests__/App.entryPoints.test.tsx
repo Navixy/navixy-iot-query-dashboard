@@ -3,12 +3,20 @@
  *
  * !65 review round 3 — the two doors into the AI assistant, pinned.
  *
- * `src/pages/App.tsx` holds the ONLY reference to `/app/chat` anywhere in the
- * app, and the sidebar Home link holds the only reference to `/app` outside the
- * router. Between them they are the entire reachability story for DO-313: break
- * either and the feature is addressable only from the URL bar, with a green
- * typecheck, a green lint and 754 passing tests. Nothing else in the repo would
- * notice, which is what makes these two assertions worth their cost.
+ * These two controls are the app's only visible way INTO the AI assistant.
+ *
+ * Stated precisely, because the first draft of this docstring overclaimed and !65
+ * round 4 caught it: `/app/chat` appears in `src/App.tsx`'s route table and in
+ * five comments, but `src/pages/App.tsx`'s CTA is the only thing a user can click
+ * to reach it. `/app` is navigated to from seven places — post-login redirect,
+ * `Login`, `SqlEditor`, both composite-report pages — but the sidebar Home link is
+ * the only affordance for it that is on screen while a report is open, which is
+ * where a user actually needs it.
+ *
+ * So: the primary navigation affordances, not the only references. Break either
+ * and the feature is reachable from the URL bar alone, with a green typecheck, a
+ * green lint and every other test still passing — nothing else in the repo would
+ * notice, which is what makes these assertions worth their cost.
  *
  * Both cases pin the load-bearing DETAIL rather than mere presence, because in
  * this file every regression so far has been of the shape "the element is there
