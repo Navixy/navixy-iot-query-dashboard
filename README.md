@@ -53,7 +53,7 @@ This single command will:
 
 ### Access Your Application
 
-- **Frontend**: http://localhost:8080 (or http://localhost:8081)
+- **Frontend**: http://localhost:8080 (override with `DEV_PORT` in `.env`)
 - **Backend API**: http://localhost:3001
 - **Health Check**: http://localhost:3001/health
 

@@ -5,6 +5,11 @@
 
 set -e  # Exit on any error
 
+# Machine-local port overrides — the same git-ignored .env that docker compose interpolates
+# from and vite.config.ts reads. Inert without it: every use below falls back to the
+# original port, so a fresh clone behaves exactly as before.
+if [ -f "$(dirname "$0")/../.env" ]; then set -a; . "$(dirname "$0")/../.env"; set +a; fi
+
 echo "🚀 SQL Report Dashboard - Development Setup"
 echo "=========================================="
 
@@ -77,7 +82,7 @@ if [ ! -f "backend/.env" ]; then
     cat > backend/.env << EOF
 # Environment Configuration
 NODE_ENV=development
-PORT=3001
+PORT=${BACKEND_PORT:-3001}
 
 # Client Settings Database Username (REQUIRED)
 # This username is used to connect to the client's database for storing
@@ -86,7 +91,7 @@ PORT=3001
 CLIENT_SETTINGS_DB_USER=dashboard_settings
 
 # Redis Cache
-REDIS_URL=redis://localhost:6379
+REDIS_URL=redis://localhost:${REDIS_HOST_PORT:-6379}
 
 # JWT Configuration
 JWT_SECRET=dev_jwt_secret_key_change_in_production
@@ -97,7 +102,7 @@ RATE_LIMIT_WINDOW_MS=300000
 RATE_LIMIT_MAX_REQUESTS=5000
 
 # Analytics Service
-ANALYTICS_SERVICE_URL=http://localhost:8001
+ANALYTICS_SERVICE_URL=http://localhost:${ANALYTICS_HOST_PORT:-8001}
 
 # Report Schema Repository
 # REPORT_SCHEMA_URL= # Optional: URL for default report schema
@@ -120,7 +125,7 @@ docker stop redis-dev 2>/dev/null || true
 docker rm redis-dev 2>/dev/null || true
 
 # Start Redis container
-docker run -d --name redis-dev -p 6379:6379 redis:7-alpine
+docker run -d --name redis-dev -p "${REDIS_HOST_PORT:-6379}:6379" redis:7-alpine
 print_success "Redis container started"
 
 # Wait for Redis to be ready
@@ -171,7 +176,7 @@ cd ..
 sleep 5
 
 # Check if backend is running
-if curl -s http://localhost:3001/health > /dev/null; then
+if curl -s "http://localhost:${BACKEND_PORT:-3001}/health" > /dev/null; then
     print_success "Backend server started successfully"
 else
     print_warning "Backend server may still be starting... (database connection happens on first request)"
@@ -185,8 +190,10 @@ FRONTEND_PID=$!
 # Wait for frontend to start
 sleep 3
 
-# Check if frontend is running
-if curl -s http://localhost:8080 > /dev/null || curl -s http://localhost:8081 > /dev/null; then
+# Check if frontend is running. The old second arm probed :8081 as Vite's fall-forward
+# port; vite.config.ts now sets strictPort, so that fallback cannot happen — and on a
+# machine running other projects, :8081 answering means some OTHER dev server is up.
+if curl -s "http://localhost:${DEV_PORT:-8080}" > /dev/null; then
     print_success "Frontend server started successfully"
 else
     print_warning "Frontend server may still be starting..."
@@ -197,12 +204,12 @@ echo ""
 echo "🎉 Setup Complete!"
 echo "=================="
 echo ""
-print_success "Backend: http://localhost:3001"
-print_success "Frontend: http://localhost:8080 (or http://localhost:8081)"
-print_success "Health Check: http://localhost:3001/health"
+print_success "Backend: http://localhost:${BACKEND_PORT:-3001}"
+print_success "Frontend: http://localhost:${DEV_PORT:-8080}"
+print_success "Health Check: http://localhost:${BACKEND_PORT:-3001}/health"
 echo ""
 print_status "Services running:"
-print_status "  - Redis: localhost:6379 (Docker container)"
+print_status "  - Redis: localhost:${REDIS_HOST_PORT:-6379} (Docker container)"
 print_status "  - Backend: PID $BACKEND_PID"
 print_status "  - Frontend: PID $FRONTEND_PID"
 echo ""
