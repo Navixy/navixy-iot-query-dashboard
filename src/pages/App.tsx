@@ -13,9 +13,11 @@ import { ArrowRight, LayoutGrid, MessageSquareText } from 'lucide-react';
  * The array name, the card markup, the hero pill, the <h1> and the footer line are
  * DO-288's, deliberately and byte-for-byte. We are NOT building on that branch and not
  * merging it — it carries a wizard and a gallery we are not shipping, two routes that do
- * not exist here, and 84 commits of drift. Keeping the shape identical is what makes
- * converging later ONE ARRAY ELEMENT rather than a rename plus a conflict in the file the
- * whole feature touches. Reference:
+ * not exist here, and a merge base `main` has since moved a long way past (one squashed
+ * commit off that base; `git rev-list --count $(git merge-base DO-288… main)..main` gave
+ * 276 when this was written — re-derive it rather than trusting the figure). Keeping the
+ * shape identical is what makes converging later ONE ARRAY ELEMENT rather than a rename
+ * plus a conflict in the file the whole feature touches. Reference:
  *   git show remotes/origin/DO-288-Dashbaord-Studio-improving-CX-with-dashboard-creation-wizard-and-gallery:src/pages/App.tsx
  *
  * Not exported, exactly as on DO-288: nothing imports it, and exporting a non-component
@@ -38,10 +40,11 @@ const WIZARD_OPTIONS = [
     ],
     cta: 'Start chatting',
     // NOT DO-288's 'default'. This repo's Button is hand-written, not stock shadcn:
-    // VARIANT_STYLES (button.tsx:28-32) is a Partial<> holding only primary/secondary/ghost,
-    // so 'default' — which IS in the ButtonVariant union (:11-17), widened so the shadcn
+    // button.tsx's VARIANT_STYLES is a Partial<> holding only primary/secondary/ghost, so
+    // 'default' — which IS in the ButtonVariant union, widened so the shadcn
     // calendar/pagination primitives typecheck — resolves to `undefined` and paints NO
-    // background at all. Partial<> is exactly why typecheck stayed green. (!65 review)
+    // background at all. Partial<> is exactly why typecheck stayed green. (!65 review;
+    // the other ~62 call sites are DO-374)
     variant: 'primary' as const,
   },
 ];
@@ -81,12 +84,13 @@ const AppPage = () => {
     <AppLayout>
       <div className="mx-auto max-w-5xl py-4 md:py-10">
         <div className="text-center space-y-3 mb-10">
-          {/* bg-accent-soft, NOT DO-288's bg-accent/10: `accent` resolves to the bare string
-              `var(--accent)` (tailwind.config.ts:57-58) and `--accent` is an opaque hex
-              (tokens.css:188), which Tailwind's withAlphaValue cannot decompose — so the
-              opacity candidate is DROPPED SILENTLY, no CSS and no build error, and the pill
-              renders with no fill. `--accent-soft` exists for exactly this (MenuEditor.tsx:234).
-              Same silent-drop family as the GRID_CLASS warning above. (!65 review) */}
+          {/* bg-accent-soft, NOT DO-288's bg-accent/10: the `accent` key in tailwind.config.ts
+              resolves to the bare string `var(--accent)` and `--accent` is an opaque hex in
+              tokens.css, which Tailwind's withAlphaValue cannot decompose — so the opacity
+              candidate is DROPPED SILENTLY, no CSS and no build error, and the pill renders
+              with no fill. `--accent-soft` exists for exactly this, and MenuEditor's active
+              rows already use it. Same silent-drop family as the GRID_CLASS warning above,
+              and as the sidebar Home fill in AppSidebar. (!65 review) */}
           <div className="inline-flex items-center gap-2 rounded-full bg-accent-soft px-4 py-1.5 text-sm font-medium text-accent">
             <LayoutGrid className="h-4 w-4" />
             Get started
@@ -118,12 +122,20 @@ const AppPage = () => {
                           so nothing de-duplicates conflicting utilities and raw CSS source order
                           decides. CardTitle's own text-lg and CardDescription's text-sm /
                           text-muted-foreground are all emitted AFTER these, and silently won.
-                          Same reason MenuEditor.tsx:128 uses !h-6 !w-6 !p-0. (!65 review) */}
+                          Same reason MenuEditor's row-action button uses !h-6 !w-6 !p-0.
+                          (!65 review) */}
                       <CardTitle className="!text-2xl">{option.title}</CardTitle>
                       <p className="text-sm font-medium text-accent">{option.tagline}</p>
                     </div>
                   </div>
-                  <CardDescription className="!text-base leading-relaxed !text-text-secondary">
+                  {/* !leading-relaxed, not leading-relaxed: Tailwind's font-size utilities set a
+                      PAIRED line-height, so !text-base emits `line-height:1.5rem!important` and
+                      beats a plain .leading-relaxed (1.625) on specificity — source order never
+                      gets a say. Unprefixed, the class was dead and the description rendered at
+                      base leading. This is the flip side of the `!` note above: the important
+                      that wins the font-size also has to be spent on anything it collides with.
+                      (!65 review round 3) */}
+                  <CardDescription className="!text-base !leading-relaxed !text-text-secondary">
                     {option.description}
                   </CardDescription>
                 </CardHeader>
@@ -149,10 +161,10 @@ const AppPage = () => {
                       so it is the last control that should swallow them. (!65 review round 2)
 
                       Why not `<Button asChild>`: this repo's Button has no Slot, and a <button>
-                      inside an <a> is invalid HTML. `buttonVariants()` is exported at
-                      button.tsx:35 for exactly this case — "class string for button-styled
-                      non-<button> elements". clsx, not cn, so the emitted string is identical to
-                      what <Button> composed before; only the element changed.
+                      inside an <a> is invalid HTML. button.tsx exports `buttonVariants()` for
+                      exactly this case — "class string for button-styled non-<button>
+                      elements". clsx, not cn, so the emitted string is identical to what
+                      <Button> composed before; only the element changed.
 
                       `justify-center` is NEW and load-bearing: BASE brings `inline-flex
                       items-center` but no justification, and a <button> centred its content via
