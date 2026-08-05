@@ -1,6 +1,5 @@
 import { describe, it, expect } from '@jest/globals';
 import {
-  DROPPED_QUESTIONS_PREVIEW_CHARS,
   droppedQuestionsTelemetry,
   interpretAgentResponse,
   looksLikeDroppedQuestions,
@@ -351,8 +350,8 @@ describe('looksLikeDroppedQuestions (DO-380)', () => {
  * no CJK or RTL turn to quote. What IS from the corpus is the shape: `**1. …**` is this
  * agent's dominant numbered form (20 of the 72 healthy replies carry no marker the old
  * regex could see and were cleared by their `?` alone), and it bullets question lines
- * with 👉 / 🔹 / ❓ in four more. Re-scored on that corpus after these widenings: still
- * 6 of 6 caught, 0 false positives, 0 missed.
+ * with 👉 / 🔹 / ❓ in four more. Re-scored on that corpus after these widenings, and again
+ * after round 2's narrowing: still 6 of 6 caught, 0 false positives, 0 missed.
  */
 describe('looksLikeDroppedQuestions — multilingual and list-marker families (!67)', () => {
   it.each([
@@ -375,24 +374,40 @@ describe('looksLikeDroppedQuestions — multilingual and list-marker families (!
     expect(looksLikeDroppedQuestions(reply)).toBe(false);
   });
 
+  // SINGLE LINE, deliberately, and each carries no question mark: the marker is then the
+  // ONLY thing clearing the reply, so these fail if a family is narrowed or deleted. Write
+  // them as the multi-line lists they are drawn from and they pass on the line count alone
+  // (round 2 added that conjunct) — the regexes would be free to rot underneath.
   it.each([
-    ['fullwidth digits + U+FF0E, no space (CJK typography)', '请告诉我：\n１．指标\n２．时间范围'],
-    ['ideographic comma U+3001, no space', '教えてください：\n1、指標\n2、期間'],
-    ['circled numerals U+2460', 'Tell me:\n① the metric\n② the range'],
-    ['Arabic-Indic digits', 'Provide:\n١. metric\n٢. range'],
-    ['`**1. …**` — this agent\'s dominant numbered form', 'Great!\n\n**1. What to track**\nMileage.\n\n**2. Which vehicles**'],
-    ['`**1.** …` — emphasis closing before the space', "Let's start:\n**1.** the metric\n**2.** the range"],
-    ['em-dash bullets U+2014', 'Provide:\n— the metric\n— the range'],
-    ['emoji bullets — observed on 4 of the 72 turns', 'Here they are:\n👉 the metric\n👉 the range'],
-    ['indented bullets', 'Provide:\n  - the metric\n  - the range'],
-  ])('does NOT flag an imperative list written as: %s', (_label, reply) => {
+    ['fullwidth digits + U+FF0E, no space (CJK typography)', '１．指标'],
+    ['ideographic comma U+3001, no space', '1、指標'],
+    ['ideographic full stop U+3002', '2。期間'],
+    ['circled numerals U+2460', '① the metric'],
+    ['parenthesised numerals U+2474', '⑴ the metric'],
+    ['Arabic-Indic digits', '١. metric'],
+    ["`**1. …**` — this agent's dominant numbered form", '**1. What to track**'],
+    ['`**1.** …` — emphasis closing before the space', '**1.** the metric'],
+    ['em-dash bullets U+2014', '— the metric'],
+    ['en-dash bullets U+2013', '– the metric'],
+    ['`+` bullets', '+ the metric'],
+    ['indented bullets', '  - the metric'],
+  ])('does NOT flag a one-line item written as: %s', (_label, reply) => {
     expect(looksLikeDroppedQuestions(reply)).toBe(false);
   });
 
+  it('an emoji-bulleted list is cleared by the line count, not by an emoji regex', () => {
+    // Round 1 matched emoji bullets with their own pattern, gated on a preceding line so a
+    // rocket on a sign-off stayed flagged. Round 2's single-line conjunct expresses the
+    // same thing for every marker at once, so that pattern is gone. Both halves of what it
+    // decided still hold, which is why it could go.
+    expect(looksLikeDroppedQuestions('Here they are:\n👉 the metric\n👉 the range')).toBe(false);
+    expect(looksLikeDroppedQuestions('🚀 Ready as soon as you send those details!')).toBe(true);
+  });
+
   it.each([
-    // The widening must not swallow the defect. Each of these asks nothing.
+    // The widening must not swallow the defect. Each of these asks nothing, on one line.
     ['a decimal is not item 1', 'You have 1.5 million records ready to plot.'],
-    ['a horizontal rule is not a bullet', 'All set.\n---\nBuilding now!'],
+    ['a horizontal rule is not a bullet', '--- building now!'],
     ['a hash-number is not a marker', 'Report #1 is on its way.'],
     ['bold prose is not a list', '**Great news** — building it now.'],
     ['a leading emoji is decoration, not a bullet', '🚀 Ready as soon as you send those details!'],
@@ -403,15 +418,107 @@ describe('looksLikeDroppedQuestions — multilingual and list-marker families (!
 });
 
 /**
+ * MR !67 review ROUND 2 — the three findings, executable.
+ *
+ * 1. The rule flagged healthy imperative replies. It still can, and the shape below is
+ *    why: every one of the 6 measured failures is ITSELF an imperative ask, so the
+ *    obvious remedy — recognise imperative asking and clear it — clears all six. What
+ *    narrowed instead is the single-line conjunct, which is positive evidence of
+ *    truncation rather than another absence. The residual false positive is PINNED, not
+ *    fixed, and the rule for reporting around it lives in looksLikeDroppedQuestions.
+ * 2. QUESTION_MARK held an ASCII U+003B behind a comment claiming U+037E, so any reply
+ *    with a semicolon was cleared. U+037E canonically decomposes to U+003B, which is how
+ *    a glyph became a semicolon in the first place; the class is escapes now.
+ * 3. `\p{No}` was documented as circled/parenthesised numerals and is not — it carries
+ *    fractions and superscripts too. Replaced by explicit ranges, pinned both ways.
+ */
+describe('looksLikeDroppedQuestions — review round 2 (!67)', () => {
+  it.each([
+    // Verbatim shape of all six measured failures: an imperative pointing at questions
+    // that are not in the message. A test for "does it ask" clears every one of them.
+    ['the EN capture', "Please go ahead and answer the above — I'm ready to build!"],
+    ['the RU captures in shape', 'Please answer these 4 questions and I will build the dashboard!'],
+  ])('the DEFECT is itself an imperative ask: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(true);
+  });
+
+  it('KNOWN FALSE POSITIVE: a healthy one-line imperative with no question mark', () => {
+    // The review's own example. Nothing in the 72 measured turns has this shape — all 66
+    // healthy replies carry a question mark — and the case above is why no rule over one
+    // message can separate it from the defect. The consequence is a REPORTING rule, in
+    // looksLikeDroppedQuestions: the flag yields candidates, and the figure that reaches
+    // DO-380 is the subset confirmed against chat_messages on the logged sessionId.
+    //
+    // Flipping this expectation means having found a rule that clears this and still
+    // catches "Please answer these 4 questions and I will build the dashboard!".
+    expect(looksLikeDroppedQuestions('Please provide the metric and time range.')).toBe(true);
+  });
+
+  it.each([
+    ['German', 'Bitte nennen Sie die Kennzahl und den Zeitraum.'],
+    ['Spanish', 'Indique la métrica y el intervalo de tiempo.'],
+    ['French', 'Merci de préciser la métrique et la période.'],
+    ['Turkish', 'Lütfen metriği ve zaman aralığını belirtin.'],
+    ['Chinese', '请提供指标和时间范围。'],
+    ['Japanese', '指標と期間を教えてください。'],
+    ['Arabic', 'يرجى تحديد المقياس والفترة الزمنية.'],
+  ])('the same limit is script-independent, not an English artefact: %s', (_label, reply) => {
+    // Deliberately asserting TRUE. These are healthy imperatives in seven scripts and the
+    // rule flags all of them, exactly as it flags the English one — the limit does not
+    // discriminate by language, so a reader cannot mistake it for the round-1 defect,
+    // where the RULE was English-specific. Written rather than captured: the corpus is
+    // English and Russian only, and this repository stays English-only.
+    expect(looksLikeDroppedQuestions(reply)).toBe(true);
+  });
+
+  it.each([
+    ['a multi-line imperative asks visibly', 'Two things before I build:\nthe metric\nthe time range'],
+    ['an intro plus a bare line', 'Understood.\n\nSend me the metric and the range.'],
+  ])('a reply of more than one line is cleared: %s', (_label, reply) => {
+    // The narrowing. A truncated reply is a lone closing line — 6 of 6 measured, against
+    // 64 of 66 healthy replies running to several lines. Anything with a line above it
+    // had room to ask, so it leaves the numerator whatever its markers look like. This is
+    // the ONLY conjunct that is evidence rather than absence of evidence.
+    expect(looksLikeDroppedQuestions(reply)).toBe(false);
+  });
+
+  it('an ordinary semicolon no longer clears a reply (the U+003B that shipped)', () => {
+    // Round 1 put ASCII U+003B in QUESTION_MARK while documenting U+037E. Every reply
+    // containing a semicolon was silently cleared — under-counting, so the corpus score
+    // never moved. U+037E decomposes to U+003B under NFC, so the glyph could not have
+    // survived here anyway; both are simply absent now.
+    expect(looksLikeDroppedQuestions('I have everything; building it now!')).toBe(true);
+    // And the Greek gap is real rather than covered: modern Greek types U+003B.
+    expect(looksLikeDroppedQuestions('Τι θέλετε να παρακολουθείτε;')).toBe(true);
+  });
+
+  it.each([
+    ['circled U+2460', 'Tell me:\n① the metric\n② the range'],
+    ['parenthesised U+2474', 'Tell me:\n⑴ the metric\n⑵ the range'],
+    ['digit-with-full-stop U+2488', 'Tell me:\n⒈ the metric\n⒉ the range'],
+    ['dingbat circled U+2776', 'Tell me:\n❶ the metric\n❷ the range'],
+  ])('enclosed numerals still mark a list: %s', (_label, reply) => {
+    expect(looksLikeDroppedQuestions(reply)).toBe(false);
+  });
+
+  it.each([
+    ['a vulgar fraction enumerates nothing', '½ of the fleet is already reporting!'],
+    ['a superscript enumerates nothing', '² is the exponent I applied to the series.'],
+  ])('but the rest of \\p{No} does not: %s', (_label, reply) => {
+    // The one narrowing in the whole rule, so it is the one change that can ADD a flag:
+    // under `\p{No}` these two opened a list and cleared the turn. Neither enumerates.
+    expect(looksLikeDroppedQuestions(reply)).toBe(true);
+  });
+});
+
+/**
  * MR !67 review — the logging contract, executable.
  *
- * `bedrockAgent.ts` reaches AWS, so by this suite's stated policy it has no test and the
- * wiring was verified only by hand against the live agent. The DECISION behind the two
- * log lines does not need AWS, so it lives here as a pure function and is pinned below:
- * which turns contribute to the rate, which are omitted entirely, and what the warn
- * carries. What is still out of reach without a mock is that `logger.info` and
- * `logger.warn` are the calls actually made — the helper returns payloads and never
- * touches the intent, so it cannot alter the turn the user receives.
+ * The DECISION behind the two log lines needs no AWS, so it lives here as a pure function
+ * and is pinned below: which turns contribute to the rate, which are omitted entirely, and
+ * what the warn may carry. That `logger.info` and `logger.warn` are the calls actually
+ * made is a separate question about wiring, and round 2 of the review was right that
+ * nothing covered it — `bedrockAgent.logging.test.ts` now does.
  */
 describe('droppedQuestionsTelemetry (DO-380 logging contract)', () => {
   const question = (message: string): AgentIntent => ({
@@ -419,6 +526,9 @@ describe('droppedQuestionsTelemetry (DO-380 logging contract)', () => {
     message,
     via: 'heuristic',
   });
+
+  /** Stands in for whatever the agent quoted back from the user's request. */
+  const SECRET = 'ACME-Logistics-fleet-42';
 
   it('an eligible healthy turn records the DENOMINATOR: false plus a length', () => {
     // The whole reason the verdict rides the every-turn info line. Without a `false`
@@ -433,13 +543,11 @@ describe('droppedQuestionsTelemetry (DO-380 logging contract)', () => {
     });
   });
 
-  it('an eligible failing turn records the NUMERATOR and one bounded warn', () => {
-    // Shorter than the 400-char bound, so the preview is the reply whole — which is the
-    // point of the low bound: this defect's signature is a short reply.
+  it('an eligible failing turn records the NUMERATOR and one text-free warn', () => {
     const prose = "I'm ready to build as soon as I have those details!";
     expect(droppedQuestionsTelemetry(question(prose), prose)).toEqual({
       info: { questionsDropped: true, replyChars: 51 },
-      warn: { replyChars: 51, rawPreview: prose },
+      warn: { replyChars: 51 },
     });
   });
 
@@ -464,24 +572,35 @@ describe('droppedQuestionsTelemetry (DO-380 logging contract)', () => {
     expect(droppedQuestionsTelemetry(intent, prose)).toEqual({ info: {}, warn: null });
   });
 
-  it('caps the preview and measures the DELIVERED reply, not the raw prose', () => {
+  it('carries NO agent text in any payload, and measures the DELIVERED reply', () => {
+    // MR !67 review round 2. Round 1 shipped a 400-char preview here; agent prose quotes
+    // the user's request back, so that copied tenant data into CloudWatch on a condition
+    // that fires on roughly one question turn in twelve. The whole payload is numbers now,
+    // and this asserts it structurally rather than by naming the key that used to exist —
+    // any future field carrying a fragment of the reply fails here.
+    //
     // `message` is what the user saw; `prose` is what arrived. Identical under today's
-    // heuristic, so a trailer intent is constructed here to force them apart — the day
-    // §3.4.4 lands, replyChars must not count machinery bytes and the preview must not
-    // leak them.
-    const message = 'x'.repeat(DROPPED_QUESTIONS_PREVIEW_CHARS + 250);
+    // heuristic, so a trailer intent forces them apart: the day §3.4.4 lands, replyChars
+    // must count the reply and not the machinery.
+    const message = `Ready when you send those details, ${SECRET}!`;
     const prose = `${message}\n\`\`\`json\n{"type":"question"}\n\`\`\``;
     const telemetry = droppedQuestionsTelemetry(
       { type: 'question', message, via: 'trailer' },
       prose,
     );
-    expect(telemetry.info).toEqual({
-      questionsDropped: true,
-      replyChars: DROPPED_QUESTIONS_PREVIEW_CHARS + 250,
-    });
-    expect(telemetry.warn?.rawPreview).toHaveLength(DROPPED_QUESTIONS_PREVIEW_CHARS);
-    expect(telemetry.warn?.replyChars).toBe(DROPPED_QUESTIONS_PREVIEW_CHARS + 250);
-    expect(telemetry.warn?.rawPreview).not.toContain('```');
+
+    expect(telemetry.info).toEqual({ questionsDropped: true, replyChars: message.length });
+    expect(telemetry.warn).toEqual({ replyChars: message.length });
+
+    const serialized = JSON.stringify(telemetry);
+    expect(serialized).not.toContain(SECRET);
+    // Nothing lifted from the reply at all, not merely the marker: every leaf is a number
+    // or a boolean, so no wording can reach a log through this helper.
+    for (const payload of [telemetry.info, telemetry.warn ?? {}]) {
+      for (const value of Object.values(payload)) {
+        expect(typeof value === 'number' || typeof value === 'boolean').toBe(true);
+      }
+    }
   });
 
   it('is total: an empty reply produces a verdict rather than throwing', () => {
@@ -489,7 +608,7 @@ describe('droppedQuestionsTelemetry (DO-380 logging contract)', () => {
     // whitespace-only drain — but nothing in the signature says the caller pre-filters.
     expect(droppedQuestionsTelemetry(question(''), '')).toEqual({
       info: { questionsDropped: true, replyChars: 0 },
-      warn: { replyChars: 0, rawPreview: '' },
+      warn: { replyChars: 0 },
     });
   });
 });

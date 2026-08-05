@@ -179,28 +179,36 @@ export function looksLikeMissedResult(raw: string): boolean {
 }
 
 /**
- * A question mark in ANY script. Every codepoint here terminates — or, for the
- * Spanish opener, introduces — an interrogative and has no second role, so widening
- * this family can only REMOVE false positives from the DO-380 rate, never add one.
+ * A question mark in ANY script — written as ESCAPES, not glyphs. See the Greek note
+ * for what a glyph cost us. Every codepoint here terminates, or for the Spanish opener
+ * introduces, an interrogative and has no second role, so widening this family can only
+ * REMOVE false positives from the DO-380 rate, never add one.
  *
- *   U+003F  ASCII       Latin, Cyrillic, Hebrew, Thai, Devanagari, Greek as typed
+ *   U+003F  ASCII       Latin, Cyrillic, Hebrew, Thai, Devanagari
  *   U+FF1F  fullwidth   Chinese, Japanese, Korean
  *   U+FE56  small form  CJK compatibility
  *   U+061F  Arabic      Arabic, Persian, Urdu, Pashto
  *   U+055E  Armenian
  *   U+1367  Ethiopic    Amharic, Tigrinya
- *   U+037E  Greek       the dedicated codepoint only — see the gap below
  *   U+00BF  inverted    Spanish/Asturian opener
  *   U+2047  U+2048  U+2049  U+203D  U+2E2E   doubled, mixed, interrobang, reversed
  *   U+2753  U+2754  emoji ornaments — OBSERVED in this agent's own output, which
  *                   bullets its question lines with U+2753
  *
- * KNOWN GAP — modern Greek types U+003B SEMICOLON, not U+037E. U+003B cannot go in
- * here: an ordinary semicolon anywhere in a reply would clear it, a far larger hole
- * than the one it closes. Greek interrogatives rely on the list test alone. Same
- * lower-bound direction as the rest of the rule.
+ * NO GREEK QUESTION MARK, deliberately — and the previous round of this file shipped an
+ * ASCII U+003B here behind a comment claiming U+037E (MR !67 review round 2), which
+ * cleared every reply containing an ordinary semicolon. The trap is structural, not a
+ * typo: U+037E GREEK QUESTION MARK carries the canonical decomposition <U+003B>, so NFC
+ * rewrites it to a semicolon. Any editor, formatter or paste that normalises turns the
+ * intended codepoint into the one member this class must never hold, invisibly, because
+ * the two render identically. Escapes above so that can never recur silently.
+ *
+ * Nothing is lost by omitting it: modern Greek types U+003B directly, so no codepoint
+ * could have separated an interrogative from ordinary punctuation. Greek interrogatives
+ * rest on the list and single-line tests — the same lower-bound direction as the rest.
  */
-const QUESTION_MARK = /[?¿;՞؟፧⁇⁈⁉‽⸮❓❔﹖？]/u;
+const QUESTION_MARK =
+  /[?\u00BF\u055E\u061F\u1367\u2047\u2048\u2049\u203D\u2E2E\u2753\u2754\uFE56\uFF1F]/u;
 
 /**
  * A numbered list item at the start of a line, in any script's digits.
@@ -218,11 +226,22 @@ const QUESTION_MARK = /[?¿;՞؟፧⁇⁈⁉‽⸮❓❔﹖？]/u;
  *                  required: CJK typography does not put one after the marker, which
  *                  is exactly why demanding `\s` misread a fullwidth numbered list
  *                  as prose.
- *   `\p{No}`       circled and parenthesised numerals (U+2460…, U+2474…), which carry
- *                  their own terminator.
+ *   enclosed       numerals that carry their own terminator and so need no following
+ *                  space: U+2460-U+24FF circled/parenthesised/full-stop alphanumerics,
+ *                  U+2776-U+2793 dingbat circled, U+3220-U+3229 and U+3280-U+3289 CJK
+ *                  parenthesised and circled, U+3251-U+325F and U+32B1-U+32BF circled
+ *                  21-50, U+1F100-U+1F10A digit-with-full-stop/comma.
+ *
+ * Those ranges replace `\p{No}` (MR !67 review round 2), which claimed to be exactly
+ * this set and is not: it also carries vulgar fractions (U+00BC-U+00BE, U+2150-U+2189)
+ * and superscript digits (U+00B2 U+00B3 U+00B9), none of which enumerates anything. This
+ * is the one narrowing in the rule — it can only ADD flags — so it is spelled out by
+ * range rather than by property, and pinned in the tests both ways.
+ *
+ * Every non-ASCII member is an escape, for the reason QUESTION_MARK documents.
  */
 const NUMBERED_ITEM =
-  /^[^\S\n]*[*_#>]{0,3}[^\S\n]*(?:\p{Nd}+[.)][*_]{0,2}[^\S\n]|\p{Nd}+[．）、。]|\p{No})/mu;
+  /^[^\S\n]*[*_#>]{0,3}[^\S\n]*(?:\p{Nd}+[.)][*_]{0,2}[^\S\n]|\p{Nd}+[\uFF0E\uFF09\u3001\u3002]|[\u2460-\u24FF\u2776-\u2793\u3220-\u3229\u3251-\u325F\u3280-\u3289\u32B1-\u32BF\u{1F100}-\u{1F10A}])/mu;
 
 /**
  * A bulleted list item at the start of a line. CommonMark's three (`-` `*` `+`) —
@@ -233,26 +252,38 @@ const NUMBERED_ITEM =
  *
  * The trailing `[^\S\n]` is space-or-tab, NOT `\s`: a marker followed by a newline is
  * a stray character rather than an item, and `---` has to stay a horizontal rule.
+ *
+ * Every non-ASCII member is an escape, for the reason QUESTION_MARK documents — and this
+ * class is where a glyph is hardest to check by eye: U+2013, U+2014 and ASCII `-` are
+ * three different members that render nearly alike.
  */
-const BULLET_ITEM = /^[^\S\n]*[*_#>]{0,3}[^\S\n]*[-*+·–—•‣⁃∙■□▪▫○●◦※][^\S\n]/mu;
+const BULLET_ITEM =
+  /^[^\S\n]*[*_#>]{0,3}[^\S\n]*[-*+\u00B7\u2013\u2014\u2022\u2023\u2043\u203B\u2219\u25A0\u25A1\u25AA\u25AB\u25CB\u25CF\u25E6][^\S\n]/mu;
+
+/** Either item shape above. */
+function containsListItem(raw: string): boolean {
+  return NUMBERED_ITEM.test(raw) || BULLET_ITEM.test(raw);
+}
 
 /**
- * An emoji used as a bullet — observed: this agent bullets its questions with U+1F449
- * and U+1F539 in 4 of the 72 measured replies. A trailing variation selector or
- * skin-tone modifier is consumed so the space after it still reads as the separator.
+ * The delivered reply is ONE line. Measured on the trimmed message, so a stray trailing
+ * newline is not a second line.
  *
- * Gated on a PRECEDING line (leading `\n`, where the other two anchor with `/m`), and
- * the asymmetry is deliberate. A typographic bullet has no second role; an emoji does.
- * A rocket on a sign-off — "<emoji> Ready when you have those details!" — is decoration,
- * and that IS the defect, so requiring a line above keeps it flagged: every measured
- * truncation is a single line, and every measured emoji list has an intro above it.
+ * This is the rule's only POSITIVE evidence — every other test is an absence, and the
+ * review that asked for "a narrower, unambiguous sign of actually observed truncation"
+ * (MR !67 round 2) is asking for evidence of this kind. Truncation to a closing line is
+ * precisely what leaves a lone line behind, and the corpus splits on it cleanly: 6 of 6
+ * failures are exactly one line, 64 of the 66 healthy replies are not (median 9 lines),
+ * and the two that are both carry a question mark.
+ *
+ * It also subsumes the emoji-bullet test the previous round added, which was gated on a
+ * PRECEDING line for exactly this reason — an emoji needs a line above it to read as a
+ * bullet rather than as decoration on a sign-off. That special case is now deleted: the
+ * same insight applies to every marker family at once, and to replies carrying no marker
+ * at all, which is what makes this a narrowing rather than another patch.
  */
-const EMOJI_ITEM =
-  /\n[^\S\n]*\p{Extended_Pictographic}(?:\uFE0F|[\u{1F3FB}-\u{1F3FF}])*[^\S\n]/u;
-
-/** Any of the three item shapes above. */
-function containsListItem(raw: string): boolean {
-  return NUMBERED_ITEM.test(raw) || BULLET_ITEM.test(raw) || EMOJI_ITEM.test(raw);
+function isSingleLine(raw: string): boolean {
+  return !raw.trim().includes('\n');
 }
 
 /**
@@ -264,34 +295,53 @@ function containsListItem(raw: string): boolean {
  * to four questions while `observation.finalResponse` is a 63-character sign-off,
  * and we receive exactly those 63 characters. (DO-380)
  *
- * A question turn that asks nothing is the whole signature. Deliberately NOT:
+ * THE SIGNATURE IS A LONE LINE THAT ASKS NOTHING — one line, no question mark in any
+ * script, no list item. Each conjunct is measured on the 72-turn corpus, not assumed, and
+ * together they caught 6 of 6 real defects with 0 false positives across 18 dialogues.
+ *
+ * Deliberately NOT:
  *
  *   - **a length threshold.** Measured: a VALID English reply of 47 chars ("What
  *     would you like to track on your dashboard?" — the agent de-escalating to one
  *     question at a time) against a real failure of 54. The shorter one was healthy.
+ *     At 83 chars the corpus holds one of each.
  *   - **requiring a full set of four questions.** Scored 40 % precision on the same
  *     sample: 9 of 15 firings were healthy, 6 of those the agent correctly asking
  *     one question after the user complained it couldn't see the list. It fires
  *     hardest on correct behaviour.
+ *   - **"does the reply ask for something", in any form.** This is the intuitive fix for
+ *     the false positive below, and it provably deletes the detector: every one of the 6
+ *     measured failures IS an imperative ask — "Please answer these 4 questions and I'll
+ *     start building", five times in two languages, plus "Please go ahead and answer the
+ *     above". A test for imperative asking clears all six. What separates them from a
+ *     healthy imperative is not the asking but the REFERENT: they point at questions
+ *     that are not in the message. No rule over one message's text can see that.
  *
- * This rule caught 6 of 6 real defects with 0 false positives across 18 dialogues /
- * 72 live turns. Both families above were widened after review (MR !67) and re-scored
- * on that same corpus: unchanged at 6 of 6, 0 false positives, 0 missed.
+ * WHY THE MARKER FAMILIES ARE WIDE. The first cut tested `raw.includes('?')` against a
+ * single `-`/`*`/digit list marker, which is a rule about ENGLISH MARKDOWN, not about
+ * asking. A Chinese or Arabic interview reply carries its own question mark and scored as
+ * a failure; so did a `+` or a `•` bullet. A false positive is worse than a miss here: the
+ * numerator is the deliverable, and inflating it argues for expensive upstream work the
+ * traffic may not justify.
  *
- * WHY THE FAMILIES ARE WIDE. The first cut tested `raw.includes('?')` against a single
- * `-`/`*`/digit list marker, which is a rule about ENGLISH MARKDOWN, not about asking.
- * A Chinese or Arabic interview reply carries its own question mark and scored as a
- * failure; so did a `+` or a `•` bullet. Those are false positives, and a false positive
- * here is worse than a miss: the numerator is the deliverable, and inflating it argues
- * for expensive upstream work that the traffic may not justify. Both widenings move
- * strictly one way — fewer flags — so the lower bound below stays a bound.
+ * KNOWN FALSE POSITIVE — a healthy ONE-LINE imperative carrying no question mark ("Please
+ * provide the metric and time range.") scores true. Nothing in 72 turns is that shape; all
+ * 66 healthy replies carry a question mark, and 64 run to several lines. The paragraph
+ * above is why no prose rule removes it. It is pinned in the tests.
  *
- * KNOWN UNDER-COUNT — the rate this produces is a LOWER BOUND and must be reported as
- * one. What survives truncation is a closing line, and a closing line is exactly the
- * sentence most likely to be phrased as a question ("Could you answer the four
- * questions above so I can build it?"). Such a turn reads as healthy here; the case is
- * pinned in the tests so it stays a known limit rather than a discovered one. 0 missed
- * across the 72 measured turns is real evidence the gap is small, not that it is empty.
+ * The consequence is a reporting rule, and it is not optional: what this flag produces is
+ * a CANDIDATE rate. The figure reported to DO-380 is the subset confirmed by reading the
+ * flagged turns back — the logged `sessionId` IS `chat_messages.session_id`, so on any
+ * tenant with chat history the delivered text is one query away, in the database that
+ * legitimately holds it. Confirmed-then-reported is what keeps the numerator clean; the
+ * log line alone cannot, and this comment is the only place that says so.
+ *
+ * KNOWN UNDER-COUNT — in the other direction, and the reason the confirmed figure is a
+ * LOWER BOUND and must be reported as one. What survives truncation is a closing line, and
+ * a closing line is exactly the sentence most likely to be phrased as a question ("Could
+ * you answer the four questions above so I can build it?"). Such a turn reads as healthy
+ * here; pinned in the tests so it stays a known limit rather than a discovered one. 0
+ * missed across 72 turns is evidence the gap is small, not that it is empty.
  *
  * Callers should not invoke this directly — use `droppedQuestionsTelemetry`, which owns
  * the eligibility gate that keeps build turns and reworded build replies out of the rate.
@@ -300,13 +350,8 @@ function containsListItem(raw: string): boolean {
  * our 8.3 % is from a script that pushes back on purpose, not from traffic.
  */
 export function looksLikeDroppedQuestions(raw: string): boolean {
-  return !QUESTION_MARK.test(raw) && !containsListItem(raw);
+  return isSingleLine(raw) && !QUESTION_MARK.test(raw) && !containsListItem(raw);
 }
-
-/** Bound on the diagnostic preview. The defect's whole signature is a SHORT reply —
- *  47 to 168 chars across every measured instance — so this captures it whole with
- *  room to spare, at a fifth of POSSIBLE_MISSED_RESULT's 2000. */
-export const DROPPED_QUESTIONS_PREVIEW_CHARS = 400;
 
 /** What the DO-380 verdict contributes to the per-turn info line — or nothing at all,
  *  on a turn that was never eligible. */
@@ -317,8 +362,21 @@ export type DroppedQuestionsInfo =
 export interface DroppedQuestionsTelemetry {
   /** Spread onto the existing `[Agent] Agent turn classified` info line. */
   info: DroppedQuestionsInfo;
-  /** Payload for the INTERVIEW_QUESTIONS_DROPPED warn, or null when not warranted. */
-  warn: { replyChars: number; rawPreview: string } | null;
+  /**
+   * Payload for the INTERVIEW_QUESTIONS_DROPPED warn, or null when not warranted.
+   *
+   * MEASUREMENTS ONLY — NO AGENT TEXT, and the type is the enforcement (MR !67 review
+   * round 2). Round 1 put a 400-char preview here so a positive could be told from a
+   * false positive. That reasoning was right about the need and wrong about the sink:
+   * agent prose quotes the user's request back, so the preview copies tenant data —
+   * names, sites, SQL fragments — into CloudWatch, a different trust boundary with a
+   * different retention and a different audience, on a condition that fires on roughly
+   * one turn in twelve. The verdict is recoverable without that: `sessionId` is
+   * `chat_messages.session_id`, so the reply can be read where it already lives.
+   *
+   * Widening this back to carry text needs a security decision, not a code review.
+   */
+  warn: { replyChars: number } | null;
 }
 
 /**
@@ -363,8 +421,6 @@ export function droppedQuestionsTelemetry(
 
   return {
     info: { questionsDropped, replyChars },
-    warn: questionsDropped
-      ? { replyChars, rawPreview: intent.message.slice(0, DROPPED_QUESTIONS_PREVIEW_CHARS) }
-      : null,
+    warn: questionsDropped ? { replyChars } : null,
   };
 }

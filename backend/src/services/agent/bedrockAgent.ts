@@ -404,8 +404,8 @@ export const bedrockAgentService: AgentService = {
       // URL we failed to see", which is a question about the text exactly as it arrived.
       const missedResult = looksLikeMissedResult(prose);
 
-      // DO-380. Every rule behind these two payloads — eligibility, the verdict, the
-      // preview bound — lives in the pure module and is covered there; this file only
+      // DO-380. Every rule behind these two payloads — eligibility, the verdict, what the
+      // warn may carry — lives in the pure module and is covered there; this file only
       // spends them. `info` is empty on turns that were never eligible, which is what
       // keeps both sides of the rate holding real interview turns only.
       const dropped = droppedQuestionsTelemetry(intent, prose);
@@ -428,12 +428,11 @@ export const bedrockAgentService: AgentService = {
           });
         }
         if (dropped.warn) {
-          // The preview is here at all, rather than the bare verdict the agent's author
-          // asked for, because without it a positive cannot be told from a false positive
-          // and the rate becomes unfalsifiable. Agent prose, which may quote the user's
-          // request back — the same exposure POSSIBLE_MISSED_RESULT already carries at
-          // 2000 chars, on a more common condition. `rawPreview` keeps the house key name
-          // so one query spans both warns; it slices the DELIVERED reply, not the prose.
+          // MEASUREMENTS ONLY — no agent text, deliberately, and unlike the warn directly
+          // above it (MR !67 review round 2). Whoever adds a preview here should read
+          // DroppedQuestionsTelemetry.warn first: this fires on roughly one question turn
+          // in twelve, and the text it would carry is the tenant's, recoverable from
+          // chat_messages on this same sessionId without copying it into CloudWatch.
           logger.warn('[Agent] INTERVIEW_QUESTIONS_DROPPED', {
             sessionId: ctx.sessionId,
             ...dropped.warn,
