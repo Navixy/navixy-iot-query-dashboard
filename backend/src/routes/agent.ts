@@ -297,7 +297,9 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     // meanwhile reads the receipt as delivered, locks the composer and tells the user
     // the reply may appear later. It will not. Recovering the turn needs resumable
     // dispatch (re-enter the agent call for a 'received' receipt with no assistant
-    // turn), which does not exist yet. See docs/ai-agent-seam.md §7.
+    // turn), which does not exist yet — tracked as DO-383. The root cause a fix has
+    // to change: the receipt records that we ACCEPTED a turn, never that we
+    // DISPATCHED it. See docs/ai-agent-seam.md §7.
     throw new CustomError(
       'The chat is temporarily unavailable. Please try again in a moment.',
       503,

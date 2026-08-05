@@ -109,7 +109,7 @@ export interface ChatStoreResult {
  *                         write FAILED. Whether it ran is unknown: an in-doubt
  *                         COMMIT may have persisted the turn and its 'received'
  *                         receipt, and nothing will ever replay it (see §7 of
- *                         docs/ai-agent-seam.md — the orphaned turn).
+ *                         docs/ai-agent-seam.md — the orphaned turn, DO-383).
  *                   Either way FAIL CLOSED and buffer NOTHING: degrading to the
  *                   memory buffer would admit a turn that bypassed the lock, since
  *                   memory cannot see a receipt another replica may hold.

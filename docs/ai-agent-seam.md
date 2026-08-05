@@ -435,7 +435,11 @@ becomes visible.
 > Rare — it needs a receipts-capable tenant and a `COMMIT` that applies and then errors. But it is
 > silent and user-visible, and **recovering it needs resumable dispatch** (on a `'received'` receipt
 > with no assistant turn, re-enter the agent call rather than re-appending the user turn), which
-> does not exist. Do not call retry a recovery path until it does.
+> does not exist. **Tracked as DO-383**, filed 2026-08-05 with the mechanism, the trigger/concurrency
+> questions and the test it would need. Do not call retry a recovery path until it lands.
+>
+> The root cause in one line, because it is the thing a fix has to change: **the receipt records
+> that we ACCEPTED a turn, never that we DISPATCHED it.** Those two coincide on every other path.
 >
 > Three questions, not one, because "did it reach the database" was never the whole state:
 >
