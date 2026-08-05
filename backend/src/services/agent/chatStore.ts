@@ -1382,10 +1382,19 @@ export async function loadHistory(
  *
  * That is BEST-EFFORT (!65 round 12 — this used to say a partial failure "can never
  * orphan an assistant result"). The buffer is bounded and process-local, so an
- * eviction or a restart can lose it before any healthy touch arrives. What always
- * holds is the OTHER half of the old sentence: the result already reached the user in
- * the HTTP response, so a lost replay costs the transcript, not the answer. That is
- * why this path degrades and the guarded one does not.
+ * eviction or a restart can lose it before any healthy touch arrives.
+ *
+ * Nor is the answer itself safe, which is the OTHER half of the old sentence and was
+ * still standing here as "what always holds" (!65 round 14). This append runs BEFORE
+ * the route responds — routes/agent.ts:359, then res.json at :364 — so "the result
+ * already reached the user" is not yet true at the moment of buffering, and a crash in
+ * that gap loses the answer and the transcript entry together.
+ *
+ * So the reason this path degrades and the guarded one does not is NOT a delivery
+ * guarantee. It is that refusing would be strictly worse: the guarded refusal exists to
+ * protect the single-active-turn lock, and an unguarded turn has no lock to protect.
+ * Buffering it may save the transcript entry and costs nothing; refusing it would drop
+ * that entry for certain and gain nothing.
  *
  * A GUARDED append (rejectWhenTurnActive — the user turn) does NOT always degrade,
  * and saying "any Postgres failure degrades" here was wrong (!65 round 10). It FAILS
@@ -1422,7 +1431,9 @@ export async function appendTurns(
       // about this tenant — and the memory path cannot see a Postgres receipt an
       // active turn may already hold, so degrading here would let each replica
       // admit its own turn. Refuse the GUARDED turn only; everything else still
-      // degrades, because a reply that already reached the user must not be lost.
+      // degrades, because an unguarded turn has no lock to bypass and buffering it is
+      // the best outcome available — NOT because a buffered reply is safe (!65 round
+      // 14; the buffer is bounded and this append precedes the route's res.json).
       if (!schema.known && options?.rejectWhenTurnActive) {
         return 'unavailable';
       }
@@ -1443,8 +1454,10 @@ export async function appendTurns(
       // failed send during a database outage; admitting corrupts a stateful
       // dialogue for every tab.
       //
-      // Only for the GUARDED (user) turn: the assistant turn must still degrade
-      // to the write-behind buffer, or a completed reply would be lost.
+      // Only for the GUARDED (user) turn: the assistant turn still degrades to the
+      // write-behind buffer. Refusing it would drop the transcript entry for certain;
+      // buffering makes it best-effort (!65 round 14 — this read "or a completed reply
+      // would be lost", which casts the buffer as the thing that saves it).
       if (options?.rejectWhenTurnActive && receiptsKnownPresent) {
         return 'unavailable';
       }

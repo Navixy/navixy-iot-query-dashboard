@@ -799,9 +799,13 @@ describe('chatStore — the single-active-turn guard cannot be bypassed (round 1
     ).toBe('unavailable');
   });
 
-  it('still buffers the ASSISTANT turn when Postgres breaks — a reply must never be lost', async () => {
-    // The fail-closed rule is for the guarded USER turn only. An assistant turn
-    // that already reached the user has to reach the write-behind buffer.
+  it('still buffers the ASSISTANT turn when Postgres breaks — fail-closed is guarded-only', async () => {
+    // What this pins is the BRANCH, not the reply's survival (!65 round 14 — it used
+    // to be named "a reply must never be lost"). The fail-closed rule is for the
+    // guarded USER turn only, so an unguarded turn reaches the write-behind buffer
+    // instead of being refused. Whether it ever reaches Postgres is best-effort, and
+    // at this point it has not reached the user either: the route appends before it
+    // responds (routes/agent.ts:359, then :364). See the header.
     const { pool, script } = makeScriptedPool();
     const { sessionId } = await loadHistory(pool, ident('u1'), null);
     await appendTurns(pool, ident('u1'), sessionId, [userWithId('first', 't1')], guard);
@@ -902,7 +906,9 @@ describe('chatStore — an unprobed tenant is not an unguarded one (round 12)', 
     ).toBe('unavailable');
   });
 
-  it('still buffers an UNGUARDED turn when the probe fails — a reply is never lost', async () => {
+  // Same branch as "fail-closed is guarded-only" above, reached through an unresolved
+  // probe rather than a failed write. It asserts buffering, not delivery (!65 round 14).
+  it('still buffers an UNGUARDED turn when the probe fails — fail-closed is guarded-only', async () => {
     const failingPool = {
       connect: async () => { throw new Error('settings DB unreachable'); },
     } as unknown as Pool;

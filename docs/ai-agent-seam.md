@@ -437,12 +437,16 @@ becomes visible.
 > 3. **A lost assistant append.** The unguarded append at `:359` degrades to the write-behind buffer
 >    on a Postgres failure, and that buffer is bounded and process-local (below). Evict it, or
 >    restart the process, and the receipt stays `'received'` with no assistant row — for a turn the
->    user was **already answered** in the HTTP response.
+>    user has *usually* already been answered. Not certainly: `:359` runs **before** `res.json` at
+>    `:364`, so a process that dies in that gap loses the answer and the transcript entry together
+>    (!65 round 14 — this said "was already answered in the HTTP response", the same absolute the
+>    round was about, one paragraph after correcting it).
 >
 > The client cannot separate them either: `reconcileReceiptOutcome` maps a supported `'received'`
 > receipt to **delivered**, so it locks the composer, withholds the draft and renders *"Your message
 > was delivered — the reply may appear the next time you open this page."* On case 1 that sentence
-> is false, on case 2 unknowable, on case 3 merely redundant.
+> is false, on case 2 unknowable, on case 3 usually redundant — and false in the `:359`-to-`:364`
+> gap, where the user is told a reply was delivered that they never received.
 >
 > A retry is refused on all three: `pgAppendTurns` probes `pgHasActiveTurn` *before* `pgTurnIdSeen`,
 > so the live `'received'` receipt makes the same `client_turn_id` **`busy`**, not `duplicate` —
