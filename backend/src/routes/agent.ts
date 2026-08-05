@@ -241,10 +241,24 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     { rejectWhenTurnActive: true, activeTurnTtlMs: ACTIVE_TURN_TTL_MS },
   );
   if (started === 'busy') {
-    // 409, not 429: this is a state conflict on the session, not rate limiting —
-    // and it is retryable the moment the previous reply lands. Nothing was
-    // persisted, so the client's reconciler correctly classifies the turn as
-    // never delivered and hands the draft back.
+    // 409, not 429: a state conflict on the session, not rate limiting. The one
+    // thing this branch knows is that the request WROTE NOTHING — the guard rolls
+    // back before any INSERT. That is the whole of its guarantee.
+    //
+    // DO NOT go on to describe what the client does next. !65 rounds 9, 10, 11 and
+    // 12 each tried: three case lists, then a "rule" that was another case list
+    // resting on a false premise — "everything outside confirmed-lost is uncertain",
+    // when a SUPPORTED receipt reading 'received' or 'answered' reconciles to
+    // DELIVERED, and delivered+completed UNLOCKS the composer. Whether a reply is
+    // coming, whether the draft returns and whether the composer locks are three
+    // SEPARATE decisions, taken from authoritative session and receipt state this
+    // branch never sees. They live in src/components/ai-chat/turnDelivery.ts —
+    // reconcileOutcome, reconcileReceiptOutcome, locksComposerAwaitingReply — and
+    // that is the only place they are stated correctly. Fix them there.
+    //
+    // The one caveat that IS ours, because it is about the sentence below: this
+    // message promises a reply. None is coming when the "active" turn is an orphan
+    // — see the 'unavailable' branch.
     throw new CustomError(
       'Another message in this chat is still being answered. Wait for the reply before sending again.',
       409,
@@ -260,10 +274,36 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     );
   }
   if (started === 'unavailable') {
-    // The guard could not be evaluated on a tenant whose lock is supposed to be
-    // authoritative (round 11, Important 2). Refusing is deliberate: admitting the
-    // turn would bypass the lock entirely. 503 says "try again", which is true —
-    // nothing was persisted.
+    // The guard could not be evaluated, so the turn is refused rather than admitted
+    // past a lock we cannot trust. TWO origins reach here (!65 round 12 — this used
+    // to name only the second), and they differ in what may already be on disk:
+    //
+    //   (a) THE CAPABILITY PROBE DID NOT RESOLVE. No INSERT was attempted; nothing
+    //       was written anywhere.
+    //   (b) A TENANT KNOWN TO SUPPORT RECEIPTS, whose write failed. Whether it ran is
+    //       unknown: the store returns 'unavailable' from a catch an in-doubt COMMIT
+    //       can reach, so this turn and its 'received' receipt may ALREADY be in
+    //       Postgres (!65 round 8).
+    //
+    // Both BUFFER NOTHING — appendTurns skips memoryAppend on this path. See
+    // AppendOutcome.
+    //
+    // KNOWN LIMITATION OF ORIGIN (b), and do not re-add the reassurance this replaced
+    // (!65 round 9 — round 8's "retrying is safe, the same id comes back 'duplicate'"
+    // was wrong in both halves). We return 503 BEFORE agentService.chat below, so the
+    // agent never ran and no reply will ever arrive. A retry hits pgHasActiveTurn —
+    // probed BEFORE pgTurnIdSeen — and the live 'received' receipt makes it 'busy',
+    // then 'duplicate' once the TTL lapses; neither dispatches the agent. The client
+    // meanwhile reads the receipt as delivered, locks the composer and tells the user
+    // the reply may appear later. It will not.
+    //
+    // Recovering it needs RESUMABLE DISPATCH, tracked as DO-383 — and read
+    // docs/ai-agent-seam.md §7 before writing any of it. This branch is only ONE of
+    // the three ways to reach a 'received' receipt with no assistant turn (!65 round
+    // 13 — the other two are reachable AFTER the agent has the turn), so a resume that
+    // fires on that state alone DOUBLE-FEEDS Bedrock's server-side session. The root
+    // cause a fix has to change: the receipt records that we ACCEPTED a turn, and
+    // nothing anywhere records that we DISPATCHED it.
     throw new CustomError(
       'The chat is temporarily unavailable. Please try again in a moment.',
       503,

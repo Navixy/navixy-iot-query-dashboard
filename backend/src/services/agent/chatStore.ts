@@ -4,15 +4,31 @@
  * Three properties define this file:
  *
  * 1. IT NEVER THROWS AND NEVER 500s. Missing tables, revoked grants, a settings DB
- *    briefly routed to a read-only standby — every failure is caught, logger.warn'ed
- *    once, and degraded to the bounded in-memory path. The memory path is a
- *    WRITE-BEHIND BUFFER (MR !61 review): the next healthy Postgres touch replays
- *    it into the resolved session, so a mid-dialogue outage no longer forfeits the
- *    turns it swallowed — a tenant whose DBA has not applied
- *    002_add_chat_tables.sql still gets a working chat, and the transcript now
- *    survives INTO Postgres once the DDL lands. DEMO identities are the exception
- *    (review !62 round 2): they live in their own memory namespace, never reach
- *    Postgres and never join the replay — see ChatIdentity.demo.
+ *    briefly routed to a read-only standby — every failure is caught and
+ *    logger.warn'ed once.
+ *
+ *    For READS and for UNGUARDED appends (the assistant result) that means degrading
+ *    to the bounded in-memory path, which is a WRITE-BEHIND BUFFER (MR !61 review):
+ *    the next healthy Postgres touch replays it into the resolved session, so a
+ *    tenant whose DBA has not applied 002_add_chat_tables.sql still gets a working
+ *    chat, and the transcript CAN reach Postgres once the DDL lands.
+ *
+ *    "Can", not "will" (!65 round 12 — this used to say a mid-dialogue outage "no
+ *    longer forfeits the turns it swallowed"). The buffer is process-local and
+ *    bounded, and replay needs a LATER request on the SAME process: an eviction, a
+ *    restart or a session nobody returns to ends it, and nothing replays on a timer.
+ *    Best-effort recovery of the transcript, never a delivery guarantee — the outcome
+ *    table in docs/ai-agent-seam.md §7 states the same bounds.
+ *
+ *    A GUARDED append (rejectWhenTurnActive — the user turn) does NOT always degrade,
+ *    and saying "every failure degrades" here was wrong (!65 round 11). It FAILS
+ *    CLOSED with 'unavailable', buffering nothing, from BOTH of its origins: an
+ *    unresolved capability probe, and a write failure on a tenant known to have
+ *    receipts. Not throwing is not the same as not refusing. See AppendOutcome.
+ *
+ *    DEMO identities are a further exception (review !62 round 2): they live in their
+ *    own memory namespace, never reach Postgres and never join the replay — see
+ *    ChatIdentity.demo.
  *
  * 2. IT IS DISPLAY-ONLY. The transcript is (a) what GET /api/agent/session rehydrates
  *    into the UI and (b) the mock's turn counter. It is NEVER sent to Bedrock: under
@@ -84,11 +100,19 @@ export interface ChatStoreResult {
  *                   the stateful agent and leave the guard blind, since the
  *                   receipt insert's ON CONFLICT DO NOTHING means no NEW 'received'
  *                   row would ever appear for it.
- * - 'unavailable' — the tenant is known to support receipts, so the guard is
- *                   supposed to be authoritative, but the Postgres write failed
- *                   and we cannot say whether it ran. FAIL CLOSED: degrading to
- *                   the memory buffer here would admit a turn that bypassed the
- *                   lock entirely.
+ * - 'unavailable' — GUARDED appends only, and it has TWO origins (!65 round 11
+ *                   found this entry describing just the second):
+ *                     (a) the capability probe did not resolve, so we cannot tell
+ *                         whether this tenant's guard is authoritative. NOTHING was
+ *                         written — no INSERT was attempted.
+ *                     (b) the tenant is known to support receipts and the Postgres
+ *                         write FAILED. Whether it ran is unknown: an in-doubt
+ *                         COMMIT may have persisted the turn and its 'received'
+ *                         receipt, and nothing will ever replay it (see §7 of
+ *                         docs/ai-agent-seam.md — the orphaned turn, DO-383).
+ *                   Either way FAIL CLOSED and buffer NOTHING: degrading to the
+ *                   memory buffer would admit a turn that bypassed the lock, since
+ *                   memory cannot see a receipt another replica may hold.
  */
 export type AppendOutcome = 'appended' | 'busy' | 'duplicate' | 'unavailable';
 
@@ -211,9 +235,13 @@ const MAX_SESSION_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 h
 
-/** Probe cache TTL: short enough that a DBA applying the DDL sees history go live
- *  within a minute with no restart, long enough that it is not a per-request
- *  round trip. */
+/** Probe cache TTL: short enough that a DBA applying the DDL is not locked out by a
+ *  cached "absent" for long, long enough that it is not a per-request round trip.
+ *
+ *  It bounds STALENESS, not recovery time (!65 round 8 — this comment used to promise
+ *  "live within a minute", and the doc inherited the overstatement). Nothing polls and
+ *  nothing replays in the background: the tenant heals on the first touch AFTER the
+ *  cached absence expires. On an idle tenant that can be arbitrarily later. */
 const PROBE_TTL_MS = 60_000;
 
 /** Fallback for AppendOptions.activeTurnTtlMs. The route passes its own value
@@ -246,10 +274,15 @@ interface StoredTurn {
 
 interface MemorySession {
   sessionId: string;
-  /** For a pooled tenant this doubles as the WRITE-BEHIND BUFFER: by construction
-   *  every entry here is absent from Postgres (a turn is buffered only when its
-   *  Postgres write failed or the tables are missing), which is the invariant that
-   *  makes blind replay safe. Bounded by MAX_TURNS and MAX_SESSION_BYTES — an
+  /** For a pooled tenant this doubles as the WRITE-BEHIND BUFFER: a turn lands here
+   *  when its Postgres write failed or the tables are missing, so an entry is
+   *  USUALLY absent from Postgres — but not always, and replay does not rely on it
+   *  (!65 round 10; this said "by construction every entry here is absent", and
+   *  called that the invariant). An in-doubt COMMIT — applied server-side, errored
+   *  client-side — leaves the SAME turn in Postgres and here, until a replay
+   *  reconciles them. **What actually makes blind replay safe is store-minted ids
+   *  plus ON CONFLICT (id) DO NOTHING**, which is a property of the write, not of
+   *  the buffer's contents. Bounded by MAX_TURNS and MAX_SESSION_BYTES — an
    *  outage longer than those loses oldest turns, the same bound the pure-memory
    *  tenant already lives with. */
   entries: StoredTurn[];
@@ -1197,13 +1230,31 @@ async function pgAppendTurns(
   schema: ChatSchema, options?: AppendOptions,
 ): Promise<AppendOutcome> {
   const { userId } = ident;
-  // A WRITE — deliberately NOT wrapped in withTransientRetry: the failure path
-  // (buffer, then replay on the next healthy touch) already delivers the turn
-  // exactly once, which an inline retry could only approximate.
+  // A WRITE — deliberately NOT wrapped in withTransientRetry. The reason is the
+  // IN-DOUBT COMMIT, and it is the same for guarded and unguarded appends: a
+  // failure here may be a transaction that ALREADY APPLIED, so an inline retry
+  // re-runs it blind. Entry ids are minted before any storage decision and every
+  // insert is ON CONFLICT (id) DO NOTHING, so a later replay cannot duplicate a
+  // turn — but that is IDEMPOTENCE, not a delivery guarantee.
+  //
+  // This used to justify the no-retry by claiming the unguarded failure path
+  // (buffer, then replay on the next healthy touch) "delivers the turn exactly
+  // once" (!65 round 12). It does not, and nothing here can. The buffer is
+  // PROCESS-LOCAL and bounded — MAX_TURNS, MAX_SESSION_BYTES, MAX_TOTAL_BYTES,
+  // SESSION_TTL_MS — and replay needs a LATER request touching the same session on
+  // the SAME process. A restart, a redeploy, an eviction, or a user who never comes
+  // back ends it there. Best-effort, not eventual. A GUARDED failure does not even
+  // buffer: it returns 'unavailable' (see AppendOutcome).
   //
   // ONE transaction covers the buffered replay, the new turns and the session
   // touch (MR !61 review): it lands whole or not at all, so memory and Postgres
-  // can never hold overlapping halves of a request.
+  // can never hold overlapping HALVES of a request.
+  //
+  // That is atomicity, not exclusivity (!65 round 10 — this used to claim the two
+  // stores can never overlap at all). An in-doubt COMMIT applies the whole
+  // transaction and still reports failure, after which the caller buffers the
+  // whole thing too: both stores, one complete copy each, until replay clears it.
+  // Never a torn half, which is what this guarantee is for.
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1323,12 +1374,37 @@ export async function loadHistory(
  * A NoSuchKey at preview time after this rule is in force is A BUG IN THE
  * MITIGATION, and should be alarming, not routine.
  *
- * NEVER rejects: any Postgres failure (including a read-only standby refusing the
- * INSERT) degrades to the in-memory path — which since MR !61's review is a
+ * NEVER THROWS. For the UNGUARDED append — the assistant result, which is what this
+ * rule is about — any Postgres failure (including a read-only standby refusing the
+ * INSERT) degrades to the in-memory path, which since MR !61's review is a
  * WRITE-BEHIND BUFFER, not a dead end: the next healthy Postgres touch (load or
- * append) transactionally replays buffered turns into the resolved session, so a
- * partial failure can never orphan an assistant result, and the turn itself
- * already reached the user in the HTTP response.
+ * append) transactionally replays buffered turns into the resolved session.
+ *
+ * That is BEST-EFFORT (!65 round 12 — this used to say a partial failure "can never
+ * orphan an assistant result"). The buffer is bounded and process-local, so an
+ * eviction or a restart can lose it before any healthy touch arrives.
+ *
+ * Nor is the answer itself safe, which is the OTHER half of the old sentence and was
+ * still standing here as "what always holds" (!65 round 14). This append runs BEFORE
+ * the route responds — routes/agent.ts:359, then res.json at :364 — so "the result
+ * already reached the user" is not yet true at the moment of buffering, and a crash in
+ * that gap loses the answer and the transcript entry together.
+ *
+ * So the reason this path degrades and the guarded one does not is NOT a delivery
+ * guarantee. It is that refusing would be strictly worse: the guarded refusal exists to
+ * protect the single-active-turn lock, and an unguarded turn has no lock to protect.
+ * Buffering it may save the transcript entry and costs nothing; refusing it would drop
+ * that entry for certain and gain nothing.
+ *
+ * A GUARDED append (rejectWhenTurnActive — the user turn) does NOT always degrade,
+ * and saying "any Postgres failure degrades" here was wrong (!65 round 10). It FAILS
+ * CLOSED with 'unavailable', buffering nothing, from EITHER origin — an unresolved
+ * capability probe, or a failed write on a receipts-capable tenant (!65 round 12
+ * caught this naming only the second) — because the memory path cannot see a receipt
+ * another replica may hold. That is deliberate, and on the second origin it is also
+ * how a user turn gets orphaned when the failure was an in-doubt COMMIT. See
+ * AppendOutcome, docs/ai-agent-seam.md §7, and the 'unavailable' branch in
+ * routes/agent.ts.
  */
 export async function appendTurns(
   pool: Pool | null, ident: ChatIdentity, sessionId: string, turns: AgentTurn[],
@@ -1355,7 +1431,9 @@ export async function appendTurns(
       // about this tenant — and the memory path cannot see a Postgres receipt an
       // active turn may already hold, so degrading here would let each replica
       // admit its own turn. Refuse the GUARDED turn only; everything else still
-      // degrades, because a reply that already reached the user must not be lost.
+      // degrades, because an unguarded turn has no lock to bypass and buffering it is
+      // the best outcome available — NOT because a buffered reply is safe (!65 round
+      // 14; the buffer is bounded and this append precedes the route's res.json).
       if (!schema.known && options?.rejectWhenTurnActive) {
         return 'unavailable';
       }
@@ -1376,8 +1454,10 @@ export async function appendTurns(
       // failed send during a database outage; admitting corrupts a stateful
       // dialogue for every tab.
       //
-      // Only for the GUARDED (user) turn: the assistant turn must still degrade
-      // to the write-behind buffer, or a completed reply would be lost.
+      // Only for the GUARDED (user) turn: the assistant turn still degrades to the
+      // write-behind buffer. Refusing it would drop the transcript entry for certain;
+      // buffering makes it best-effort (!65 round 14 — this read "or a completed reply
+      // would be lost", which casts the buffer as the thing that saves it).
       if (options?.rejectWhenTurnActive && receiptsKnownPresent) {
         return 'unavailable';
       }
