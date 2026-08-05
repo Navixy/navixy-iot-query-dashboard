@@ -310,9 +310,12 @@ class is schema grounding on the agent's side.
 > Round 5 then corrected the correction: persistence is **conditional**, not universal. A demo
 > session never touches the tenant database and its transcript is **never** replayed into one. A
 > live session on a tenant without migration `002` — or with Postgres unavailable — keeps the turn
-> in a write-behind buffer that the next healthy touch drains, and a `COMMIT` that returns an error
-> may have applied anyway, leaving the turn buffered *and* possibly already stored. Those are not
-> the same fallback: one is a dead end, the others are pending writes. `docs/ai-agent-seam.md` §7
+> in a write-behind buffer that a later healthy touch **may** drain: only on the same process, only
+> while the entry is still buffered, and never on a timer (!65 round 13 — this read *"the next
+> healthy touch drains"*, which promises a replay that nothing schedules). And a `COMMIT` that
+> returns an error may have applied anyway, leaving the turn buffered *and* possibly already stored.
+> Those are not the same fallback: one is a dead end, the others are writes that are pending **at
+> best**. `docs/ai-agent-seam.md` §7
 > tabulates every case; the only claim true on all of them is that **nothing becomes a report until
 > Apply**.
 

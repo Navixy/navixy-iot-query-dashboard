@@ -9,9 +9,17 @@ import { buildSessionResponse } from '../../../routes/agent.js';
 
 /**
  * The split-write / recovery contract (MR !61 review, Important): a turn that fails
- * its Postgres write is BUFFERED in memory and REPLAYED into Postgres on the next
- * healthy touch — a partial failure can never orphan the assistant's result, and a
- * memory-era transcript survives the tables being applied.
+ * its Postgres write is BUFFERED in memory and REPLAYED into Postgres by a later
+ * healthy touch, so a memory-era transcript can survive the tables being applied.
+ *
+ * BEST-EFFORT, and these tests do not claim more (!65 round 13 — this header said a
+ * partial failure "can never orphan the assistant's result"). Every case below HANDS
+ * the store a later touch on the same process; production may never produce one. The
+ * buffer is process-local and bounded — MAX_TURNS, MAX_SESSION_BYTES, MAX_TOTAL_BYTES,
+ * SESSION_TTL_MS — nothing replays on a timer, and a restart or an eviction ends it.
+ * What the in-doubt-COMMIT case pins is IDEMPOTENCE: a replay cannot duplicate a turn.
+ * That bounds the damage a replay can do; it says nothing about whether one occurs.
+ * Same bounds in the outcome table of docs/ai-agent-seam.md §7.
  *
  * These tests drive the real store through a SCRIPTED stub pool that emulates just
  * enough of the SQL surface (session get-or-create, message insert with

@@ -295,11 +295,15 @@ router.post('/chat', chatLimiter, asyncHandler(async (req: AuthenticatedRequest,
     // probed BEFORE pgTurnIdSeen — and the live 'received' receipt makes it 'busy',
     // then 'duplicate' once the TTL lapses; neither dispatches the agent. The client
     // meanwhile reads the receipt as delivered, locks the composer and tells the user
-    // the reply may appear later. It will not. Recovering the turn needs resumable
-    // dispatch (re-enter the agent call for a 'received' receipt with no assistant
-    // turn), which does not exist yet — tracked as DO-383. The root cause a fix has
-    // to change: the receipt records that we ACCEPTED a turn, never that we
-    // DISPATCHED it. See docs/ai-agent-seam.md §7.
+    // the reply may appear later. It will not.
+    //
+    // Recovering it needs RESUMABLE DISPATCH, tracked as DO-383 — and read
+    // docs/ai-agent-seam.md §7 before writing any of it. This branch is only ONE of
+    // the three ways to reach a 'received' receipt with no assistant turn (!65 round
+    // 13 — the other two are reachable AFTER the agent has the turn), so a resume that
+    // fires on that state alone DOUBLE-FEEDS Bedrock's server-side session. The root
+    // cause a fix has to change: the receipt records that we ACCEPTED a turn, and
+    // nothing anywhere records that we DISPATCHED it.
     throw new CustomError(
       'The chat is temporarily unavailable. Please try again in a moment.',
       503,

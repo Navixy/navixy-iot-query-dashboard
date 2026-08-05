@@ -415,42 +415,66 @@ becomes visible.
 > the route answers 503**. `appendTurns` returns `unavailable` from that catch *without* calling
 > `memoryAppend`, so the no-buffer half holds and the no-write half does not.
 >
-> **KNOWN LIMITATION — an in-doubt guarded `COMMIT` can orphan a user turn, and retrying does not
-> recover it.** Round 8 claimed the opposite right here (*"a retry finds the receipt and is refused
-> `duplicate`, so the system stays consistent"*); !65 round 9 disproved it, and the truth is worse
-> than the claim it replaced:
+> **KNOWN LIMITATION — a user turn can be accepted and acknowledged but never answered, and
+> retrying does not recover it.** Round 8 claimed the opposite right here (*"a retry finds the
+> receipt and is refused `duplicate`, so the system stays consistent"*); !65 round 9 disproved it,
+> and round 13 found the replacement still too narrow — it read the fault as unique to the in-doubt
+> `COMMIT`. It is not. **One durable symptom, three different failures behind it:** a `'received'`
+> receipt with no assistant turn.
 >
-> 1. `appendTurns` returns `unavailable` at the guarded append in `POST /chat`, which is **before**
->    `agentService.chat`. **The agent was never invoked, so no reply exists or ever will.**
-> 2. If the in-doubt `COMMIT` applied, the user turn is persisted with a **`'received'`** receipt.
-> 3. A retry is refused **`busy`**, not `duplicate` — `pgAppendTurns` probes `pgHasActiveTurn`
->    *before* `pgTurnIdSeen`, and the live `'received'` receipt satisfies the first. Pinned by
->    `chatStore.replay.test.ts` (*"refuses a replayed id even while its receipt is still
->    received"*). Once the active-turn TTL lapses it becomes `duplicate` instead. **Neither
->    outcome dispatches the agent.**
-> 4. The client reads the receipt as delivered: it locks the composer and renders *"Your message
->    was delivered — the reply may appear the next time you open this page."* For this turn that
->    sentence is false, and the draft is not handed back.
+> 1. **The in-doubt guarded `COMMIT`** — the row above. `appendTurns` returns `unavailable` at the
+>    guarded append (`routes/agent.ts:236`), which is **before** `agentService.chat`, so the route
+>    answers 503 and **the agent was never invoked**. If the commit applied anyway, the turn is on
+>    disk with a `'received'` receipt. **Rare**: it needs a receipts-capable tenant and a `COMMIT`
+>    that applies and then errors.
+> 2. **Any interruption after a *successful* guarded append.** The user turn and its receipt commit
+>    at `:236`; the assistant turn that upgrades the receipt to `'answered'` is written at `:359`.
+>    Between them sits `agentService.chat` at `:319` — a real Bedrock build measured at ~36 s. A pod
+>    eviction, a redeploy, an OOM kill, or the one `CustomError` `chat()` re-throws (a misconfigured
+>    deploy, `bedrockAgent.ts:115`) all end in the same durable state. **This window is open on
+>    every single turn**, so "rare" describes case 1 only. And it straddles the dispatch: the agent
+>    may have received the turn, or finished answering it, and nothing durable says which.
+> 3. **A lost assistant append.** The unguarded append at `:359` degrades to the write-behind buffer
+>    on a Postgres failure, and that buffer is bounded and process-local (below). Evict it, or
+>    restart the process, and the receipt stays `'received'` with no assistant row — for a turn the
+>    user was **already answered** in the HTTP response.
 >
-> Rare — it needs a receipts-capable tenant and a `COMMIT` that applies and then errors. But it is
-> silent and user-visible, and **recovering it needs resumable dispatch** (on a `'received'` receipt
-> with no assistant turn, re-enter the agent call rather than re-appending the user turn), which
-> does not exist. **Tracked as DO-383**, filed 2026-08-05 with the mechanism, the trigger/concurrency
-> questions and the test it would need. Do not call retry a recovery path until it lands.
+> The client cannot separate them either: `reconcileReceiptOutcome` maps a supported `'received'`
+> receipt to **delivered**, so it locks the composer, withholds the draft and renders *"Your message
+> was delivered — the reply may appear the next time you open this page."* On case 1 that sentence
+> is false, on case 2 unknowable, on case 3 merely redundant.
+>
+> A retry is refused on all three: `pgAppendTurns` probes `pgHasActiveTurn` *before* `pgTurnIdSeen`,
+> so the live `'received'` receipt makes the same `client_turn_id` **`busy`**, not `duplicate` —
+> pinned by `chatStore.replay.test.ts` (*"refuses a replayed id even while its receipt is still
+> received"*). Once the active-turn TTL lapses it becomes `duplicate` instead. **Neither outcome
+> dispatches the agent.**
+>
+> **Why the obvious fix is not obvious.** Recovery needs resumable dispatch — on a `'received'`
+> receipt with no assistant turn, re-enter the agent call rather than re-appending the user turn —
+> and the naive version is a *new* bug. Bedrock keys conversation memory server-side on `sessionId`,
+> so redispatching a turn the agent already consumed **double-feeds the stateful agent**: exactly
+> the corruption the `duplicate` guard exists to prevent (`routes/agent.ts:267`). Cases 2 and 3 are
+> indistinguishable from case 1 in durable state, and they are the ones that must not be
+> redispatched blind.
 >
 > The root cause in one line, because it is the thing a fix has to change: **the receipt records
-> that we ACCEPTED a turn, never that we DISPATCHED it.** Those two coincide on every other path.
+> that we ACCEPTED a turn — nothing anywhere records that we DISPATCHED it.** That is why this
+> state is *ambiguous* rather than merely incomplete, and why a fix needs durable dispatch state and
+> an idempotency protocol with Bedrock, not just a resume trigger. **Tracked as DO-383**, filed
+> 2026-08-05 and widened in !65 round 13 to cover every crash boundary after acceptance. Do not call
+> retry a recovery path until it lands.
 >
 > Three questions, not one, because "did it reach the database" was never the whole state:
 >
 > | Path | In `chat_messages`? | Buffered? | Replayed to Postgres later? |
 > |---|---|---|---|
 > | **Demo session** | **No — structurally.** The route passes `pool = null` *and* the store independently refuses on `ident.demo` (the `pool && !ident.demo` guard in `appendTurns`). Two layers, because `userDbUrl` is the customer's real settings DB and the banner promises nothing is saved to it. | Yes — in the **`demo:`** namespace. | **Never.** Both replay sites sit behind `pool && !ident.demo`, and `memKey` prefixes the key, so no live touch can even address a demo buffer. Demo memory is a dead end by construction, not a pending write. |
-> | **Live, `pool = null`** | **No.** | Yes (`live:`). | Yes, on the next healthy touch. Contract-level rather than a live route path: `appendTurns` takes `Pool \| null` and the route writes `req.settingsPool ?? null`, but `authenticateToken` always attaches a pool and 401s otherwise. |
-> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). | Yes. | Yes, but **on the next touch, not on a timer**. Nothing polls and nothing replays in the background; the 60 s probe TTL only bounds how stale a cached *absent* answer may be when a request does arrive. Applying the DDL to an idle tenant heals nothing until someone uses the chat again. |
-> | **Error before `COMMIT` was issued** | **No.** Rolled back. | Yes. | Yes. |
+> | **Live, `pool = null`** | **No.** | Yes (`live:`). | **Best-effort — the condition for every "yes" in this column:** *only* if a later request touches this session **on the same process** while the entry is still buffered. Nothing else replays it. (Contract-level rather than a live route path: `appendTurns` takes `Pool \| null` and the route writes `req.settingsPool ?? null`, but `authenticateToken` always attaches a pool and 401s otherwise.) |
+> | **`002` known absent** | **No.** `probeChatSchema` reads `information_schema` and no write is attempted; there is no migration runner (§8). | Yes. | **Best-effort**, same condition — and **on a touch, never on a timer**. Nothing polls and nothing replays in the background; the 60 s probe TTL only bounds how stale a cached *absent* answer may be when a request does arrive. Applying the DDL to an idle tenant heals nothing until someone uses the chat again. |
+> | **Error before `COMMIT` was issued** | **No.** Rolled back. | Yes. | **Best-effort**, same condition. |
 > | **`COMMIT` returned success** | **Yes — and this is the common path.** | No. | n/a. |
-> | **`COMMIT` itself returned an error** | **Unknown — possibly yes.** `COMMIT` can fail *after* the server applied the transaction — the `COMMIT` inside `pgAppendTurns`'s try, whose catch rolls back (a no-op by then) and rethrows. | Yes — **definitely**, whichever way the commit went. | Yes, idempotently. Store-minted ids plus `ON CONFLICT (id) DO NOTHING` make a replay of an already-applied turn a no-op — pinned by `chatStore.replay.test.ts` ("an in-doubt `COMMIT` cannot duplicate a turn"). |
+> | **`COMMIT` itself returned an error** | **Unknown — possibly yes.** `COMMIT` can fail *after* the server applied the transaction — the `COMMIT` inside `pgAppendTurns`'s try, whose catch rolls back (a no-op by then) and rethrows. | Yes — **definitely**, whichever way the commit went. | **Best-effort**, same condition — and **idempotent *if* it happens**. Store-minted ids plus `ON CONFLICT (id) DO NOTHING` make replaying an already-applied turn a no-op, pinned by `chatStore.replay.test.ts` ("an in-doubt `COMMIT` cannot duplicate a turn"). Idempotence bounds what a replay can damage; it does not cause one (!65 round 13 — this cell read "Yes, idempotently", which answers a different question than the column asks). |
 >
 > So a fallback means **the write was not durably confirmed** — not "nothing was written", and not
 > "the turn is safe". Buffering is best-effort and bounded: 100 turns and 8 MiB per session, 64 MiB
@@ -473,8 +497,9 @@ becomes visible.
 >
 > Note the shape of that mistake, because the next two paragraphs are about the same failure mode:
 > **a rule asserted in prose and contradicted elsewhere in the same document.** It happened here, in
-> the section that exists to warn about it, and then **four more times** — three of them a fresh
-> absolute in a new direction, the fourth a table with a hole in it, each caught by the next round:
+> the section that exists to warn about it, and then **five more times** — three of them a fresh
+> absolute in a new direction, then a table with a hole in it, then the same table with an
+> over-certain cell, each caught by the next round:
 >
 > | Round | Claim | Disproved by |
 > |---|---|---|
@@ -482,13 +507,16 @@ becomes visible.
 > | 4 | saved on every tenant with `002` | a demo user on a fully-migrated tenant; a write that failed or was left in doubt. **Not** by a tenant missing `002` — that is outside the claim's premise, and citing it here was a second error the same round (!65 round 7) |
 > | 5 | otherwise nothing reaches the tenant DB | the in-doubt `COMMIT` path and its replay test |
 > | 6 | a table of failure paths, each "retained for replay" | demo memory is **never** replayed; the in-doubt row is only *possibly* in Postgres, though certainly buffered; and the table had no row for the commit that succeeds, which is the usual outcome |
+> | 13 | the replay column's bare **"Yes"** | the bounds stated four lines under the same table — a buffered entry needs a later touch **on the same process** and can be evicted, or lost to a restart, before one arrives. The prose has been right since round 8; the cells were never brought into line with it, and *"Yes, idempotently"* answered what a replay **does** rather than whether one **happens** |
 >
-> **Five attempts. Three were a confidently-worded absolute; the fourth was a table, and a table
-> failed differently** — by omission and by an unqualified cell, which reads as more rigorous than
-> the prose it replaced while being just as wrong. If a later change makes this section wrong again:
-> add a row, never a sentence beginning "always" or "never" — and before you call it correct, check
-> that the **success** path is a row too, and that no cell states a certainty the code only reaches
-> sometimes.
+> **Six attempts. Three were a confidently-worded absolute; then the table twice, and a table fails
+> differently** — by omission and by an unqualified cell, which reads as more rigorous than the prose
+> it replaced while being just as wrong. Read the round-13 row against the sentence below it, which
+> has been sitting there since round 6: the instruction to check for exactly that defect was written,
+> and then not applied to the table it was written about. Restating a rule is not auditing against
+> it. If a later change makes this section wrong again: add a row, never a sentence beginning
+> "always" or "never" — and before you call it correct, check that the **success** path is a row too,
+> and that no cell states a certainty the code only reaches sometimes.
 
 **This is enforced in code, not merely recommended.** `resultCardState`
 (`src/components/ai-chat/resultCardState.ts`) refuses Apply until a mounted renderer has reported a
