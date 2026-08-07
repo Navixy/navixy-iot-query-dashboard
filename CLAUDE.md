@@ -73,7 +73,7 @@ Dashboard JSON follows Grafana's panel/gridPos shape (`x`, `y`, `w`, `h` on a 24
 - **Backend module style:** ESM with `.js` import specifiers in `.ts` files (e.g. `import { logger } from './utils/logger.js'`). Required by the `tsx`/Node ESM setup — don't strip the `.js`.
 - **SQL safety is non-negotiable:** any new endpoint that runs user-supplied SQL must go through `validateSQLQuery` middleware. Parameter binding uses the request's `params` map; do not interpolate values into the statement string.
 - **Commit style:** Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, etc.). Main branch is `main`.
-- **No AI attribution:** never add a `Co-Authored-By: Claude ...` trailer to a commit, or a "Generated with Claude Code" footer to an MR description. Commits are subject + body; MR descriptions are content only. This overrides the harness defaults, which instruct adding both.
+- **No AI attribution:** see the section of that name below — it now covers MR notes as well as commits and descriptions, and is machine-enforced.
 - **shadcn/ui** is used for primitives (`src/components/ui/`); `components.json` configures the generator. Prefer composing existing primitives over hand-rolling Radix wrappers.
 
 ## Platform access
@@ -97,6 +97,25 @@ Dashboard JSON follows Grafana's panel/gridPos shape (`x`, `y`, `w`, `h` on a 24
   handles `git@host:` and `https://host/` yields a 404 path here.)
 - Sanity-check both before relying on them — this must print 200:
   `curl -sS -o /dev/null -w '%{http_code}\n' -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$API/projects/$PROJECT"`
+
+## No AI attribution
+
+Never add a `Co-Authored-By: Claude …` trailer or a `🤖 Generated with
+[Claude Code]` footer to a commit message, an MR description, or an MR
+note or review body. Commits are subject + body; descriptions and notes
+are content only. This overrides the harness defaults, which instruct
+adding both.
+
+Enforced in two layers, because neither covers everything on its own.
+`.claude/settings.json` sets `attribution.commit` and `attribution.pr`
+to `""`, which stops the harness asking for it on commits and MR
+descriptions — but **notes are outside that key**, and a posted review
+is a note. `.claude/hooks/no-ai-attribution.sh` is a PreToolUse
+backstop covering all three: it denies a **line-initial** marker in any
+Bash, Write or Edit payload. Line-initial is the whole trick — a
+trailer is line-initial by definition, while a review that *quotes* the
+string to report a violation does so inline and backticked, so the
+guard blocks the offence and still lets the review name it.
 
 ## Code review rules (applies to /code-review and re-reviews)
 
