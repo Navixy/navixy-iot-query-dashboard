@@ -1,6 +1,12 @@
 -- 003_add_turn_receipts.sql — executable client_turn_id upgrade + durable per-turn receipts
 -- (DO-313 review !62 round 7). Apply AFTER 002.
 --
+-- DO NOT HAND THIS FILE TO A DBA ON ITS OWN — give them apply_ai_chat.sql instead,
+-- which applies 002 + 003 + 004 in one idempotent transaction with preflight checks
+-- and verification. Note especially that 004 must ship with this file: until its
+-- per-user key lands, the backend deliberately treats the receipts table below as
+-- ABSENT. This file stays as the record of what THIS step introduced and why.
+--
 -- Same out-of-band model as 002 (no migration runner in this repo — the backend probes
 -- information_schema per tenant and degrades to in-memory / the content fallback when a piece
 -- is absent). Everything here is idempotent, so re-running is safe on every tenant.

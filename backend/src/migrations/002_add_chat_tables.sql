@@ -1,5 +1,13 @@
 -- 002_add_chat_tables.sql — AI chat history (DO-313)
 --
+-- DO NOT HAND THIS FILE TO A DBA ON ITS OWN — give them apply_ai_chat.sql instead. It
+-- applies 002 + 003 + 004 in one transaction and adds what these three files leave to
+-- the operator: the preflight checks (users.id really is uuid, gen_random_uuid is
+-- available), the upgrade path for a database carrying an earlier 002, grants for the
+-- role in the tenant's userDbUrl, and a verification that rolls back rather than
+-- commit a shape the backend treats as broken. It is idempotent. This file stays as
+-- the record of what THIS step introduced and why.
+--
 -- THIS FILE IS NOT APPLIED BY THE APPLICATION. There is no migration runner in this
 -- repo. Apply out-of-band (DBA / deploy). 001_add_composite_reports.sql proves this
 -- path rots silently — it was never applied and its table is never queried (composite
