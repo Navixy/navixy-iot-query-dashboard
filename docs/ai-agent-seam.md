@@ -623,9 +623,13 @@ automatic recovery until !65 round 9 — the same claim was corrected in §7's t
 `PROBE_TTL_MS` a round earlier, and this third copy was missed.)
 
 **Before applying `002`, confirm one thing:** that its `user_id` type matches the live
-`dashboard_studio_meta_data.users.id`. This repo contains no DDL for the existing schema. It was
-queried directly on 2026-07-20 and the answer was **`uuid`** (`gen_random_uuid()`), which is what
-`002` assumes — but re-check rather than trust this line, since the schema is not ours.
+`dashboard_studio_meta_data.users.id`. This repo contains no DDL for the existing schema, and the
+**`uuid`** that `002` assumes was **inferred from the `gen_random_uuid()` convention, never queried
+against a live tenant** — which is what `002_add_chat_tables.sql` and `apply_ai_chat.sql` both say
+at their `user_id` columns. (An earlier revision of this paragraph claimed it had been queried
+directly on 2026-07-20; that was the date of the Bedrock agent probes in §2, not of a schema
+check.) The apply script preflights the real type and refuses the entire run on a mismatch, so
+confirm it first — that refusal is the script doing its job, not a bug to work around.
 
 ---
 

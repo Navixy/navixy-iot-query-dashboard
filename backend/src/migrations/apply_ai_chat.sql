@@ -243,11 +243,15 @@ BEGIN
 
   -- A non-integer `seq` otherwise aborts the backfill below with "COALESCE types text
   -- and integer cannot be matched", which names neither the column nor the cause.
+  -- Deliberately NOT unwrapped to its base type the way the users.id preflight is: a
+  -- DOMAIN over bigint cannot carry an identity either — ADD GENERATED below refuses it
+  -- with "identity column type must be smallint, integer, or bigint" — so unwrapping
+  -- here would only move the same abort later and strip the remedy out of the message.
   SELECT format_type(atttypid, atttypmod) INTO seq_type FROM pg_attribute
    WHERE attrelid = to_regclass('dashboard_studio_meta_data.chat_messages')
      AND attname = 'seq' AND NOT attisdropped;
   IF seq_type IS NOT NULL AND seq_type NOT IN ('smallint', 'integer', 'bigint') THEN
-    RAISE EXCEPTION 'chat_messages.seq already exists with type "%". It is the transcript order authority and has to be an integer type; drop or correct that column, then re-run.', seq_type;
+    RAISE EXCEPTION 'chat_messages.seq already exists with type "%". It is the transcript order authority, and PostgreSQL allows IDENTITY only on smallint, integer or bigint — a DOMAIN over one included. Run ALTER TABLE dashboard_studio_meta_data.chat_messages ALTER COLUMN seq TYPE BIGINT, or drop the column, then re-run.', seq_type;
   END IF;
 
   RAISE NOTICE 'chat_messages.seq is missing or is not an identity column — adding and backfilling';
@@ -558,11 +562,35 @@ WITH s AS (
             FROM pg_constraint c
             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
            WHERE c.conrelid = s.t_receipts AND c.contype = 'p')                        AS pk_columns,
-         -- Shape, not just name: a same-named index that is not unique satisfies
-         -- section 1's to_regclass guard, so nothing is created, and then ON CONFLICT
-         -- DO NOTHING quietly stops de-duplicating sessions instead of failing.
-         (SELECT x.indisunique AND pg_get_expr(x.indpred, x.indrelid) = '(is_deleted = false)'
+         -- Shape, not just name: a same-named index that is not unique — or unique over
+         -- the wrong columns, e.g. (user_id, id), which constrains nothing per user —
+         -- satisfies section 1's to_regclass guard, so nothing is created, and then ON
+         -- CONFLICT DO NOTHING quietly stops de-duplicating sessions instead of failing.
+         -- indnkeyatts, not indnatts: INCLUDE columns do not weaken the uniqueness.
+         (SELECT x.indisunique AND x.indnkeyatts = 1
+                 AND x.indkey[0] = (SELECT a.attnum FROM pg_attribute a
+                                     WHERE a.attrelid = s.t_sessions AND a.attname = 'user_id')
+                 AND pg_get_expr(x.indpred, x.indrelid) = '(is_deleted = false)'
             FROM pg_index x WHERE x.indexrelid = s.i_active)                           AS active_shape,
+         -- The columns chatStore.ts actually names, beyond the two with rows of their
+         -- own above. On a tenant carrying an earlier 002 every CREATE TABLE in section
+         -- 1 is a no-op and section 2 repairs only seq and client_turn_id, so any other
+         -- column the intermediate shape lacks — `type` is the real one, added to 002
+         -- after review — passes every check here, commits green, and then throws on
+         -- each INSERT into the path that swallows it. Tables absent entirely are rows
+         -- 1-3's business, not this row's; listing their columns too would say the same
+         -- thing thirteen more times.
+         (SELECT string_agg(l.rel || '.' || c.col, ', ' ORDER BY l.rel, c.col)
+            FROM (VALUES
+                   ('chat_messages',      'id,session_id,user_id,role,content,type,result,created_at'),
+                   ('chat_sessions',      'id,user_id,created_at,updated_at,is_deleted'),
+                   ('chat_turn_receipts', 'session_id,status,created_at,updated_at')) AS l(rel, cols),
+                 unnest(string_to_array(l.cols, ',')) AS c(col)
+           WHERE to_regclass('dashboard_studio_meta_data.' || l.rel) IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM pg_attribute a
+                              WHERE a.attrelid = to_regclass('dashboard_studio_meta_data.' || l.rel)
+                                AND a.attname = c.col AND a.attnum > 0
+                                AND NOT a.attisdropped))                              AS missing_cols,
          -- COALESCE to false per table, not around the aggregate: bool_and SKIPS nulls,
          -- so a missing table would otherwise let the remaining two vote it OK.
          (SELECT bool_and(COALESCE(has_table_privilege(s.app_role, t, p), false))
@@ -609,7 +637,12 @@ SELECT ord, check_name, status, detail FROM f, LATERAL (VALUES
        'ON = supports_turn_ids: true; OFF = the client falls back to content matching'),
   (13, 'turn guard + receipts (probe: receipts)',
        CASE WHEN f.pk_columns = ARRAY['client_turn_id', 'user_id'] THEN 'ON' ELSE 'OFF' END,
-       'ON = durable turn-status and the server-side single-active-turn guard')
+       'ON = durable turn-status and the server-side single-active-turn guard'),
+  (14, 'columns the backend reads and writes',
+       CASE WHEN f.missing_cols IS NULL THEN 'OK' ELSE 'MISSING' END,
+       CASE WHEN f.missing_cols IS NULL THEN ''
+            ELSE 'absent: ' || f.missing_cols
+                 || ' — the tables exist, so every append would throw instead' END)
 ) AS v(ord, check_name, status, detail);
 
 DO $$
