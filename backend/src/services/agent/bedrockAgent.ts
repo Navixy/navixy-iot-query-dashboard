@@ -20,6 +20,7 @@ import {
 import { CustomError } from '../../middleware/errorHandler.js';
 import { logger } from '../../utils/logger.js';
 import {
+  droppedQuestionsTelemetry,
   interpretAgentResponse,
   looksLikeMissedResult,
   type AgentIntent,
@@ -398,6 +399,17 @@ export const bedrockAgentService: AgentService = {
       const prose = await collectCompletion(res.completion, ctx.sessionId);
 
       intent = interpretAgentResponse(prose);
+
+      // Asked of the RAW prose deliberately: this diagnostic is "did the agent send a
+      // URL we failed to see", which is a question about the text exactly as it arrived.
+      const missedResult = looksLikeMissedResult(prose);
+
+      // DO-380. Every rule behind these two payloads — eligibility, the verdict, what the
+      // warn may carry — lives in the pure module and is covered there; this file only
+      // spends them. `info` is empty on turns that were never eligible, which is what
+      // keeps both sides of the rate holding real interview turns only.
+      const dropped = droppedQuestionsTelemetry(intent, prose);
+
       logger.info('[Agent] Agent turn classified', {
         sessionId: ctx.sessionId,
         classifiedAs: intent.type,
@@ -405,13 +417,25 @@ export const bedrockAgentService: AgentService = {
         promptLength: input.message.length,
         via: intent.via,
         ms: Date.now() - t0,
+        ...dropped.info,
       });
 
       if (intent.type === 'question') {
-        if (looksLikeMissedResult(prose)) {
+        if (missedResult) {
           logger.warn('[Agent] POSSIBLE_MISSED_RESULT', {
             sessionId: ctx.sessionId,
             rawPreview: prose.slice(0, 2000),
+          });
+        }
+        if (dropped.warn) {
+          // MEASUREMENTS ONLY — no agent text, deliberately, and unlike the warn directly
+          // above it (MR !67 review round 2). Whoever adds a preview here should read
+          // DroppedQuestionsTelemetry.warn first: this fires on roughly one question turn
+          // in twelve, and the text it would carry is the tenant's, recoverable from
+          // chat_messages on this same sessionId without copying it into CloudWatch.
+          logger.warn('[Agent] INTERVIEW_QUESTIONS_DROPPED', {
+            sessionId: ctx.sessionId,
+            ...dropped.warn,
           });
         }
         return { type: 'question', message: intent.message, result: null };
