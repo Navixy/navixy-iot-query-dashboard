@@ -1,6 +1,13 @@
 -- 004_receipt_key_per_user.sql — scope the turn receipt key to the user
 -- (DO-313 review !62 round 12, Important 3). Apply AFTER 003.
 --
+-- DO NOT HAND THIS FILE TO A DBA ON ITS OWN — give them apply_ai_chat.sql instead,
+-- which applies 002 + 003 + 004 in one idempotent transaction with preflight checks
+-- and verification. It carries this same re-key with one deliberate difference: since
+-- it has just created the table, "no primary key at all" is a defect it repairs
+-- rather than the not-yet-applied-003 case the early return below skips. This file
+-- stays as the record of what THIS step introduced and why.
+--
 -- Same out-of-band model as 002/003 (no migration runner in this repo — the backend probes
 -- information_schema per tenant and degrades when a piece is absent). Idempotent, so
 -- re-running is safe on every tenant.

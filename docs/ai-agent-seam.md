@@ -578,17 +578,24 @@ house convention, three pre-existing instances of it at `services/database.ts:52
 **Chat works on every tenant; the pieces below only turn on where they have been applied.** Nothing
 here can 500.
 
-Apply **in order**, out of band (DBA / deploy), against each tenant's `userDbUrl`:
+Apply out of band (DBA / deploy), against each tenant's `userDbUrl`:
 
 ```bash
-psql "$USER_DB_URL" -f backend/src/migrations/002_add_chat_tables.sql
-psql "$USER_DB_URL" -f backend/src/migrations/003_add_turn_receipts.sql
-psql "$USER_DB_URL" -f backend/src/migrations/004_receipt_key_per_user.sql
+psql "$USER_DB_URL" -f backend/src/migrations/apply_ai_chat.sql
 ```
 
-All three are idempotent, so re-running is safe on every tenant. The DDL itself is **not reproduced
-here** — the files are the source of truth and they carry their own headers explaining the
-out-of-band model.
+**Hand a DBA that script, not the three files below.** It carries `002` + `003` + `004` in one
+transaction, in order, and adds what those files leave to the operator: preflight checks, the upgrade
+path for a tenant carrying an earlier `002`, optional grants for the app role, and a verification
+that rolls back rather than commit a shape the backend treats as broken. Running it is not read-only
+— it creates tables, drops an index, issues grants, and arms the fail-closed 503 path; it is the
+report's own `SELECT`, lifted out without its `CREATE`, that inspects a tenant without touching it.
+Handed over on its own against a pre-`seq` tenant, `002`
+instead fails on its own trailing `CREATE INDEX … (session_id, seq)` — unwrapped and unverified.
+Everything is idempotent either way, so re-running is safe on every tenant.
+
+The DDL itself is **not reproduced here** — the files below stay as the record of what each step
+introduced and why:
 
 | File | What it buys | What degrades if it is skipped |
 |---|---|---|
@@ -616,9 +623,13 @@ automatic recovery until !65 round 9 — the same claim was corrected in §7's t
 `PROBE_TTL_MS` a round earlier, and this third copy was missed.)
 
 **Before applying `002`, confirm one thing:** that its `user_id` type matches the live
-`dashboard_studio_meta_data.users.id`. This repo contains no DDL for the existing schema. It was
-queried directly on 2026-07-20 and the answer was **`uuid`** (`gen_random_uuid()`), which is what
-`002` assumes — but re-check rather than trust this line, since the schema is not ours.
+`dashboard_studio_meta_data.users.id`. This repo contains no DDL for the existing schema, and the
+**`uuid`** that `002` assumes was **inferred from the `gen_random_uuid()` convention, never queried
+against a live tenant** — which is what `002_add_chat_tables.sql` and `apply_ai_chat.sql` both say
+at their `user_id` columns. (An earlier revision of this paragraph claimed it had been queried
+directly on 2026-07-20; that was the date of the Bedrock agent probes in §2, not of a schema
+check.) The apply script preflights the real type and refuses the entire run on a mismatch, so
+confirm it first — that refusal is the script doing its job, not a bug to work around.
 
 ---
 
