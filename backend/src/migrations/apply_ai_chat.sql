@@ -26,9 +26,10 @@
 -- HOW TO RUN
 --   psql "postgresql://USER:PASS@HOST:5432/DB" -f apply_ai_chat.sql
 --
---   The script sets ON_ERROR_STOP itself, so that is no longer a flag you can forget:
---   without it psql turns the COMMIT of an aborted transaction into a ROLLBACK, carries
---   on, and prints section 7's report all-OK with exit code 0.
+--   Run it under psql: the `\set ON_ERROR_STOP` below is the one line in this file that
+--   is not plain SQL, and another client reports it as a syntax error. Under psql it
+--   removes a flag you can forget — without it psql turns the COMMIT of an aborted
+--   transaction into a ROLLBACK and carries on past the failure.
 --
 --   To also grant the application role its DML in the same pass, either uncomment the
 --   SET line just below or run it in the SAME session before this script:
@@ -83,6 +84,16 @@ BEGIN
       'Schema dashboard_studio_meta_data not found. This is not a tenant settings database — check that you connected with the userDbUrl and not the iotDbUrl.';
   END IF;
 
+  -- Section 6 builds its check list as a pg_temp view, which needs TEMPORARY on the
+  -- DATABASE — not implied by owning the schema, and routinely revoked from PUBLIC.
+  -- Unchecked, every table, index, repair and GRANT below runs and then rolls back on
+  -- "permission denied to create temporary tables", which names nothing about chat.
+  IF NOT has_database_privilege(current_user, current_database(), 'TEMP') THEN
+    RAISE EXCEPTION
+      'TEMPORARY is not granted on database "%" to "%", and section 6 builds its check list as a pg_temp view. Run: GRANT TEMPORARY ON DATABASE "%" TO "%";',
+      current_database(), current_user, current_database(), current_user;
+  END IF;
+
   -- The re-run promise is only good for a role that owns what is already there: every
   -- repair below is an ALTER, and ALTER checks ownership. Fail here, with the remedy,
   -- rather than several statements into the script.
@@ -99,8 +110,11 @@ BEGIN
       not_owned, current_user;
   END IF;
 
-  SELECT format_type(a.atttypid, a.atttypmod) INTO users_id_type
-    FROM pg_attribute a
+  -- typbasetype unwraps a DOMAIN: format_type() reports the domain's own name, so an id
+  -- on a uuid domain would be refused below as the wrong type (data_type did not do that).
+  SELECT format_type(COALESCE(NULLIF(t.typbasetype, 0), a.atttypid), a.atttypmod)
+    INTO users_id_type
+    FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid
    WHERE a.attrelid = to_regclass('dashboard_studio_meta_data.users')
      AND a.attname  = 'id'
      AND a.attnum   > 0
@@ -219,6 +233,7 @@ CREATE TABLE IF NOT EXISTS dashboard_studio_meta_data.chat_messages (
 DO $$
 DECLARE
   old_seq text;
+  seq_type text;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_attribute
               WHERE attrelid = to_regclass('dashboard_studio_meta_data.chat_messages')
@@ -226,16 +241,31 @@ BEGIN
     RETURN;
   END IF;
 
+  -- A non-integer `seq` otherwise aborts the backfill below with "COALESCE types text
+  -- and integer cannot be matched", which names neither the column nor the cause.
+  SELECT format_type(atttypid, atttypmod) INTO seq_type FROM pg_attribute
+   WHERE attrelid = to_regclass('dashboard_studio_meta_data.chat_messages')
+     AND attname = 'seq' AND NOT attisdropped;
+  IF seq_type IS NOT NULL AND seq_type NOT IN ('smallint', 'integer', 'bigint') THEN
+    RAISE EXCEPTION 'chat_messages.seq already exists with type "%". It is the transcript order authority and has to be an integer type; drop or correct that column, then re-run.', seq_type;
+  END IF;
+
   RAISE NOTICE 'chat_messages.seq is missing or is not an identity column — adding and backfilling';
   ALTER TABLE dashboard_studio_meta_data.chat_messages ADD COLUMN IF NOT EXISTS seq BIGINT;
 
-  -- A hand-applied BIGSERIAL brings a sequence and a nextval() default with it. The
-  -- default makes ADD GENERATED fail outright, and leaving the sequence attached to the
-  -- column would make pg_get_serial_sequence ambiguous once the identity one exists
-  -- beside it — which is what section 5 grants and 2e repositions.
+  -- ADD GENERATED refuses a column that carries a default, so drop whatever is there
+  -- UNCONDITIONALLY. Not only BIGSERIAL leaves one: `ADD COLUMN seq BIGINT DEFAULT 0` is
+  -- as likely a hand repair, and a sequence attached without OWNED BY is invisible to
+  -- pg_get_serial_sequence — both survive a drop conditioned on that lookup and abort the
+  -- whole apply, forever. DROP DEFAULT on a column that has none is a no-op.
+  ALTER TABLE dashboard_studio_meta_data.chat_messages ALTER COLUMN seq DROP DEFAULT;
+
+  -- A hand-applied BIGSERIAL also leaves the sequence itself behind. Attached to the
+  -- column it would make pg_get_serial_sequence ambiguous once the identity one exists
+  -- beside it — which is what section 5 grants and 2e repositions. What resolves it is
+  -- the OWNED BY dependency, not the default, so it is still found here.
   old_seq := pg_get_serial_sequence('dashboard_studio_meta_data.chat_messages', 'seq');
   IF old_seq IS NOT NULL THEN
-    ALTER TABLE dashboard_studio_meta_data.chat_messages ALTER COLUMN seq DROP DEFAULT;
     EXECUTE format('DROP SEQUENCE %s', old_seq);
   END IF;
 
@@ -299,16 +329,29 @@ END $$;
 --     a tenant that was repaired by hand without it: `seq` carries no unique constraint,
 --     so a sequence sitting behind the data hands out numbers that already exist, in
 --     silence — which is the one guarantee seq is here to provide, and what
---     pruneOldTurns' newest-100 boundary walks. Reading the position costs one consumed
---     value; gaps are expected and harmless. It only ever moves the sequence FORWARD,
---     so a table the prune has trimmed (MAX(seq) far below the sequence) is left alone.
+--     pruneOldTurns' newest-100 boundary walks.
+--
+--     The position is READ from the sequence relation, never probed with nextval(). A
+--     probe consumes a value, and on the no-op path nothing here holds a lock that would
+--     stop a concurrent append taking the next one — so a setval computed from the probe
+--     rewinds over that append's number and hands it out a second time. Reading also
+--     means the advertised no-op re-run stops writing the sequence at all: this only
+--     ever moves it FORWARD, and only when it is genuinely behind the data, so a table
+--     the prune has trimmed (MAX(seq) far below the sequence) is left alone.
+--     (pg_sequence_last_value() is no use here — it returns NULL when is_called is
+--     false, which is exactly the state this block leaves behind.)
 DO $$
 DECLARE
   seq_name text := pg_get_serial_sequence('dashboard_studio_meta_data.chat_messages', 'seq');
   max_seq  bigint;
+  last_val bigint;
+  called   boolean;
 BEGIN
   SELECT COALESCE(MAX(seq), 0) INTO max_seq FROM dashboard_studio_meta_data.chat_messages;
-  PERFORM setval(seq_name, GREATEST(nextval(seq_name) + 1, max_seq + 1), false);
+  EXECUTE format('SELECT last_value, is_called FROM %s', seq_name) INTO last_val, called;
+  IF (CASE WHEN called THEN last_val + 1 ELSE last_val END) <= max_seq THEN
+    PERFORM setval(seq_name, max_seq + 1, false);
+  END IF;
 END $$;
 
 
@@ -515,6 +558,11 @@ WITH s AS (
             FROM pg_constraint c
             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
            WHERE c.conrelid = s.t_receipts AND c.contype = 'p')                        AS pk_columns,
+         -- Shape, not just name: a same-named index that is not unique satisfies
+         -- section 1's to_regclass guard, so nothing is created, and then ON CONFLICT
+         -- DO NOTHING quietly stops de-duplicating sessions instead of failing.
+         (SELECT x.indisunique AND pg_get_expr(x.indpred, x.indrelid) = '(is_deleted = false)'
+            FROM pg_index x WHERE x.indexrelid = s.i_active)                           AS active_shape,
          -- COALESCE to false per table, not around the aggregate: bool_and SKIPS nulls,
          -- so a missing table would otherwise let the remaining two vote it OK.
          (SELECT bool_and(COALESCE(has_table_privilege(s.app_role, t, p), false))
@@ -536,7 +584,10 @@ SELECT ord, check_name, status, detail FROM f, LATERAL (VALUES
   ( 5, 'chat_messages.client_turn_id column',
        CASE WHEN f.has_turn_id THEN 'OK' ELSE 'MISSING' END, ''),
   ( 6, 'chat_sessions_one_active_per_user index',
-       CASE WHEN f.i_active IS NOT NULL THEN 'OK' ELSE 'MISSING' END, ''),
+       CASE WHEN COALESCE(f.active_shape, false) THEN 'OK' ELSE 'MISSING' END,
+       CASE WHEN f.i_active IS NULL OR COALESCE(f.active_shape, false) THEN ''
+            ELSE 'an index of that name exists but is not UNIQUE (user_id) WHERE is_deleted = FALSE'
+                 || ' — drop it and re-run' END),
   ( 7, 'chat_messages_session_seq_idx index',
        CASE WHEN f.i_seq IS NOT NULL THEN 'OK' ELSE 'MISSING' END, ''),
   ( 8, 'chat_turn_receipts_user_updated_idx index',
@@ -579,14 +630,20 @@ BEGIN
   RAISE NOTICE 'verification passed — transcript, turn ids, receipts and grants are all present';
 END $$;
 
-COMMIT;
-
 
 -- ---------------------------------------------------------------------------
 -- 7. REPORT — what the application will now see
 -- ---------------------------------------------------------------------------
--- The rows section 6 just enforced, re-read after COMMIT.
+-- The rows section 6 just enforced, printed INSIDE the transaction that built the view.
+-- pg_temp belongs to one server connection, and a tenant userDbUrl usually points at a
+-- transaction-mode pooler, which is free to route the statement after COMMIT to a
+-- different backend: read there, this fails with `relation "pg_temp.chat_apply_report"
+-- does not exist` and ends a completely successful apply on a red error and exit 3.
+-- Reading it here cannot disagree with the verdict either — section 6 has already
+-- raised on any non-OK row, so these rows print only when every one of them passed.
 SELECT check_name, status, detail FROM pg_temp.chat_apply_report ORDER BY ord;
+
+COMMIT;
 
 -- AFTERWARDS, ON THE APPLICATION SIDE
 --   * The backend caches its schema probe per connection pool for 60 seconds, so

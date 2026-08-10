@@ -587,8 +587,10 @@ psql "$USER_DB_URL" -f backend/src/migrations/apply_ai_chat.sql
 **Hand a DBA that script, not the three files below.** It carries `002` + `003` + `004` in one
 transaction, in order, and adds what those files leave to the operator: preflight checks, the upgrade
 path for a tenant carrying an earlier `002`, optional grants for the app role, and a verification
-that rolls back rather than commit a shape the backend treats as broken. Its report doubles as a
-read-only health check for any tenant. Handed over on its own against a pre-`seq` tenant, `002`
+that rolls back rather than commit a shape the backend treats as broken. Running it is not read-only
+— it creates tables, drops an index, issues grants, and arms the fail-closed 503 path; it is the
+report's own `SELECT`, lifted out without its `CREATE`, that inspects a tenant without touching it.
+Handed over on its own against a pre-`seq` tenant, `002`
 instead fails on its own trailing `CREATE INDEX … (session_id, seq)` — unwrapped and unverified.
 Everything is idempotent either way, so re-running is safe on every tenant.
 
